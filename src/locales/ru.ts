@@ -22,6 +22,7 @@ export const ru: Record<MessageKey, Message> = {
   // ---- window chrome
   "window.minimize": "Свернуть",
   "window.close": "Закрыть",
+  "window.wordmark": "Показать девиз Clade",
 
   // ---- home
   "hero.subtitle": "Выбери профиль и войди в свой мир.",

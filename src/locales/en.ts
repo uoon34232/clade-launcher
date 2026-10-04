@@ -24,6 +24,7 @@ export const en = {
   // ---- window chrome
   "window.minimize": "Minimize",
   "window.close": "Close",
+  "window.wordmark": "Show the Clade tagline",
 
   // ---- home
   "hero.subtitle": "Choose a build and enter your world.",

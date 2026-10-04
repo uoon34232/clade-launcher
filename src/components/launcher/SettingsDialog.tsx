@@ -99,7 +99,15 @@ function SettingsBody({
           </p>
           <CatEgg />
         </div>
-        <button type="button" className={BUTTON_SOFT} disabled={confirming} onClick={onDone}>
+        <button
+          type="button"
+          className={BUTTON_SOFT}
+          disabled={confirming}
+          onClick={() => {
+            playSound("click");
+            onDone();
+          }}
+        >
           {t("common.done")}
         </button>
       </div>

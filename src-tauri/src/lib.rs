@@ -36,6 +36,7 @@ pub mod ui_settings;
 pub mod vault;
 pub mod versions;
 pub mod webview;
+pub mod window_fit;
 
 use portable::root::LAYOUT_VERSION;
 use portable::{PortableRoot, RootLock};
@@ -210,6 +211,16 @@ pub fn run() {
                     .state::<launch_cmd::LaunchState>()
                     .set_exit_when_idle(false);
             }
+            // Clade is a windowed launcher: if the window ever ends up maximized or fullscreen
+            // (a shortcut, a snap gesture), put it back to a normal window.
+            if let tauri::WindowEvent::Resized(_) = event {
+                if window.is_fullscreen().unwrap_or(false) {
+                    let _ = window.set_fullscreen(false);
+                }
+                if window.is_maximized().unwrap_or(false) {
+                    let _ = window.unmaximize();
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let launch = window.app_handle().state::<launch_cmd::LaunchState>();
                 if launch.has_live_game() {
@@ -273,9 +284,28 @@ pub fn run() {
                 .first()
                 .cloned()
                 .ok_or("tauri.conf.json defines no window")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+            let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
-                .build()?;
+                .maximizable(false)
+                .fullscreen(false);
+            // Size and place the window inside the usable area (taskbar excluded) of the monitor
+            // in use; the compact default stays whenever it fits.
+            if let Some(m) = active_monitor(app.handle()) {
+                let wa = m.work_area();
+                let scale = m.scale_factor();
+                let p = window_fit::fit(window_fit::WorkArea {
+                    x: wa.position.x,
+                    y: wa.position.y,
+                    width: wa.size.width,
+                    height: wa.size.height,
+                    scale,
+                });
+                builder = builder
+                    .inner_size(p.width, p.height)
+                    .min_inner_size(p.min_width, p.min_height)
+                    .position(p.x / scale, p.y / scale);
+            }
+            builder.build()?;
             Ok(())
         })
         .run(tauri::generate_context!());
@@ -283,4 +313,12 @@ pub fn run() {
         tracing::error!(error = %e, "the application failed to run");
         startup::fail(StartupMessage::WindowFailed, Some(&root_for_errors), None);
     }
+}
+
+/// The monitor in use: the one under the mouse pointer, else the primary one.
+fn active_monitor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
+    app.cursor_position()
+        .ok()
+        .and_then(|c| app.monitor_from_point(c.x, c.y).ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())
 }

@@ -64,31 +64,34 @@ export function OnboardingDialog({ open, onExit }: Props) {
           )}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-3">
-          {step < 2 ? (
-            <>
-              <button type="button" className={BUTTON_QUIET} onClick={() => exit("skip")}>
-                {t("onboarding.skip")}
-              </button>
-              <button
-                type="button"
-                autoFocus
-                className={BUTTON_PRIMARY}
-                onClick={() => go(step + 1)}
-              >
-                {t("onboarding.continue")}
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                autoFocus
-                className={BUTTON_PRIMARY}
-                onClick={() => exit("finish")}
-              >
-                {t("onboarding.finish")}
-              </button>
-            </>
+          {/* Distinct keys: Skip, Continue and Finish are different actions, so React must not reuse
+              one button's DOM node for another (it would animate the old colours into the new). */}
+          {step < 2 && (
+            <button key="skip" type="button" className={BUTTON_QUIET} onClick={() => exit("skip")}>
+              {t("onboarding.skip")}
+            </button>
+          )}
+          {step < 2 && (
+            <button
+              key="continue"
+              type="button"
+              autoFocus
+              className={BUTTON_PRIMARY}
+              onClick={() => go(step + 1)}
+            >
+              {t("onboarding.continue")}
+            </button>
+          )}
+          {step === 2 && (
+            <button
+              key="finish"
+              type="button"
+              autoFocus
+              className={BUTTON_PRIMARY}
+              onClick={() => exit("finish")}
+            >
+              {t("onboarding.finish")}
+            </button>
           )}
         </div>
       </div>
