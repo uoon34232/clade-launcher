@@ -86,6 +86,15 @@ pub fn auto_memory_mb(total_mb: Option<u64>) -> u32 {
     (mb / 256 * 256) as u32
 }
 
+/// The range (MiB) a person may choose for the game's memory on this machine: at least 1 GiB, at
+/// most three quarters of the RAM (never above 32 GiB), in steps of 256 MiB. Unknown RAM allows
+/// up to 16 GiB.
+pub fn memory_limits_mb(total_mb: Option<u64>) -> (u32, u32) {
+    const MIN: u32 = 1024;
+    let ceiling = total_mb.map_or(16_384, |t| t * 3 / 4).min(32_768) as u32;
+    (MIN, (ceiling / 256 * 256).max(MIN))
+}
+
 /// The memory to use: the profile's own setting (kept within sane bounds) or the automatic one.
 pub fn memory_for(requested: Option<u32>, total_mb: Option<u64>) -> u32 {
     match requested {
@@ -95,6 +104,16 @@ pub fn memory_for(requested: Option<u32>, total_mb: Option<u64>) -> u32 {
         }
         None => auto_memory_mb(total_mb),
     }
+}
+
+/// The memory for a launch: the profile's own setting, else the global one from Settings, else the
+/// automatic policy; always kept within sane bounds.
+pub fn effective_memory_mb(
+    profile: Option<u32>,
+    global: Option<u32>,
+    total_mb: Option<u64>,
+) -> u32 {
+    memory_for(profile.or(global), total_mb)
 }
 
 /// Bytes needed beyond the download itself: staging, extraction and a safety margin.
@@ -151,6 +170,39 @@ mod tests {
             "at most three quarters of the machine"
         );
         assert_eq!(memory_for(Some(60_000), None), 32_768);
+    }
+
+    #[test]
+    fn memory_limits_follow_the_machine_in_256_mib_steps() {
+        assert_eq!(memory_limits_mb(Some(16_384)), (1024, 12_288));
+        assert_eq!(memory_limits_mb(Some(8_192)), (1024, 6_144));
+        assert_eq!(memory_limits_mb(Some(2_048)), (1024, 1_536));
+        assert_eq!(
+            memory_limits_mb(Some(1_024)),
+            (1024, 1_024),
+            "never below the minimum"
+        );
+        assert_eq!(
+            memory_limits_mb(Some(262_144)).1,
+            32_768,
+            "never above 32 GiB"
+        );
+        assert_eq!(memory_limits_mb(None), (1024, 16_384));
+    }
+
+    #[test]
+    fn a_profile_setting_beats_the_global_one_which_beats_automatic() {
+        assert_eq!(effective_memory_mb(None, None, Some(16_384)), 4096);
+        assert_eq!(effective_memory_mb(None, Some(8192), Some(16_384)), 8192);
+        assert_eq!(
+            effective_memory_mb(Some(3072), Some(8192), Some(16_384)),
+            3072
+        );
+        assert_eq!(
+            effective_memory_mb(None, Some(30_000), Some(8_192)),
+            6_144,
+            "a global value too big for this machine is still capped"
+        );
     }
 
     #[test]

@@ -16,9 +16,16 @@ import {
   loadUiSettings,
   onUiSettingsChanged,
   parseUiSettings,
+  completeOnboarding,
+  getUiSettings,
+  resetUiSettings,
+  saveBehavior,
   saveLanguage,
   saveLastPhrase,
+  saveMemory,
+  saveReducedMotion,
   saveSoundSettings,
+  subscribeUiSettings,
 } from "./uiSettings";
 
 const asTauri = () => {
@@ -45,12 +52,50 @@ describe("parseUiSettings", () => {
     expect(
       parseUiSettings({ soundEnabled: false, soundVolume: 0.25, lastPhrase: "welcome-back" }),
     ).toEqual({
+      ...DEFAULT_UI_SETTINGS,
       soundEnabled: false,
       soundVolume: 0.25,
       lastPhrase: "welcome-back",
-      language: null,
-      systemLocale: null,
     });
+  });
+
+  it("reads the Settings fields and repairs bad ones to safe values", () => {
+    expect(
+      parseUiSettings({
+        reducedMotion: "on",
+        onboardingDone: false,
+        memoryMb: 6144,
+        memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
+        onLaunch: "hide",
+        onExit: "stay_hidden",
+        version: "0.1.0",
+      }),
+    ).toMatchObject({
+      reducedMotion: "on",
+      onboardingDone: false,
+      memoryMb: 6144,
+      memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
+      onLaunch: "hide",
+      onExit: "stay_hidden",
+      version: "0.1.0",
+    });
+    const bad = parseUiSettings({
+      reducedMotion: "sometimes",
+      onboardingDone: "yes",
+      memoryMb: -4,
+      memory: { min: 5000, max: 10, auto: 99999, total: "lots" },
+      onLaunch: "explode",
+      onExit: 7,
+      version: "../../x",
+    });
+    expect(bad.reducedMotion).toBe("system");
+    expect(bad.onboardingDone).toBe(true); // an unreadable answer never traps anyone in the introduction
+    expect(bad.memoryMb).toBeNull();
+    expect(bad.memory.max).toBeGreaterThanOrEqual(bad.memory.min);
+    expect(bad.memory.auto).toBeLessThanOrEqual(bad.memory.max);
+    expect(bad.memory.total).toBeNull();
+    expect([bad.onLaunch, bad.onExit]).toEqual(["keep_open", "show"]);
+    expect(bad.version).toBe("");
   });
 
   it("accepts only the two shipped languages and a well-formed Windows locale name", () => {
@@ -92,6 +137,7 @@ describe("inside the launcher (Tauri)", () => {
       systemLocale: "en-US",
     });
     expect(await loadUiSettings()).toEqual({
+      ...DEFAULT_UI_SETTINGS,
       soundEnabled: false,
       soundVolume: 0.7,
       lastPhrase: "take-your-time",
@@ -126,6 +172,25 @@ describe("inside the launcher (Tauri)", () => {
     expect(await saveLanguage("en")).toBe(false);
   });
 
+  it("sends each Settings change through its own command and reports a refusal", async () => {
+    expect(await saveReducedMotion("on")).toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledWith("set_reduced_motion", { mode: "on" });
+    expect(await saveMemory(4096)).toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledWith("set_memory", { mb: 4096 });
+    expect(await saveMemory(null)).toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledWith("set_memory", { mb: null });
+    await saveBehavior({ onLaunch: "hide" });
+    expect(invoke).toHaveBeenCalledWith("set_behavior", { onLaunch: "hide", onExit: undefined });
+    await completeOnboarding();
+    expect(invoke).toHaveBeenCalledWith("complete_onboarding", {});
+    await resetUiSettings();
+    expect(invoke).toHaveBeenCalledWith("reset_settings", {});
+
+    const refused = { code: "invalid_memory", params: { min: 1024, max: 4096 } };
+    invoke.mockRejectedValueOnce(refused);
+    expect(await saveMemory(99999)).toEqual({ ok: false, error: refused });
+  });
+
   it("never throws when a save fails", async () => {
     invoke.mockRejectedValue(new Error("read-only stick"));
     expect(() => saveSoundSettings({ volume: 0.1 })).not.toThrow();
@@ -144,9 +209,7 @@ describe("inside the launcher (Tauri)", () => {
     const off = await onUiSettingsChanged((s) => seen.push(s));
     expect(listen.mock.calls[0][0]).toBe(SETTINGS_CHANGED_EVENT);
     handler({ payload: { soundEnabled: false, soundVolume: 4, lastPhrase: null } });
-    expect(seen).toEqual([
-      { soundEnabled: false, soundVolume: 1, lastPhrase: null, language: null, systemLocale: null },
-    ]);
+    expect(seen).toEqual([{ ...DEFAULT_UI_SETTINGS, soundEnabled: false, soundVolume: 1 }]);
     off();
     expect(unlisten).toHaveBeenCalled();
   });
@@ -170,5 +233,35 @@ describe("outside the launcher (plain browser, tests)", () => {
     expect(set).not.toHaveBeenCalled();
     const off = await onUiSettingsChanged(() => {});
     expect(off()).toBeUndefined();
+  });
+});
+
+describe("the live settings copy", () => {
+  it("keeps session-only values and tells subscribers, with no backend and no browser storage", async () => {
+    const seen: number[] = [];
+    const off = subscribeUiSettings(() => seen.push(getUiSettings().memoryMb ?? -1));
+    expect(await saveMemory(8192)).toEqual({ ok: true });
+    expect(await saveReducedMotion("off")).toEqual({ ok: true });
+    await saveBehavior({ onLaunch: "hide", onExit: "stay_hidden" });
+    await completeOnboarding();
+    expect(getUiSettings()).toMatchObject({
+      memoryMb: 8192,
+      reducedMotion: "off",
+      onLaunch: "hide",
+      onExit: "stay_hidden",
+      onboardingDone: true,
+    });
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    // a reset puts the preferences back, but never the introduction
+    await resetUiSettings();
+    expect(getUiSettings()).toMatchObject({
+      memoryMb: null,
+      reducedMotion: "system",
+      onLaunch: "keep_open",
+      onExit: "show",
+      onboardingDone: true,
+    });
+    off();
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

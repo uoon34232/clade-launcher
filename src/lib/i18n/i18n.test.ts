@@ -327,6 +327,9 @@ describe("structured backend errors are worded in the current language", () => {
         "unsupported_language",
         "unknown_account",
         "sign_in_unavailable",
+        "unsupported_value",
+        "invalid_memory",
+        "diagnostics_failed",
       ],
       ...["passphrase_mismatch", "passphrase_too_short", "vault_exists", "vault_unreadable"],
     ]);
@@ -341,6 +344,15 @@ describe("structured backend errors are worded in the current language", () => {
       "invalid_name",
     ];
     expect(wanted("profile", profileCodes)).toEqual([]);
+    expect(
+      wanted("settings", [
+        "unsupported_value",
+        "invalid_memory",
+        "diagnostics_failed",
+        "open_failed",
+        "storage",
+      ]),
+    ).toEqual([]);
     expect(
       wanted("vault", [
         "passphrase_mismatch",

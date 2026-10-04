@@ -15,6 +15,8 @@ interface Props<T extends string> {
   label: string;
   /** `track`: pills on a soft track (profile type, loaders). `plain`: quiet text toggles (filters). */
   variant?: "track" | "plain";
+  /** Slightly smaller segments, for dense groups such as Settings. */
+  compact?: boolean;
   className?: string;
 }
 
@@ -28,6 +30,7 @@ export function Segmented<T extends string>({
   options,
   label,
   variant = "track",
+  compact = false,
   className,
 }: Props<T>) {
   const refs = useRef(new Map<T, HTMLButtonElement>());
@@ -89,7 +92,9 @@ export function Segmented<T extends string>({
               "ease-out-soft focus-visible:ring-clay/45 cursor-default transition-[background-color,color,box-shadow,opacity] duration-200 outline-none focus-visible:ring-2 disabled:opacity-40",
               variant === "track"
                 ? cn(
-                    "h-9 rounded-[0.7rem] px-3.5 text-[0.875rem] font-medium",
+                    compact
+                      ? "h-8 rounded-[0.65rem] px-3 text-[0.8125rem] font-medium"
+                      : "h-9 rounded-[0.7rem] px-3.5 text-[0.875rem] font-medium",
                     selected
                       ? "bg-card text-graphite shadow-[0_1px_2px_rgb(43_38_34/0.12)]"
                       : "text-ink-muted hover:text-graphite",

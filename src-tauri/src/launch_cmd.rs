@@ -46,6 +46,7 @@ use crate::portable::PortableRoot;
 use crate::prepare::check_installed;
 use crate::profiles::now_unix;
 use crate::runtimes::{resolve_java, ManagedJava};
+use crate::ui_settings::SettingsState;
 use crate::vault::Vault;
 
 pub const EVENT: &str = "launch-state";
@@ -216,6 +217,8 @@ pub struct LaunchEnv<'a> {
     pub now: i64,
     pub sys: &'a SystemEnv,
     pub total_memory_mb: Option<u64>,
+    /// The global game memory chosen in Settings (`None` = automatic). A profile's own setting wins.
+    pub default_memory_mb: Option<u32>,
 }
 
 /// Everything that must be true before the game may start, ending in the ready-to-run command.
@@ -307,7 +310,11 @@ pub async fn plan_launch<T: Transport>(
             name: meta.username.clone(),
             access_token: token,
         },
-        memory_mb: crate::system::memory_for(inst.memory_mb, total_memory_mb),
+        memory_mb: crate::system::effective_memory_mb(
+            inst.memory_mb,
+            env.default_memory_mb,
+            total_memory_mb,
+        ),
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,
@@ -422,6 +429,7 @@ async fn start(
             now: now_unix(),
             sys: &SystemEnv::from_process(),
             total_memory_mb: crate::system::total_memory_mb(),
+            default_memory_mb: app.state::<SettingsState>().default_memory_mb(),
         },
     )
     .await?;
@@ -455,6 +463,14 @@ async fn start(
         }
     });
 
+    // "When Minecraft starts: Hide Clade" (Settings). The process is already running, so hiding
+    // the window cannot get in the game's way, and closing/starting Clade again still works.
+    if app.state::<SettingsState>().behavior().hides_on_launch() {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+        }
+    }
+
     let header = planned.command.redacted(&state.root);
     let secrets = planned.command.secrets().to_vec();
     let (app, id, root) = (app.clone(), id.clone(), state.root.clone());
@@ -487,9 +503,35 @@ async fn start(
         // Clade was closed while the game ran: now that it is over, finish quitting.
         if ls.exit_when_idle() && !ls.has_live_game() {
             app.exit(0);
+        } else if !ls.has_live_game() {
+            window_after_game(&app);
         }
     });
     Ok(())
+}
+
+/// "When Minecraft closes" (Settings): bring Clade's window back, or let a window that was hidden
+/// when the game started stay out of sight, in which case Clade quietly ends with the game (it has
+/// no tray and runs no background service; starting it again brings it up). A window that is
+/// already on screen is left alone.
+fn window_after_game(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    if w.is_visible().unwrap_or(true) {
+        return;
+    }
+    if app
+        .state::<SettingsState>()
+        .behavior()
+        .stays_hidden_on_exit()
+    {
+        app.exit(0);
+    } else {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

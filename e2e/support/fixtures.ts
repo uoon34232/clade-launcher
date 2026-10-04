@@ -27,6 +27,14 @@ export interface FixtureUiSettings {
   lastPhrase: string | null;
   language: "en" | "ru" | null;
   systemLocale: string | null;
+  reducedMotion: "system" | "on" | "off";
+  onboardingDone: boolean;
+  memoryMb: number | null;
+  /** What the (synthetic) computer allows, in MiB. */
+  memory: { min: number; max: number; auto: number; total: number | null };
+  onLaunch: "keep_open" | "hide";
+  onExit: "show" | "stay_hidden";
+  version: string;
 }
 
 export interface FixtureLoaderOption {
@@ -188,6 +196,14 @@ export const DEFAULT_CONFIG: BackendConfig = {
     // Explicit English, so the run does not depend on the machine's language.
     language: "en",
     systemLocale: "en-US",
+    reducedMotion: "system",
+    // Most tests are not about the introduction, so it counts as already seen; its own tests turn it on.
+    onboardingDone: true,
+    memoryMb: null,
+    memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
+    onLaunch: "keep_open",
+    onExit: "show",
+    version: "0.1.0",
   },
   catalog: CATALOG,
   loaders: LOADERS,

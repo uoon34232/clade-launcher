@@ -112,6 +112,7 @@ async fn plan(
             now: NOW,
             sys: &sys,
             total_memory_mb: Some(16_384),
+            default_memory_mb: None,
         },
     )
     .await

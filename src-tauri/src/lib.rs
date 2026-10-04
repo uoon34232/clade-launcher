@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod accounts_api;
 pub mod auth;
 pub mod coded_error;
+pub mod diagnostics;
 pub mod download;
 pub mod download_policy;
 pub mod game_session;
@@ -29,6 +30,7 @@ pub mod safe_archive;
 pub mod settings;
 pub mod startup;
 pub mod startup_text;
+pub mod support_cmd;
 pub mod system;
 pub mod ui_settings;
 pub mod vault;
@@ -42,11 +44,11 @@ use startup_text::StartupMessage;
 use tauri::Manager;
 
 /// Held for the life of the process. The lock is released when the app exits.
-struct AppState {
-    root: PortableRoot,
+pub struct AppState {
+    pub(crate) root: PortableRoot,
     _lock: RootLock,
-    webview: webview::RuntimeSource,
-    webview_version: String,
+    pub(crate) webview: webview::RuntimeSource,
+    pub(crate) webview_version: String,
 }
 
 #[derive(Serialize)]
@@ -231,6 +233,14 @@ pub fn run() {
             ui_settings::set_sound_settings,
             ui_settings::set_last_phrase,
             ui_settings::set_language,
+            ui_settings::set_reduced_motion,
+            ui_settings::set_memory,
+            ui_settings::set_behavior,
+            ui_settings::complete_onboarding,
+            ui_settings::reset_settings,
+            support_cmd::open_clade_folder,
+            support_cmd::open_logs_folder,
+            support_cmd::export_diagnostics,
             profiles::list_profiles,
             profiles::select_profile,
             profiles::get_version_catalog,

@@ -8,7 +8,7 @@ import {
 } from "@/lib/accounts/api";
 import { launchApi, LaunchRefused, type LaunchApi, type RunState } from "@/lib/launch/api";
 import { profilesApi, type ProfilesApi, type ProfilesSnapshot } from "@/lib/profiles/api";
-import type { UiSettings } from "@/lib/settings/uiSettings";
+import { completeOnboarding, type UiSettings } from "@/lib/settings/uiSettings";
 import { playSound } from "@/lib/sound/soundService";
 import { AnimatedBackground } from "./AnimatedBackground";
 import { AccountDialog } from "./AccountDialog";
@@ -16,6 +16,7 @@ import { CreateProfileDialog } from "./CreateProfileDialog";
 import { Hero } from "./Hero";
 import { LaunchProblemDialog, type Problem } from "./LaunchProblemDialog";
 import { LauncherDock } from "./LauncherDock";
+import { OnboardingDialog, type OnboardingExit } from "./OnboardingDialog";
 import type { PlayState } from "./PlayButton";
 import { PrepareDialog } from "./PrepareDialog";
 import { SettingsDialog } from "./SettingsDialog";
@@ -53,6 +54,8 @@ export function LauncherHome({
   const [surface, setSurface] = useState<Surface>({ kind: "none" });
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const [problem, setProblem] = useState<Problem | null>(null);
+  // The first-run introduction: only when the backend says it was never finished or skipped.
+  const [introduction, setIntroduction] = useState(initialUi?.onboardingDone === false);
 
   const refresh = useCallback(() => {
     api.list().then(setSnapshot, () => setSnapshot(EMPTY)); // no backend, no profiles: nothing is invented
@@ -112,6 +115,17 @@ export function LauncherHome({
   };
 
   const close = () => setSurface({ kind: "none" });
+
+  // However the introduction ends, it is recorded as seen (permanently); the last page can lead
+  // straight into creating a profile or adding an account, which are the normal dialogs.
+  const endIntroduction = (how: OnboardingExit) => {
+    setIntroduction(false);
+    void completeOnboarding();
+    // let the introduction finish closing before the next dialog takes focus
+    if (how === "create-profile")
+      window.setTimeout(() => setSurface({ kind: "create-profile" }), 0);
+    if (how === "add-account") window.setTimeout(addAccount, 0);
+  };
   const selectedProfile = snapshot.profiles.find((p) => p.id === snapshot.selected) ?? null;
 
   // Starts the game. The backend does every check; a refusal comes back as a reason, never a guess.
@@ -199,6 +213,7 @@ export function LauncherHome({
           playState={playState}
           onOpenSettings={() => setSurface({ kind: "settings" })}
         />
+        <OnboardingDialog open={introduction} onExit={endIntroduction} />
         <CreateProfileDialog
           open={surface.kind === "create-profile"}
           onOpenChange={(o) => !o && close()}

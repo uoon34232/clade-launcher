@@ -3,12 +3,12 @@
 // logs and is never shown. A code with no wording falls back to the domain's general message, so
 // an unexpected failure still reads as a plain sentence.
 
-import { formatBytes } from "@/features/launcher/profileUi";
+import { formatBytes, formatGigabytes } from "@/features/launcher/profileUi";
 import { hasMessage, tDynamic, type Params } from "./index";
 
 /** Which part of the launcher an error came from; the same code can mean different things. */
 export type ErrorDomain =
-  "launch" | "prepare" | "signIn" | "vault" | "account" | "profile" | "catalog";
+  "launch" | "prepare" | "signIn" | "vault" | "account" | "profile" | "catalog" | "settings";
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -30,6 +30,11 @@ function templateParams(domain: ErrorDomain, raw: Record<string, unknown>): Para
   if (domain === "prepare") {
     if (typeof raw.requiredBytes === "number") out.required = formatBytes(raw.requiredBytes);
     if (typeof raw.availableBytes === "number") out.available = formatBytes(raw.availableBytes);
+  }
+  if (domain === "settings") {
+    // memory limits arrive in MiB
+    if (typeof raw.min === "number") out.min = formatGigabytes(raw.min);
+    if (typeof raw.max === "number") out.max = formatGigabytes(raw.max);
   }
   return out;
 }

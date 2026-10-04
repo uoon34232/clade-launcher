@@ -9,17 +9,13 @@ import {
 import { useT } from "@/lib/i18n";
 import { emitBurst } from "@/lib/fx/burst";
 import { formatPlaytime } from "@/features/launcher/profileUi";
+import { prefersReducedMotion } from "@/lib/motion";
 import { saveLastPhrase } from "@/lib/settings/uiSettings";
 import { playSound } from "@/lib/sound/soundService";
 
 const OUT_MS = 170;
 const IN_MS = 230; // OUT + IN = 400 ms
 const REDUCED_FADE_MS = 100;
-
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 interface HeroProps {
   /** Facts for future contextual messages (last instance, playtime, time since last session). */
