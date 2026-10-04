@@ -29,6 +29,9 @@ coverage/
 *.sw?
 .claude/settings.local.json
 
+# ---- Local AI-assistant context (kept on disk for Claude Code, not published)
+CLAUDE.md
+
 # ---- Local-only working files (screenshots, capture scripts, scratch)
 shots/
 .playwright-mcp/
