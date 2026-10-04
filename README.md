@@ -6,6 +6,8 @@
 
 **Simple. Portable. Yours.**
 
+[![CI](https://github.com/uoon34232/clade-launcher/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/uoon34232/clade-launcher/actions/workflows/ci.yml)
+
 Clade is a clean, portable launcher for **Minecraft: Java Edition** on Windows. It is about Minecraft itself: installing versions, keeping separate profiles and starting the game. It has no store, no feeds and no built-in content marketplace.
 
 <p align="center"><img src="docs/media/hero-interaction.gif" alt="The Clade home screen: clicking the headline shows a different phrase" width="720"></p>
