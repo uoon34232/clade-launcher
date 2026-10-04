@@ -25,6 +25,7 @@ This document explains how Clade Launcher is built and which rules its code foll
 17. [Automated guards and tests](#17-automated-guards-and-tests)
 18. [Release packaging](#18-release-packaging)
 19. [Known limitations and current status](#19-known-limitations-and-current-status)
+20. [Settings, first-run introduction and diagnostics](#20-settings-first-run-introduction-and-diagnostics)
 
 ## 1. Overview
 
@@ -335,3 +336,71 @@ The application icon is `src-tauri/icons/icon.ico`. `build.rs` tells Cargo to wa
 - The filesystem must be NTFS or exFAT; FAT32 cannot hold files over 4 GB and has no atomic-rename guarantee.
 - The launcher is not fully hermetic: Java may touch the registry for its preferences, and mods can write wherever they choose.
 - Self-update and skin/cape management are not implemented yet.
+
+## 20. Settings, first-run introduction and diagnostics
+
+Settings are deliberately short: Interface (language, sound effects, volume, reduced motion), Minecraft (game memory), Behavior (what the window does around a game) and Support (open the Clade folder, open the logs, export diagnostics, reset settings). There are no theme, Java-path, JVM-argument, network, update or telemetry options.
+
+### The settings file
+
+Everything is stored by the Rust settings service in `data/settings.json` and nowhere else (no WebView storage). Every field has a safe default, old files load unchanged, damaged values are repaired rather than fatal, and the file is written atomically with a stable field order.
+
+```json
+{
+  "layout_version": 1,
+  "last_instance": "survival",
+  "max_concurrent_downloads": 8,
+  "ui": {
+    "sound": { "enabled": true, "volume": 0.5 },
+    "last_phrase": "welcome-back",
+    "language": "ru",
+    "reduced_motion": "system",
+    "onboarding_done": true
+  },
+  "minecraft": { "memory_mb": null },
+  "behavior": { "on_launch": "keep_open", "on_exit": "show" }
+}
+```
+
+| Field | Values | Default | Notes |
+|---|---|---|---|
+| `ui.reduced_motion` | `system`, `on`, `off` | `system` | `system` follows the Windows preference; anything else is repaired to `system`. |
+| `ui.onboarding_done` | `true`, `false` | `false` | Set once the first-run introduction is finished or skipped. It lives in the portable folder, so moving the folder keeps it. |
+| `minecraft.memory_mb` | a number or `null` | `null` (automatic) | The global game memory in MiB. Chosen values must lie between 1 GiB and three quarters of the RAM (at most 32 GiB) in 256 MiB steps; a value outside that is refused by the command and clamped when read from a hand-edited file. |
+| `behavior.on_launch` | `keep_open`, `hide` | `keep_open` | Unknown values are repaired. |
+| `behavior.on_exit` | `show`, `stay_hidden` | `show` | Unknown values are repaired. |
+
+The frontend reads them once at start (`get_ui_settings`, which also reports the memory limits for this computer, what "Automatic" means here and the application version from `Cargo.toml`) and writes through small commands: `set_sound_settings`, `set_language`, `set_reduced_motion`, `set_memory`, `set_behavior`, `complete_onboarding` and `reset_settings`. Each change is announced on the `ui-settings-changed` event, so the UI stays in sync. Refusals are coded errors (`invalid_memory` with the allowed range, `unsupported_value`, `storage`) that the interface words in the current language.
+
+**Reset settings** puts the preferences above back to their defaults (sound, language, reduced motion, memory, behavior). It deliberately keeps `ui.onboarding_done`, the selected profile, the last headline and the download concurrency, and it cannot touch profiles, accounts, the vault, Minecraft files or playtime, because none of them is stored in this file.
+
+### Reduced motion
+
+One module (`src/lib/motion.ts`) decides whether decorative motion is reduced. The Settings choice wins; `system` defers to the operating system. It sets `data-motion` (`reduce`, `full` or `system`) on the root element, which the stylesheet follows, and scripted animations ask `prefersReducedMotion()`. Necessary state changes and focus feedback are kept; ambient background motion, entrance animations, burst particles and long fades are removed or shortened.
+
+### Game memory
+
+The memory used for a launch is the profile's own setting if it has one, else the global value from Settings, else the automatic policy (a quarter of the RAM, between 2 and 8 GiB, never more than half the machine). The result is always kept within sane bounds.
+
+### Window behavior around a game
+
+After the game process has started successfully, **Hide Clade** hides the window. When the last running game ends, **Show Clade again** shows and focuses a hidden window; **Stay hidden** leaves it hidden, and because Clade has no tray icon or background service, a hidden Clade then quietly ends together with the game (starting Clade again brings it up). A window that is already visible is left alone. The existing safe behavior when the window is closed during a game is unchanged: the game keeps running, and Clade exits when it ends.
+
+### First-run introduction
+
+When `ui.onboarding_done` is `false`, a three-page introduction opens in the shared modal (Welcome, Portable by design, Ready to start). It needs no network, no account and no profile. **Skip** and **Finish** call `complete_onboarding`, which marks it done permanently; Escape counts as Skip; the last page can also lead straight into the normal Create profile or Add account dialogs (which keep their own behavior, including the approval-pending message). It follows the normal language rules. If the backend cannot be read, the introduction is treated as seen so it can never trap anyone.
+
+### Diagnostics export
+
+**Export diagnostics** creates `logs/diagnostics/Clade-Diagnostics-<UTC date>-<time>.zip` inside the Clade folder (the newest five are kept) and shows the file in its folder. The archive is built from a fixed allowlist and nothing else:
+
+| Entry | Content |
+|---|---|
+| `launcher-version.txt` | Clade version, folder layout version, export time |
+| `system-info.txt` | OS and architecture, Windows display language, RAM, free space on the Clade drive, WebView2 source and version |
+| `profile-summary.txt` | per profile: id, Minecraft version, vanilla or loader, set-up state, memory override, number of extra JVM arguments (never their values) |
+| `settings-redacted.json` | the settings file |
+| `logs/clade.log` | the end of the launcher log (at most 512 KiB) |
+| `logs/minecraft-latest.log` | the end of Minecraft's `latest.log` for the profile played last (at most 512 KiB) |
+
+It never reads the vault, account files, tokens, worlds, mods, resource packs or any file the frontend names (the frontend names nothing). Text from logs is redacted before it is written: the Clade folder becomes `<clade>`, the Windows user folder becomes `<user>`, e-mail addresses become `<email>`, and values after `access_token`, `refresh_token`, `password`, `passphrase`, `session`, `Authorization`/`Bearer`, `--accessToken` and similar keys, JWT-shaped strings and Microsoft refresh tokens become `<redacted>`. The unit tests check the allowlist, that planted secrets and paths never reach the ZIP, and that a failure (for example an unwritable folder) is reported as the stable code `diagnostics_failed`.

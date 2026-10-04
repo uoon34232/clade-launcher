@@ -7,6 +7,7 @@ const WIDTH = {
   sm: "sm:max-w-[26rem]",
   md: "sm:max-w-[30rem]",
   lg: "sm:max-w-[40rem]",
+  xl: "sm:max-w-[44rem]",
 } as const;
 
 interface Props {
@@ -56,7 +57,8 @@ export function Modal({
         showCloseButton={false}
         initialFocus={initialFocus}
         className={cn(
-          "bg-card text-graphite ring-graphite/10 data-open:slide-in-from-bottom-2 data-closed:slide-out-to-bottom-2 max-h-[calc(100vh-2rem)] max-w-[calc(100%-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-[1.75rem] p-7 shadow-[0_40px_90px_-30px_rgb(43_38_34/0.55)] ring-1 duration-200",
+          "bg-card text-graphite ring-graphite/10 data-open:slide-in-from-bottom-2 data-closed:slide-out-to-bottom-2 max-h-[calc(100vh-2rem)] max-w-[calc(100%-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-[1.75rem] shadow-[0_40px_90px_-30px_rgb(43_38_34/0.55)] ring-1 duration-200",
+          size === "xl" ? "p-6" : "p-7",
           WIDTH[size],
         )}
       >
@@ -88,10 +90,23 @@ export function ModalFooter({ children }: { children: ReactNode }) {
   return <div className="mt-1 flex items-center justify-end gap-3 pt-1">{children}</div>;
 }
 
-/** A titled group inside a modal body. Sentence-case label, no boxes. */
-export function ModalSection({ title, children }: { title: string; children: ReactNode }) {
+/** A titled group inside a modal body. Sentence-case label, no boxes. `compact` tightens the spacing. */
+export function ModalSection({
+  title,
+  compact = false,
+  children,
+}: {
+  title: string;
+  compact?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <section className="border-graphite/10 flex flex-col gap-3 border-t py-5 first:border-t-0 first:pt-0">
+    <section
+      className={cn(
+        "border-graphite/10 flex flex-col border-t first:border-t-0 first:pt-0",
+        compact ? "gap-2.5 py-2.5" : "gap-3 py-5",
+      )}
+    >
       <h3 className="text-ink-muted text-[0.8125rem] font-medium">{title}</h3>
       {children}
     </section>

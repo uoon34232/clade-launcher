@@ -107,6 +107,15 @@ export function formatBytes(n: number): string {
   return t("size.gb", { value: gb });
 }
 
+/** Memory given in MiB, as "4 GB" / "4,5 ГБ" (at most one decimal, none when it is a whole number). */
+export function formatGigabytes(mib: number): string {
+  const value = new Intl.NumberFormat(INTL_TAG[getLocale()], {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  }).format(mib / 1024);
+  return t("settings.memory.gb", { value });
+}
+
 /** "412 of 640 files", or null when the total is unknown. */
 export function itemsText(done: number | null, total: number | null): string | null {
   return done !== null && total !== null && total > 0 ? t("prepare.files", { done, total }) : null;

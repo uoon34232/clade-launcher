@@ -30,6 +30,7 @@ interface Control {
   finishPrepare: () => boolean;
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
   refuseNextLaunch: (code: string, accountId?: string | null) => void;
+  failNext: (cmd: string, code: string, params?: Record<string, unknown>) => void;
   hasPendingPrepare: () => boolean;
 }
 
@@ -75,6 +76,8 @@ function install(cfg: BackendConfig): void {
     reject: (e: unknown) => void;
   } | null = null;
   let launchRefusal: { code: string; accountId: string | null } | null = null;
+  // One-shot failures a test asks for, by command (support actions, settings saves, ...).
+  const failures = new Map<string, { code: string; params: Record<string, unknown> }>();
 
   const profilesSnapshot = () => ({
     profiles: clone(state.profiles),
@@ -96,6 +99,12 @@ function install(cfg: BackendConfig): void {
       .replace(/^-|-$/g, "") || "profile";
 
   const handle = (cmd: string, args: Record<string, unknown>): unknown => {
+    const planned = failures.get(cmd);
+    if (planned) {
+      failures.delete(cmd);
+      return fail(planned.code, `${cmd} was made to fail by the test`, { params: planned.params });
+    }
+    const announce = () => emit("ui-settings-changed", clone(state.ui));
     switch (cmd) {
       // ---- launcher settings
       case "get_ui_settings":
@@ -112,6 +121,48 @@ function install(cfg: BackendConfig): void {
       case "set_last_phrase":
         state.ui.lastPhrase = args.id as string;
         return null;
+      case "set_reduced_motion":
+        state.ui.reducedMotion = args.mode as "system" | "on" | "off";
+        announce();
+        return null;
+      case "set_memory": {
+        const mb = args.mb as number | null;
+        const { min, max } = state.ui.memory;
+        if (mb !== null && (mb < min || mb > max))
+          return fail("invalid_memory", "memory is outside the safe range", {
+            params: { min, max },
+          });
+        state.ui.memoryMb = mb;
+        announce();
+        return null;
+      }
+      case "set_behavior":
+        if (args.onLaunch) state.ui.onLaunch = args.onLaunch as "keep_open" | "hide";
+        if (args.onExit) state.ui.onExit = args.onExit as "show" | "stay_hidden";
+        announce();
+        return null;
+      case "complete_onboarding":
+        state.ui.onboardingDone = true;
+        announce();
+        return null;
+      case "reset_settings":
+        // Preferences go back to their defaults; the introduction stays seen and nothing else is touched.
+        state.ui.soundEnabled = true;
+        state.ui.soundVolume = 0.5;
+        state.ui.language = null;
+        state.ui.reducedMotion = "system";
+        state.ui.memoryMb = null;
+        state.ui.onLaunch = "keep_open";
+        state.ui.onExit = "show";
+        announce();
+        return null;
+
+      // ---- support actions (nothing is opened or written here)
+      case "open_clade_folder":
+      case "open_logs_folder":
+        return null;
+      case "export_diagnostics":
+        return { name: "Clade-Diagnostics-20261004-120000.zip" };
 
       // ---- profiles and the version catalog
       case "list_profiles":
@@ -281,6 +332,9 @@ function install(cfg: BackendConfig): void {
     refuseNextLaunch: (code, accountId = null) => {
       launchRefusal = { code, accountId };
     },
+    failNext: (cmd, code, params = {}) => {
+      failures.set(cmd, { code, params });
+    },
   };
 }
 
@@ -344,6 +398,14 @@ export class Backend {
     await this.page.evaluate(
       ([c, p]) => (window as unknown as { __e2e: Control }).__e2e.failPrepare(c, p),
       [code, params] as const,
+    );
+  }
+
+  /** Makes the next call of a command fail once with a coded error, as the Rust side would. */
+  async failNext(cmd: string, code: string, params: Record<string, unknown> = {}): Promise<void> {
+    await this.page.evaluate(
+      ([c, k, p]) => (window as unknown as { __e2e: Control }).__e2e.failNext(c, k, p),
+      [cmd, code, params] as const,
     );
   }
 

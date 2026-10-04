@@ -19,6 +19,8 @@
         "minWidth": 960,
         "minHeight": 600,
         "center": true,
+        "maximizable": false,
+        "fullscreen": false,
         "decorations": false,
         "backgroundColor": "#F3EDE3",
         "create": false

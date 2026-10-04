@@ -46,16 +46,54 @@ pub struct UiSettingsDto {
     pub language: Option<String>,
     /// The Windows display language (a locale name such as `ru-RU`), for the first-run default.
     pub system_locale: Option<String>,
+    /// `system`, `on` or `off`.
+    pub reduced_motion: String,
+    /// False until the first-run introduction was finished or skipped.
+    pub onboarding_done: bool,
+    /// The global game memory in MiB, or `None` for the automatic policy.
+    pub memory_mb: Option<u32>,
+    /// What this machine allows, and what "Automatic" means here, so the UI never guesses.
+    pub memory: MemoryInfo,
+    /// `keep_open` or `hide`.
+    pub on_launch: String,
+    /// `show` or `stay_hidden`.
+    pub on_exit: String,
+    /// The application version (from Cargo.toml, the single source of truth).
+    pub version: String,
+}
+
+/// Memory facts for the Settings screen (MiB).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryInfo {
+    pub min: u32,
+    pub max: u32,
+    pub auto: u32,
+    pub total: Option<u64>,
 }
 
 impl UiSettingsDto {
     pub fn from_settings(s: &LauncherSettings) -> Self {
+        let total = crate::system::total_memory_mb();
+        let (min, max) = crate::system::memory_limits_mb(total);
         Self {
             sound_enabled: s.ui.sound.enabled,
             sound_volume: s.ui.sound.volume,
             last_phrase: s.ui.last_phrase.clone(),
             language: s.ui.language.clone(),
             system_locale: crate::system::system_locale(),
+            reduced_motion: s.ui.reduced_motion.clone(),
+            onboarding_done: s.ui.onboarding_done,
+            memory_mb: s.minecraft.memory_mb,
+            memory: MemoryInfo {
+                min,
+                max,
+                auto: crate::system::auto_memory_mb(total),
+                total,
+            },
+            on_launch: s.behavior.on_launch.clone(),
+            on_exit: s.behavior.on_exit.clone(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }
 }
@@ -91,7 +129,30 @@ impl SettingsState {
         .map(|_| ())
     }
 
-    fn snapshot(&self) -> UiSettingsDto {
+    /// The global game memory (MiB), if the person chose one; `None` means automatic.
+    pub fn default_memory_mb(&self) -> Option<u32> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .minecraft
+            .memory_mb
+    }
+
+    /// What the window does around a game.
+    pub fn behavior(&self) -> crate::settings::BehaviorPrefs {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .behavior
+            .clone()
+    }
+
+    /// A copy of the settings (for the diagnostics export).
+    pub fn settings_copy(&self) -> LauncherSettings {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn snapshot(&self) -> UiSettingsDto {
         UiSettingsDto::from_settings(&self.inner.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
@@ -173,6 +234,99 @@ pub fn set_language(
     Ok(())
 }
 
+/// Saves, announces and reports the outcome of one settings change.
+fn apply(
+    app: &AppHandle,
+    state: &SettingsState,
+    change: impl FnOnce(&mut LauncherSettings) -> bool,
+) -> Result<(), CodedError> {
+    let (dto, changed) = state.update(change).map_err(CodedError::storage)?;
+    if changed {
+        let _ = app.emit(CHANGED_EVENT, dto);
+    }
+    Ok(())
+}
+
+fn unsupported() -> CodedError {
+    CodedError::new("unsupported_value", "that setting value is not supported")
+}
+
+#[tauri::command]
+pub fn set_reduced_motion(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    mode: String,
+) -> Result<(), CodedError> {
+    if !crate::settings::MOTION_MODES.contains(&mode.as_str()) {
+        return Err(unsupported());
+    }
+    apply(&app, &state, |s| {
+        let before = s.ui.reduced_motion.clone();
+        s.set_reduced_motion(&mode) && s.ui.reduced_motion != before
+    })
+}
+
+/// Sets the global game memory in MiB, or `null` for automatic. A value outside the safe range for
+/// this machine is refused with that range.
+#[tauri::command]
+pub fn set_memory(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    mb: Option<u32>,
+) -> Result<(), CodedError> {
+    let total = crate::system::total_memory_mb();
+    let mut refused = None;
+    let result = apply(&app, &state, |s| match s.set_memory(mb, total) {
+        Ok(changed) => changed,
+        Err(range) => {
+            refused = Some(range);
+            false
+        }
+    });
+    if let Some((min, max)) = refused {
+        return Err(
+            CodedError::new("invalid_memory", "memory is outside the safe range").with(
+                crate::coded_error::params([("min", min.into()), ("max", max.into())]),
+            ),
+        );
+    }
+    result
+}
+
+#[tauri::command]
+pub fn set_behavior(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    on_launch: Option<String>,
+    on_exit: Option<String>,
+) -> Result<(), CodedError> {
+    let mut valid = true;
+    let result = apply(&app, &state, |s| {
+        let before = s.behavior.clone();
+        valid = s.set_behavior(on_launch.as_deref(), on_exit.as_deref());
+        s.behavior != before
+    });
+    if !valid {
+        return Err(unsupported());
+    }
+    result
+}
+
+#[tauri::command]
+pub fn complete_onboarding(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<(), CodedError> {
+    apply(&app, &state, |s| s.complete_onboarding())
+}
+
+/// Puts the user-configurable preferences back to their defaults. Profiles, accounts, the vault,
+/// game files and playtime are not stored in the settings file and are never touched.
+#[tauri::command]
+pub fn reset_settings(app: AppHandle, state: State<'_, SettingsState>) -> Result<(), CodedError> {
+    apply(&app, &state, |s| s.reset_user_prefs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,8 +351,17 @@ mod tests {
                 last_phrase: None,
                 language: None,
                 system_locale: dto.system_locale.clone(),
+                reduced_motion: "system".into(),
+                onboarding_done: false,
+                memory_mb: None,
+                memory: dto.memory.clone(),
+                on_launch: "keep_open".into(),
+                on_exit: "show".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
             }
         );
+        assert!(dto.memory.min <= dto.memory.auto.max(dto.memory.min));
+        assert!(dto.memory.min < dto.memory.max);
     }
 
     #[test]
@@ -279,8 +442,27 @@ mod tests {
             last_phrase: Some("welcome-back".into()),
             language: Some("ru".into()),
             system_locale: Some("ru-RU".into()),
+            reduced_motion: "on".into(),
+            onboarding_done: true,
+            memory_mb: Some(4096),
+            memory: MemoryInfo {
+                min: 1024,
+                max: 12288,
+                auto: 4096,
+                total: Some(16384),
+            },
+            on_launch: "hide".into(),
+            on_exit: "stay_hidden".into(),
+            version: "0.1.0".into(),
         })
         .unwrap();
+        assert_eq!(json["reducedMotion"], "on");
+        assert_eq!(json["onboardingDone"], true);
+        assert_eq!(json["memoryMb"], 4096);
+        assert_eq!(json["memory"]["max"], 12288);
+        assert_eq!(json["onLaunch"], "hide");
+        assert_eq!(json["onExit"], "stay_hidden");
+        assert_eq!(json["version"], "0.1.0");
         assert_eq!(json["language"], "ru");
         assert_eq!(json["systemLocale"], "ru-RU");
         assert_eq!(json["soundEnabled"], true);

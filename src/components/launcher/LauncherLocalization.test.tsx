@@ -235,7 +235,10 @@ describe("switching the language live", () => {
 
   it("English -> Русский -> English updates the screen without closing the modal or losing focus", async () => {
     await openSettings();
-    const radios = () => within(dialog()).getAllByRole("radio");
+    const radios = () =>
+      within(within(dialog()).getByRole("radiogroup", { name: /^(Language|Язык)$/ })).getAllByRole(
+        "radio",
+      );
     expect(within(dialog()).getByText("Settings")).toBeTruthy();
     const russian = within(dialog()).getByRole("radio", { name: "Русский" });
     russian.focus();

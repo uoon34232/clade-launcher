@@ -193,7 +193,15 @@ function Body({
                 {t("common.signInAgain")}
               </button>
             )}
-            <button ref={doneRef} type="button" className={BUTTON_SOFT} onClick={onClose}>
+            <button
+              ref={doneRef}
+              type="button"
+              className={BUTTON_SOFT}
+              onClick={() => {
+                playSound("click");
+                onClose();
+              }}
+            >
               {t("common.done")}
             </button>
           </>

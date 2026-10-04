@@ -61,7 +61,7 @@ export function ProfileSelector({ profiles, selectedId, onSelect, onCreate, onVe
         aria-label={t("profile.trigger", { label: profileLabel(current) })}
         className={TRIGGER}
       >
-        <span className="text-cream -translate-y-px truncate text-[0.9375rem] leading-none font-medium tracking-[0.005em]">
+        <span className="text-cream -translate-y-px truncate text-[0.9375rem] leading-[1.4] font-medium tracking-[0.005em]">
           {profileLabel(current)}
         </span>
         <ChevronUpIcon
