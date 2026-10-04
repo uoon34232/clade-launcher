@@ -1,0 +1,321 @@
+// English: the canonical catalog. Every key here must also exist in `ru.ts` (a test and the
+// compiler both enforce it). Add new user-visible text here and in Russian in the same change.
+//
+// Conventions: sentence case, short and plain; complete sentences with named `{params}` (never
+// glue fragments together); counted nouns use plural forms (`by` names the numeric parameter).
+// Product identifiers (Minecraft versions, Fabric, Forge, NeoForge, Quilt, UUIDs, paths) and the
+// brand names Clade / Clade Launcher are never translated and do not appear here as copy.
+
+import type { Message } from "@/lib/i18n/core";
+
+export const en = {
+  // ---- common
+  "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.done": "Done",
+  "common.tryAgain": "Try again",
+  "common.working": "Working…",
+  "common.continue": "Continue",
+  "common.unlock": "Unlock",
+  "common.passphrase": "Passphrase",
+  "common.signInAgain": "Sign in again",
+  "common.openLogs": "Open logs",
+
+  // ---- window chrome
+  "window.minimize": "Minimize",
+  "window.close": "Close",
+
+  // ---- home
+  "hero.subtitle": "Choose a build and enter your world.",
+  "hero.shuffleHint": "Shows a different message",
+  "hero.played": "Played {time}",
+  "phrase.ready-when-you-are": "Ready when you are.",
+  "phrase.your-world-is-waiting": "Your world is waiting.",
+  "phrase.welcome-back": "Welcome back.",
+  "phrase.pick-up-where-you-left-off": "Pick up where you left off.",
+  "phrase.where-to-today": "Where to today?",
+  "phrase.one-more-world": "One more world?",
+  "phrase.take-your-time": "Take your time.",
+  "phrase.choose-your-world": "Choose your world.",
+
+  // ---- durations and sizes
+  "playtime.zero": "0m",
+  "playtime.lessThanMinute": "<1m",
+  "playtime.minutes": "{minutes}m",
+  "playtime.hoursMinutes": "{hours}h {minutes}m",
+  "size.kb": "{value} KB",
+  "size.mb": "{value} MB",
+  "size.gb": "{value} GB",
+
+  // ---- dock: play button
+  "play.play": "Play",
+  "play.setup": "Set up",
+  "play.launching": "Launching…",
+  "play.playing": "Playing",
+  "play.repairing": "Repairing…",
+
+  // ---- dock: settings button
+  "dock.settings": "Settings",
+
+  // ---- dock: account menu
+  "account.signIn": "Sign in",
+  "account.trigger": "Account: {name}. Switch account",
+  "account.triggerNone": "Add an account",
+  "account.needsSignIn": "Sign in again",
+  "account.manage": "Manage {name}",
+  "account.add": "+ Add account",
+
+  // ---- dock: profile selector
+  "profile.createFirst": "Create a profile",
+  "profile.trigger": "Profile: {label}. Change profile",
+  "profile.create": "+ Create profile",
+  "profile.verify": "Verify files",
+  "profile.vanilla": "Vanilla",
+  "profile.modded": "Modded",
+
+  // ---- create profile
+  "create.title": "New profile",
+  "create.description": "Each profile keeps its own files, separate from the rest.",
+  "create.name": "Name",
+  "create.namePlaceholder": "Survival",
+  "create.mcVersion": "Minecraft version",
+  "create.filterLabel": "Which versions to list",
+  "create.filter.releases": "Releases",
+  "create.filter.snapshots": "Snapshots",
+  "create.filter.historical": "Historical",
+  "create.choose": "Choose a version",
+  "create.loading": "Loading versions…",
+  "create.unavailable": "Versions unavailable",
+  "create.noVersions": "No versions in this list.",
+  "create.type": "Type",
+  "create.typeLabel": "Profile type",
+  "create.vanillaNote": "Plain Minecraft, nothing added.",
+  "create.moddedNote": "Minecraft with a mod loader. You add your own mods.",
+  "create.loader": "Loader",
+  "create.loaderLabel": "Mod loader",
+  "create.loaderCheckFailed": "Could not check which loaders fit. Check your connection.",
+  "create.loaderChecking": "Checking compatible loaders…",
+  "create.loaderNone": "{loader} has no version for {minecraft}",
+  "create.loaderNoneAny": "{loader} has no version for this version",
+  "create.loaderUnchecked": "{loader} could not be checked",
+  "create.loaderVersion": "Loader version",
+  "create.versionRecommended": "{version} (recommended)",
+  "create.channel.recommended": "recommended",
+  "create.channel.latest": "latest",
+  "create.channel.prerelease": "beta",
+  "create.channel.stable": "",
+  "create.checking": "Checking…",
+  "create.noCompatible": "No compatible version",
+  "create.staleLoaders": "Offline: using a saved list of versions.",
+  "create.creating": "Creating…",
+  "create.submit": "Create profile",
+  "validate.nameEmpty": "Give the profile a name.",
+  "validate.nameLong": {
+    by: "max",
+    other: "Keep the name under {max} characters.",
+  } satisfies Message,
+  "validate.nameControl": "The name can't contain control characters.",
+  "validate.nameDuplicate": "You already have a profile with this name.",
+  "catalog.stale": "Offline: using the version list from {date}.",
+  "catalog.staleUnknown": "Offline: using a saved version list.",
+
+  // ---- preparing a profile
+  "prepare.stage.planning": "Preparing Minecraft",
+  "prepare.stage.java": "Preparing Java",
+  "prepare.stage.minecraft": "Downloading Minecraft",
+  "prepare.stage.minecraft.verify": "Verifying Minecraft",
+  "prepare.stage.libraries": "Downloading libraries",
+  "prepare.stage.libraries.verify": "Verifying libraries",
+  "prepare.stage.assets": "Downloading assets",
+  "prepare.stage.assets.verify": "Verifying assets",
+  "prepare.stage.natives": "Extracting natives",
+  "prepare.stage.loader": "Installing {loader}",
+  "prepare.stage.verifying": "Verifying files",
+  "prepare.stage.done": "Ready to play.",
+  "prepare.ready": "Ready to play.",
+  "prepare.readyDescription": "{name} is installed on this computer.",
+  "prepare.progress": "Setup progress",
+  "prepare.files": {
+    by: "total",
+    other: "{done} of {total} files",
+  } satisfies Message,
+  "prepare.bytes": "{done} of {total}",
+
+  // ---- when the game could not start or ended badly
+  "problem.endedTitle": "Minecraft stopped",
+  "problem.title.no_account": "Add an account",
+  "problem.title.needs_sign_in": "Sign in again",
+  "problem.title.needs_repair": "Repair needed",
+  "problem.title.approval_pending": "Sign-in not available yet",
+  "problem.title.offline": "No connection",
+  "problem.title.other": "Can't start",
+  "problem.repair": "Repair",
+  "problem.addAccount": "Add account",
+  "problem.unlockTitle": "Unlock your accounts",
+  "problem.unlockDescription": "Enter your passphrase to play. It stays on this computer.",
+  "exit.wrong_java":
+    "Minecraft or a mod needs a different Java version than the one Clade prepared. Repairing the profile may help.",
+  "exit.incomplete_files":
+    "Minecraft's files are incomplete. Repair the profile to download them again.",
+  "exit.no_memory":
+    "There isn't enough free memory to start Minecraft. Close other programs and try again.",
+  "exit.out_of_memory": "Minecraft ran out of memory.",
+  "exit.native_library": "A native library (graphics or sound) could not be loaded.",
+  "exit.java_crash": "The Java runtime crashed, often because of a graphics driver.",
+  "exit.mod_loader": "The mod loader reported an error while starting.",
+  "exit.mixin": "A mod could not be applied. Check the mods in this profile.",
+  "exit.incompatible_mods": "The mods in this profile don't work together.",
+  "exit.missing_class": "A library or mod could not be loaded.",
+  "exit.jvm_start": "Java could not start with the chosen settings.",
+  "exit.early_exit": "Minecraft stopped right after starting (exit code {code}).",
+  "exit.unexpected": "Minecraft stopped unexpectedly (exit code {code}).",
+  "exit.stopped": "Minecraft was stopped.",
+  "exit.generic": "Minecraft stopped unexpectedly.",
+
+  // ---- sign-in and the account vault
+  "signin.addTitle": "Add account",
+  "signin.againTitle": "Sign in again",
+  "signin.addDescription": "Sign in with your Microsoft account in your browser.",
+  "signin.againDescription": "Sign in as {name} with Microsoft.",
+  "signin.stage.opening": "Opening Microsoft sign-in…",
+  "signin.stage.waiting": "Waiting for sign-in…",
+  "signin.stage.finishing": "Finishing setup…",
+  "signin.createTitle": "Protect your accounts",
+  "signin.createDescription":
+    "Sign-in details are encrypted in this folder with a passphrase you choose. It can't be recovered, so keep it safe.",
+  "signin.unlockTitle": "Unlock your accounts",
+  "signin.unlockDescription": "Enter your passphrase to sign in. It stays on this computer.",
+  "signin.passphraseNote": {
+    other: "At least {count} characters. A few words work well.",
+  } satisfies Message,
+  "signin.repeat": "Repeat passphrase",
+  "signin.mismatch": "The passphrases don’t match.",
+  "signin.approvalNote":
+    "Nothing was saved. This resolves once Mojang approves the launcher’s registration.",
+
+  // ---- account management
+  "accountModal.description": "Minecraft Java account",
+  "accountModal.profile": "Profile",
+  "accountModal.skin": "Skin",
+  "accountModal.cape": "Cape",
+  "accountModal.name": "Name",
+  "accountModal.uuid": "UUID",
+  "accountModal.status": "Status",
+  "accountModal.statusNeedsSignIn": "Needs to sign in again",
+  "accountModal.statusSignedIn": "Signed in",
+  "accountModal.skinModel": "Skin model",
+  "accountModal.skinClassic": "Classic",
+  "accountModal.skinSlim": "Slim",
+  "accountModal.choosePng": "Choose PNG…",
+  "accountModal.restoreDefault": "Restore default",
+  "accountModal.skinUnavailable": "Skin changes need Microsoft sign-in, which isn’t available yet.",
+  "accountModal.capeAvailable": "Choose one of the capes this account owns, or turn the cape off.",
+  "accountModal.capeUnavailable":
+    "Capes this account owns will appear here once sign-in is available. Capes can only be equipped, never uploaded.",
+  "accountModal.confirmRemove":
+    "Remove {name}? Your profiles, worlds and playtime stay as they are.",
+  "accountModal.keep": "Keep account",
+  "accountModal.remove": "Remove account",
+  "accountModal.removing": "Removing…",
+  "accountModal.signOutRemove": "Sign out and remove…",
+
+  // ---- settings
+  "settings.title": "Settings",
+  "settings.sound": "Sound effects",
+  "settings.volume": "Volume",
+  "settings.language": "Language",
+
+  // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
+  "error.generic": "Something went wrong.",
+  "error.common.storage":
+    "Clade couldn't read or write the files it needs. Check that its folder is writable.",
+  "error.common.not_found": "That profile no longer exists.",
+  "error.common.network_unavailable": "Networking is unavailable.",
+  "error.common.backend_unavailable": "The launcher backend is not available here.",
+
+  "error.launch.unknown": "Minecraft couldn't be started.",
+  "error.launch.no_account": "Sign in with a Microsoft account to play.",
+  "error.launch.needs_sign_in": "This account needs to sign in again before it can play.",
+  "error.launch.needs_repair":
+    "Part of this profile is missing or damaged. It needs to be repaired before it can start.",
+  "error.launch.vault_locked": "Unlock your accounts to play.",
+  "error.launch.offline":
+    "Clade can't refresh your Minecraft sign-in without a network. Connect and try again.",
+  "error.launch.approval_pending":
+    "Mojang has not approved this launcher for Minecraft sign-in yet, so a fresh sign-in can't be completed.",
+  "error.launch.no_java_profile": "This Microsoft account has no Minecraft: Java Edition profile.",
+  "error.launch.auth": "Your Minecraft sign-in could not be refreshed.",
+  "error.launch.not_ready": "This profile has to be set up before it can start.",
+  "error.launch.unsupported": "This profile can't be started.",
+  "error.launch.already_running": "This profile is already starting or running.",
+  "error.launch.spawn_failed": "Java could not be started.",
+
+  "error.prepare.unknown": "Setup failed.",
+  "error.prepare.offline":
+    "Can't reach the network, and some files this profile needs aren't saved on this computer yet.",
+  "error.prepare.network": "A download failed. Check your connection and try again.",
+  "error.prepare.verification":
+    "A downloaded file failed verification, so it was discarded. Try again.",
+  "error.prepare.metadata": "Mojang's information for this version isn't available.",
+  "error.prepare.unsupported": "This version can't be prepared.",
+  "error.prepare.java": "Java couldn't be set up.",
+  "error.prepare.loader": "The mod loader couldn't be installed.",
+  "error.prepare.storage":
+    "Files couldn't be saved. Check that the drive has space and isn't read-only.",
+  "error.prepare.disk_space":
+    "There isn't enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
+  "error.prepare.busy": "Another profile is being set up. Wait for it to finish.",
+
+  "error.signIn.unknown": "Sign-in failed.",
+  "error.signIn.timed_out": "Sign-in took too long and was stopped. Try again when you are ready.",
+  "error.signIn.browser_unavailable": "Clade could not open your browser.",
+  "error.signIn.in_progress": "A sign-in is already in progress.",
+  "error.signIn.offline": "Could not reach Microsoft. Check your connection and try again.",
+  "error.signIn.oauth": "Microsoft did not accept the sign-in.",
+  "error.signIn.needs_sign_in": "This account needs to sign in again.",
+  "error.signIn.no_xbox_account":
+    "This Microsoft account has no Xbox account. Create one at xbox.com, then try again.",
+  "error.signIn.xbox_region": "Xbox Live is not available in this account's country or region.",
+  "error.signIn.adult_verification":
+    "This account needs adult verification before it can sign in. Finish it on xbox.com.",
+  "error.signIn.child_account":
+    "This is a child account. An adult must add it to a Microsoft family before it can sign in.",
+  "error.signIn.xbox_banned": "This Xbox account is banned.",
+  "error.signIn.xsts": "Xbox sign-in failed (code {xstsCode}).",
+  "error.signIn.approval_required":
+    "Microsoft sign-in worked, but Mojang has not approved this launcher for Minecraft sign-in yet.",
+  "error.signIn.no_java_profile": "This Microsoft account does not own Minecraft: Java Edition.",
+  "error.signIn.no_java_profile_owned":
+    "This account owns Minecraft but has no Java profile yet. Open the official Minecraft Launcher once to create it, then try again.",
+  "error.signIn.bad_response": "Minecraft sign-in returned something unexpected.",
+  "error.signIn.vault_locked": "Unlock your accounts first.",
+  "error.signIn.storage": "Your accounts could not be saved.",
+  "error.signIn.wrong_account":
+    "That is a different Minecraft account from the one being signed in again.",
+  "error.signIn.unknown_account": "That account no longer exists.",
+
+  "error.vault.unknown": "That didn't work.",
+  "error.vault.passphrase_mismatch": "That passphrase doesn't match.",
+  "error.vault.passphrase_too_short": "That passphrase is too short.",
+  "error.vault.vault_exists": "Accounts are already protected by a passphrase.",
+  "error.vault.vault_unreadable": "The encrypted account store could not be opened.",
+
+  "error.account.unknown": "Could not remove the account.",
+  "error.account.unknown_account": "That account no longer exists.",
+
+  "error.profile.unknown": "Could not create the profile.",
+  "error.profile.duplicate_name": "A profile named “{name}” already exists.",
+  "error.profile.unknown_minecraft":
+    "Minecraft {minecraft} is not in Mojang’s official version list.",
+  "error.profile.cannot_verify":
+    "Can't check Minecraft versions right now. Connect once and try again.",
+  "error.profile.cannot_verify_loader":
+    "Can't check which {loader} versions fit Minecraft {minecraft} right now. Connect once and try again.",
+  "error.profile.no_compatible_loader": "{loader} has no version for Minecraft {minecraft}.",
+  "error.profile.loader_version_not_offered":
+    "{loader} {version} is not a compatible version for Minecraft {minecraft}.",
+  "error.profile.invalid_name": "That name can't be used.",
+  "error.profile.storage": "Could not save the profile.",
+
+  "error.catalog.unknown": "Could not load the version list.",
+} satisfies Record<string, Message>;

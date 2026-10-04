@@ -1,0 +1,72 @@
+# ---- Dependencies and build output (downloaded or generated at setup/build time, never committed)
+node_modules
+dist
+dist-ssr
+dist-portable/
+*.local
+# src-tauri/.gitignore covers /target/ and /gen/schemas
+
+# ---- Logs and test output
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+test-results/
+playwright-report/
+coverage/
+
+# ---- Editor and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.claude/settings.local.json
+
+# ---- Local-only working files (screenshots, capture scripts, scratch)
+shots/
+.playwright-mcp/
+
+# ---- Clade runtime data. A built or portable Clade folder keeps all of this next to Clade.exe. It is
+# ---- user data, credentials (the encrypted vault) or downloaded game files and must never be committed.
+/Clade-Launcher/
+/data/
+/instances/
+/runtimes/
+/minecraft/
+/libraries/
+/assets/
+/cache/
+vault.bin
+vault.bin.bak
+accounts.json
+*.bak
+.env
+.env.*
+*.pem
+*.pfx
+*.p12
+
+# ---- Release artefacts
+*.zip
+*.cab
+*.sha256
+
+# ---- Media: only the files listed below are published; everything else in docs/media stays local
+# ---- (earlier logo/banner versions, comparison sheets, WebM masters, SVG sources, drafts).
+docs/media/*
+!docs/media/logo-mark-final.svg
+!docs/media/logo-mark-final.png
+!docs/media/banner-final.svg
+!docs/media/banner-final.png
+!docs/media/social-preview.png
+!docs/media/hero-interaction.gif
+!docs/media/account-menu.gif
+!docs/media/create-profile.gif
+!docs/media/settings-language.gif
