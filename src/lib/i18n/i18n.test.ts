@@ -1,0 +1,359 @@
+/// <reference types="node" />
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { formatBytes, formatPlaytime, itemsText, staleNote } from "@/features/launcher/profileUi";
+import { CATALOGS, en, ru } from "@/locales";
+import {
+  fill,
+  placeholders,
+  renderMessage,
+  resolveLocale,
+  translate,
+  type Catalog,
+  type Locale,
+} from "./core";
+import { describeCode, describeError } from "./errors";
+import { BackendError } from "@/lib/ipc";
+import { getLocale, hasMessage, setLocale, subscribeLocale, t, tDynamic } from "./index";
+
+afterEach(() => setLocale("en"));
+
+const enKeys = Object.keys(en).sort();
+const ruKeys = Object.keys(ru).sort();
+
+describe("catalog parity (English is canonical, Russian is complete)", () => {
+  it("has exactly the same keys in both languages", () => {
+    expect(
+      ruKeys.filter((k) => !(k in en)),
+      "keys only in Russian",
+    ).toEqual([]);
+    expect(
+      enKeys.filter((k) => !(k in ru)),
+      "keys missing from Russian",
+    ).toEqual([]);
+    expect(ruKeys).toEqual(enKeys);
+  });
+
+  it("has no duplicate keys (a duplicate would silently shadow the first)", () => {
+    // Object literals collapse duplicates, so scan the source text instead.
+    for (const file of ["en", "ru"]) {
+      const text = readFileSync(`src/locales/${file}.ts`, "utf8");
+      const keys = [...text.matchAll(/^ {2}"([^"]+)":/gm)].map((m) => m[1]);
+      const dupes = keys.filter((k, i) => keys.indexOf(k) !== i);
+      expect(dupes, `${file}.ts`).toEqual([]);
+      expect(keys.length).toBe(enKeys.length);
+    }
+  });
+
+  it("uses the same named parameters in both languages for every key", () => {
+    for (const key of enKeys) {
+      const a = [...placeholders(en[key as keyof typeof en])].sort();
+      const b = [...placeholders(ru[key as keyof typeof ru])].sort();
+      expect(b, key).toEqual(a);
+    }
+  });
+
+  it("leaves no Russian entry empty or still in English (except where English is also empty or a product name)", () => {
+    const sameAllowed = new Set([
+      "accountModal.uuid", // a technical label
+      "create.channel.stable", // intentionally blank
+    ]);
+    for (const key of enKeys) {
+      const ruMsg = ru[key as keyof typeof ru];
+      const enMsg = en[key as keyof typeof en];
+      if (sameAllowed.has(key)) continue;
+      const ruText = typeof ruMsg === "string" ? ruMsg : ruMsg.other;
+      const enText = typeof enMsg === "string" ? enMsg : enMsg.other;
+      expect(ruText.length, key).toBeGreaterThan(0);
+      expect(/[А-Яа-яЁё]/.test(ruText) || ruText === enText, `${key}: ${ruText}`).toBe(true);
+      if (ruText === enText) expect(/^[^A-Za-z]*$|^\{[a-z]+\}/.test(ruText), key).toBe(true);
+    }
+  });
+
+  it("keeps product names as they are, never transliterated", () => {
+    for (const [key, msg] of Object.entries(ru)) {
+      const text = typeof msg === "string" ? msg : JSON.stringify(msg);
+      expect(text, key).not.toMatch(/Клейд|Клэйд|Фабрик|Фордж|Неофордж|Квилт|Майнкрафт/);
+    }
+  });
+});
+
+describe("the translator", () => {
+  it("fills named parameters from complete templates", () => {
+    expect(fill("Hello {name}, {n} left", { name: "Alex", n: 3 })).toBe("Hello Alex, 3 left");
+    expect(fill("Keep {unknown}", {})).toBe("Keep {unknown}");
+    expect(t("account.trigger", { name: "Alex" })).toBe("Account: Alex. Switch account");
+    setLocale("ru");
+    expect(t("account.trigger", { name: "Alex" })).toBe("Аккаунт: Alex. Сменить аккаунт");
+  });
+
+  it("picks Russian plural forms (one / few / many) for counted nouns", () => {
+    const files = (total: number) => renderMessage("ru", ru["prepare.files"], { done: 1, total });
+    expect(files(1)).toBe("1 из 1 файла");
+    expect(files(21)).toBe("1 из 21 файла");
+    expect(files(2)).toBe("1 из 2 файлов");
+    expect(files(5)).toBe("1 из 5 файлов");
+    expect(files(640)).toBe("1 из 640 файлов");
+    expect(files(11)).toBe("1 из 11 файлов");
+    expect(renderMessage("en", en["prepare.files"], { done: 412, total: 640 })).toBe(
+      "412 of 640 files",
+    );
+    const chars = (count: number) => renderMessage("ru", ru["signin.passphraseNote"], { count });
+    expect(chars(8)).toBe("Не менее 8 символов. Подойдёт несколько слов.");
+    expect(chars(21)).toContain("21 символа");
+  });
+
+  it("falls back to English for a key missing in the current language, never crashing", () => {
+    const partial: Record<Locale, Catalog> = {
+      en: { "only.en": "English text", both: "Both EN" },
+      ru: { both: "Оба RU" },
+    };
+    expect(translate(partial, "ru", "only.en")).toBe("English text");
+    expect(translate(partial, "ru", "both")).toBe("Оба RU");
+    expect(translate(partial, "en", "both")).toBe("Both EN");
+    // Missing everywhere: the key itself is shown (visible in development), no exception.
+    expect(translate(partial, "ru", "nowhere")).toBe("nowhere");
+    expect(CATALOGS.en).toBe(en);
+    expect(hasMessage("hero.subtitle")).toBe(true);
+    expect(hasMessage("hero.nope")).toBe(false);
+    expect(tDynamic("hero.nope")).toBe("hero.nope");
+  });
+
+  it("switches the whole UI language at once and tells subscribers", () => {
+    let calls = 0;
+    const off = subscribeLocale(() => calls++);
+    setLocale("ru");
+    expect(getLocale()).toBe("ru");
+    expect(document.documentElement.lang).toBe("ru");
+    setLocale("ru"); // no change: no notification
+    setLocale("en");
+    expect(calls).toBe(2);
+    expect(document.documentElement.lang).toBe("en");
+    // @ts-expect-error unknown languages are refused
+    setLocale("de");
+    expect(getLocale()).toBe("en");
+    off();
+  });
+});
+
+describe("first-run language", () => {
+  it("follows the Windows language when nothing was ever chosen", () => {
+    expect(resolveLocale(null, "ru-RU")).toBe("ru");
+    expect(resolveLocale(undefined, "ru")).toBe("ru");
+    expect(resolveLocale(null, "RU-ru")).toBe("ru");
+    expect(resolveLocale(null, "en-US")).toBe("en");
+    expect(resolveLocale(null, "de-DE")).toBe("en");
+    expect(resolveLocale(null, "uk-UA")).toBe("en"); // only "ru…" is Russian
+    expect(resolveLocale(null, "rue")).toBe("en"); // a different language that merely starts with r-u
+    expect(resolveLocale(null, null)).toBe("en");
+    expect(resolveLocale(null, "")).toBe("en");
+  });
+
+  it("an explicit choice always wins over the system language", () => {
+    expect(resolveLocale("en", "ru-RU")).toBe("en");
+    expect(resolveLocale("ru", "en-US")).toBe("ru");
+    expect(resolveLocale("de", "ru-RU")).toBe("ru"); // not a shipped language: treated as no choice
+  });
+});
+
+describe("locale-aware formatting (raw numbers in, text out)", () => {
+  it("formats playtime in English", () => {
+    expect(formatPlaytime(0)).toBe("0m");
+    expect(formatPlaytime(30)).toBe("<1m");
+    expect(formatPlaytime(42 * 60)).toBe("42m");
+    expect(formatPlaytime(27 * 3600 + 42 * 60)).toBe("27h 42m");
+    expect(t("hero.played", { time: formatPlaytime(27 * 3600 + 42 * 60) })).toBe("Played 27h 42m");
+  });
+
+  it("formats playtime in Russian: minutes only, hours and minutes, large totals", () => {
+    setLocale("ru");
+    expect(formatPlaytime(0)).toBe("0 мин");
+    expect(formatPlaytime(30)).toBe("<1 мин");
+    expect(formatPlaytime(42 * 60)).toBe("42 мин");
+    expect(formatPlaytime(3600)).toBe("1 ч 0 мин");
+    expect(formatPlaytime(27 * 3600 + 42 * 60)).toBe("27 ч 42 мин");
+    expect(formatPlaytime(1234 * 3600 + 5 * 60)).toBe("1234 ч 5 мин");
+    expect(t("hero.played", { time: formatPlaytime(27 * 3600 + 42 * 60) })).toBe(
+      "В игре 27 ч 42 мин",
+    );
+  });
+
+  it("formats sizes with the language's units and decimal mark", () => {
+    expect(formatBytes(184 * 1024 * 1024)).toBe("184 MB");
+    expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1.4 GB");
+    setLocale("ru");
+    expect(formatBytes(184 * 1024 * 1024)).toBe("184 МБ");
+    expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1,4 ГБ");
+    expect(formatBytes(512)).toBe("1 КБ");
+    expect(itemsText(412, 640)).toBe("412 из 640 файлов");
+    expect(itemsText(null, 640)).toBeNull();
+  });
+
+  it("words the saved-list notice with a localized date", () => {
+    const now = Date.UTC(2026, 9, 4);
+    expect(staleNote(Date.UTC(2026, 9, 3) / 1000, now)).toMatch(
+      /^Offline: using the version list from 3 Oct/,
+    );
+    setLocale("ru");
+    const ruNote = staleNote(Date.UTC(2026, 9, 3) / 1000, now);
+    expect(ruNote).toMatch(/^Нет сети: используется список версий от 3 окт/);
+    expect(staleNote(0)).toBe("Нет сети: используется сохранённый список версий.");
+    // A short month that ends in a dot ("сент.") must not produce a double full stop.
+    const sep = staleNote(Date.UTC(2026, 8, 26) / 1000, now);
+    expect(sep).toMatch(/от 26 сент\.$/);
+    expect(sep).not.toMatch(/\.\.$/);
+  });
+});
+
+describe("structured backend errors are worded in the current language", () => {
+  const disk = new BackendError("English detail for logs", "disk_space", {
+    params: { requiredBytes: 3 * 1024 ** 3, availableBytes: 200 * 1024 ** 2 },
+  });
+
+  it("builds the disk-space message from byte counts, in both languages", () => {
+    expect(describeError("prepare", disk)).toBe(
+      "There isn't enough free space on the drive that holds Clade: about 3.0 GB is needed and 200 MB is available. Free some space and try again.",
+    );
+    setLocale("ru");
+    expect(describeError("prepare", disk)).toBe(
+      "На диске, где находится Clade, не хватает места: нужно около 3,0 ГБ, доступно 200 МБ. Освободи место и повтори.",
+    );
+  });
+
+  it("never shows the backend's English detail message", () => {
+    setLocale("ru");
+    const text = describeError("prepare", disk);
+    expect(text).not.toContain("English detail");
+    expect(describeError("launch", new Error("Something raw and technical"))).toBe(
+      "Не удалось запустить Minecraft.",
+    );
+  });
+
+  it("words each domain's own codes, with parameters", () => {
+    expect(
+      describeError(
+        "profile",
+        new BackendError("x", "duplicate_name", { params: { name: "Survival" } }),
+      ),
+    ).toBe("A profile named “Survival” already exists.");
+    setLocale("ru");
+    expect(
+      describeError(
+        "profile",
+        new BackendError("x", "no_compatible_loader", {
+          params: { loader: "Fabric", minecraft: "1.20.1" },
+        }),
+      ),
+    ).toBe("Для Minecraft 1.20.1 нет версии Fabric.");
+    expect(describeCode("launch", "needs_sign_in")).toBe(
+      "Этому аккаунту нужно войти снова, чтобы играть.",
+    );
+  });
+
+  it("tells the two Java-profile situations apart and treats a code as domain-specific", () => {
+    expect(describeCode("signIn", "no_java_profile", { ownsMinecraft: true })).toMatch(
+      /owns Minecraft but has no Java profile/,
+    );
+    expect(describeCode("signIn", "no_java_profile", { ownsMinecraft: false })).toMatch(
+      /does not own Minecraft: Java Edition/,
+    );
+    // "offline" means different things when launching, preparing and signing in.
+    const texts = new Set(
+      (["launch", "prepare", "signIn"] as const).map((d) => describeCode(d, "offline")),
+    );
+    expect(texts.size).toBe(3);
+  });
+
+  it("falls back to the domain's general message, then a generic one, for unknown codes", () => {
+    expect(describeCode("signIn", "something_new")).toBe("Sign-in failed.");
+    expect(describeCode("prepare", null)).toBe("Setup failed.");
+    expect(describeCode("catalog", "storage")).toMatch(/couldn't read or write/);
+    setLocale("ru");
+    expect(describeCode("vault", "never_heard_of_it")).toBe("Не получилось.");
+  });
+
+  it("has wording for every code the Rust backend can send", () => {
+    const dir = join(process.cwd(), "src-tauri", "src");
+    const sources = readdirSync(dir, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".rs") && !f.includes("tests"))
+      .map((f) => readFileSync(join(dir, f), "utf8"));
+    const text = sources.join("\n");
+    const wanted = (domain: string, codes: string[]) =>
+      codes.filter((c) => !hasMessage(`error.${domain}.${c}`) && !hasMessage(`error.common.${c}`));
+
+    const launch = [...text.matchAll(/\bfail\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    expect(wanted("launch", [...new Set(launch)])).toEqual([]);
+
+    const authBlock = text.slice(text.indexOf("pub fn code(&self)"), text.indexOf("fn network("));
+    const auth = [...authBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
+    expect(auth.length).toBeGreaterThan(10);
+    expect(
+      wanted(
+        "signIn",
+        auth.filter((c) => c !== "cancelled"),
+      ),
+    ).toEqual([]);
+
+    const prepBlock = text.slice(
+      text.indexOf("impl PrepareError"),
+      text.indexOf("impl From<DownloadError>"),
+    );
+    const prep = [...prepBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
+    expect(prep).toContain("disk_space");
+    expect(
+      wanted(
+        "prepare",
+        prep.filter((c) => c !== "cancelled"),
+      ),
+    ).toEqual([]);
+
+    const coded = [...text.matchAll(/CodedError::new\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    const known = new Set([
+      ...[
+        "duplicate_name",
+        "unknown_minecraft",
+        "cannot_verify",
+        "cannot_verify_loader",
+        "no_compatible_loader",
+        "loader_version_not_offered",
+        "invalid_name",
+        "catalog_unavailable",
+        "network_unavailable",
+        "not_found",
+        "storage",
+        "open_failed",
+        "unsupported_language",
+        "unknown_account",
+        "sign_in_unavailable",
+      ],
+      ...["passphrase_mismatch", "passphrase_too_short", "vault_exists", "vault_unreadable"],
+    ]);
+    for (const c of new Set(coded)) expect(known.has(c), `unknown code ${c}`).toBe(true);
+    const profileCodes = [
+      "duplicate_name",
+      "unknown_minecraft",
+      "cannot_verify",
+      "cannot_verify_loader",
+      "no_compatible_loader",
+      "loader_version_not_offered",
+      "invalid_name",
+    ];
+    expect(wanted("profile", profileCodes)).toEqual([]);
+    expect(
+      wanted("vault", [
+        "passphrase_mismatch",
+        "passphrase_too_short",
+        "vault_exists",
+        "vault_unreadable",
+      ]),
+    ).toEqual([]);
+
+    const reasons = [...text.matchAll(/\("[^"]+", "([a-z_]+)", "/g)].map((m) => m[1]);
+    expect(reasons.length).toBeGreaterThan(8);
+    for (const r of new Set([...reasons, "early_exit", "unexpected", "stopped"])) {
+      expect(hasMessage(`exit.${r}`), `exit.${r}`).toBe(true);
+    }
+  });
+});

@@ -1,17 +1,33 @@
 # Contributing to Clade Launcher
 
-Clade Launcher is currently in pre-release development. The full source tree has not yet been published to this repository, so contribution workflows are intentionally lightweight for now.
+Clade Launcher is in pre-release development and its source code is public. Contributions are welcome when they fit the product direction below.
 
-## Before the source publication
+## Ways to help
 
-You can help by:
-
-- reporting reproducible launcher bugs;
-- pointing out documentation problems;
-- testing public preview builds when they become available;
-- suggesting focused improvements that fit Clade's product direction.
+- report reproducible launcher bugs;
+- point out documentation problems;
+- test public preview builds when they become available;
+- propose focused improvements that fit Clade's product direction.
 
 Please avoid opening requests for a built-in mod marketplace, advertising feed, account bypass, cracked/offline authentication, or unrelated platform expansion. Those conflict with the current project scope.
+
+## Building and checking
+
+The prerequisites and the build steps are in the [README](README.md#building-from-source). Architecture notes, product rules and the portability and security requirements are in [CLAUDE.md](CLAUDE.md); please read the relevant sections before touching storage, accounts, downloads, extraction, process launch or the interface text.
+
+Run these before opening a pull request, and make sure they pass:
+
+```bash
+pnpm check                              # typecheck + eslint + vitest
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+End-to-end layout tests run with `pnpm test:e2e` (the first run needs `pnpm exec playwright install chromium`).
+
+The guard tests in `src-tauri/tests/` and the frontend scans enforce the product, portability and localization rules. Do not weaken them to make a change pass; if a rule has to change, change it deliberately and explain why.
 
 ## Product direction
 
@@ -37,8 +53,8 @@ Changes should preserve these constraints:
 - downloads and extracted paths must be validated;
 - production authentication must use the official Microsoft / Xbox / Minecraft flow;
 - there is no guest, cracked, or authentication-bypass mode;
-- user-facing strings must exist in both English and Russian once localization lands;
-- internal developer logs may remain in English;
+- every user-facing string lives in the localization catalogs (`src/locales/en.ts` and `ru.ts`) in both English and Russian, and Clade ships exactly those two languages;
+- internal developer logs and code comments stay in English;
 - UI changes should preserve Clade's restrained visual language rather than introducing a generic gaming dashboard.
 
 ## Issues
@@ -59,18 +75,16 @@ For security issues, follow [SECURITY.md](SECURITY.md).
 
 ## Pull requests
 
-A full code-contribution workflow will be documented when the source tree is published.
-
-Once source contributions are enabled, pull requests should:
+Pull requests should:
 
 - stay focused on one problem;
 - include tests for behavioral changes;
 - preserve portability and security guards;
-- pass formatting, linting, TypeScript, frontend tests, Rust tests, Clippy, and project guard tests;
+- pass formatting, linting, TypeScript, frontend tests, Rust tests, Clippy, and the project guard tests;
 - avoid unrelated redesign or refactoring.
+
+Visual changes should keep the launcher calm and minimal; attach a screenshot taken from the real application, without personal data.
 
 ## Licensing
 
-The repository license will be selected and published before accepting general source-code contributions.
-
-Until then, do not assume that repository contents are licensed for redistribution or derivative works.
+Clade Launcher is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution you agree that it is provided under the same license.

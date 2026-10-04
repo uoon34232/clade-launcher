@@ -26,12 +26,16 @@ The project is currently pre-release. Versioned entries will begin with the firs
 - Interactive rotating home-screen phrases, restrained particles, and procedural UI sounds.
 - Full-file verification command and pre-launch integrity repair path.
 - Disk-space checks before large preparation or repair work.
+- Complete English and Russian localization of the interface, with a first-run choice that follows the Windows display language and a Language setting.
+- Localized native start-up dialogs (folder in use, WebView2 missing and similar) shown before the interface exists.
+- Backend errors reported as stable codes and worded by the interface in the selected language.
+- Final Clade branding: logo mark, application and Windows icons, README banner, social preview and interface recordings.
+- Apache License 2.0.
+- Public source tree, build instructions and automated guard tests for portability, product rules and the application icon.
 
 ### In progress
 
-- Complete English and Russian localization.
-- Minecraft Services AppID approval and final authenticated end-to-end launch verification.
-- Public source-code audit and publication.
+- Minecraft Services AppID approval. Until Mojang approves Clade's Microsoft application ID, sign-in stops at that step, so the final authenticated end-to-end launch with a real account has **not** been verified. The launch pipeline has only been exercised with development fixtures.
 - Final portable release packaging and clean-machine verification.
 - GitHub Actions release automation.
 - Portable self-update design and implementation.

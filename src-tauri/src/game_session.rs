@@ -1,0 +1,378 @@
+//! Watching one running game: its log, its playtime and how it ended.
+//!
+//! [`supervise`] owns the child process from the moment it was spawned until it exits:
+//! - every line of stdout/stderr goes to a session log under `logs/games/<instance>/`, with the
+//!   secrets of the session replaced by `<redacted>` (a [`Redactor`]); a header records the
+//!   redacted command, a footer the exit code and duration; logs are capped in size and only the
+//!   newest few per instance are kept;
+//! - the playtime session (begun right after a successful spawn by the caller) is ticked by a
+//!   heartbeat while the process is alive and banked when it exits, so a crash still counts and
+//!   launcher idle time never does;
+//! - after a short grace period alive, `on_playing` is called once (the UI goes from "Launching"
+//!   to "Playing"); a process that dies inside the grace period is reported as failing to start;
+//! - when it exits, the last lines are classified into a short, human-readable [`ExitSummary`]
+//!   (Java failed to start, wrong Java, missing class or library, native library failure, out
+//!   of memory, a loader failure, a plain non-zero exit). The full detail stays in the log.
+//!
+//! The supervisor does not know about accounts, the UI or Tauri: it is driven in tests with
+//! ordinary controlled processes.
+
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::Child;
+use tokio::sync::mpsc;
+
+use crate::instances::InstanceId;
+use crate::playtime::{PlaytimeStore, SessionTracker};
+use crate::portable::PortableRoot;
+
+/// A process that is still alive after this long counts as having started.
+pub const GRACE: Duration = Duration::from_millis(2500);
+/// A non-zero exit sooner than this after the start is "failed to start" rather than a crash.
+const EARLY_EXIT: Duration = Duration::from_secs(10);
+const MAX_LOG_BYTES: u64 = 24 * 1024 * 1024;
+const KEEP_LOGS: usize = 10;
+const TAIL_LINES: usize = 250;
+const MAX_LINE_CHARS: usize = 4000;
+
+// ------------------------------------------------------------------------------ redaction
+
+/// Replaces secret values in text. Built from the session's secrets (the access token).
+#[derive(Debug, Clone, Default)]
+pub struct Redactor {
+    secrets: Vec<String>,
+}
+
+impl Redactor {
+    pub fn new(secrets: &[String]) -> Self {
+        Self {
+            // Longest first so a secret that contains another is hidden whole.
+            secrets: {
+                let mut s: Vec<String> = secrets.iter().filter(|s| s.len() >= 6).cloned().collect();
+                s.sort_by_key(|s| std::cmp::Reverse(s.len()));
+                s
+            },
+        }
+    }
+
+    pub fn apply(&self, line: &str) -> String {
+        let mut out = line.to_owned();
+        for s in &self.secrets {
+            if out.contains(s.as_str()) {
+                out = out.replace(s.as_str(), "<redacted>");
+            }
+        }
+        out
+    }
+}
+
+// ------------------------------------------------------------------------------ exit summary
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitKind {
+    /// Exit code 0.
+    Normal,
+    /// Java or the game stopped with an error after it had started.
+    Crashed,
+    /// It stopped almost at once: Java or the game never really started.
+    FailedToStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitSummary {
+    pub code: Option<i32>,
+    pub kind: ExitKind,
+    /// One short English sentence for logs. The UI words the outcome from `reason` and `code`.
+    pub message: String,
+    /// Stable reason code (`closed`, `wrong_java`, `out_of_memory`, ..., `unexpected`).
+    pub reason: &'static str,
+    pub seconds: u64,
+}
+
+/// Known failure signatures, most specific first: (text to look for, reason code, English
+/// sentence for the log). The UI words each reason in the selected language.
+const SIGNATURES: &[(&str, &str, &str)] = &[
+    ("UnsupportedClassVersionError", "wrong_java", "Minecraft or a mod needs a different Java version than the one Clade prepared. Repairing the profile may help."),
+    ("Could not find or load main class", "incomplete_files", "Minecraft's files are incomplete. Repair the profile to download them again."),
+    ("Could not reserve enough space", "no_memory", "There isn't enough free memory to start Minecraft. Close other programs and try again."),
+    ("OutOfMemoryError", "out_of_memory", "Minecraft ran out of memory."),
+    ("UnsatisfiedLinkError", "native_library", "A native library (graphics or sound) could not be loaded."),
+    ("Failed to locate library", "native_library", "A native library (graphics or sound) could not be loaded."),
+    ("EXCEPTION_ACCESS_VIOLATION", "java_crash", "The Java runtime crashed, often because of a graphics driver."),
+    ("hs_err_pid", "java_crash", "The Java runtime crashed, often because of a graphics driver."),
+    ("ModLoadingException", "mod_loader", "The mod loader reported an error while starting."),
+    ("Mixin apply failed", "mixin", "A mod could not be applied. Check the mods in this profile."),
+    ("Incompatible mod set", "incompatible_mods", "The mods in this profile don't work together."),
+    ("NoClassDefFoundError", "missing_class", "A library or mod could not be loaded."),
+    ("ClassNotFoundException", "missing_class", "A library or mod could not be loaded."),
+    ("Error: Could not create the Java Virtual Machine", "jvm_start", "Java could not start with the chosen settings."),
+];
+
+pub fn summarize(status: Option<ExitStatus>, ran: Duration, tail: &[String]) -> ExitSummary {
+    let code = status.and_then(|s| s.code());
+    let seconds = ran.as_secs();
+    if status.is_some_and(|s| s.success()) {
+        return ExitSummary {
+            code,
+            kind: ExitKind::Normal,
+            message: "Minecraft closed.".into(),
+            reason: "closed",
+            seconds,
+        };
+    }
+    let text = tail.join(
+        "
+",
+    );
+    let known = SIGNATURES
+        .iter()
+        .find(|(needle, _, _)| text.contains(needle))
+        .map(|(_, reason, m)| (*reason, (*m).to_owned()));
+    let kind = if ran < EARLY_EXIT {
+        ExitKind::FailedToStart
+    } else {
+        ExitKind::Crashed
+    };
+    let (reason, message) = known.unwrap_or_else(|| match (kind, code) {
+        (ExitKind::FailedToStart, Some(c)) => (
+            "early_exit",
+            format!("Minecraft stopped right after starting (exit code {c})."),
+        ),
+        (_, Some(c)) => (
+            "unexpected",
+            format!("Minecraft stopped unexpectedly (exit code {c})."),
+        ),
+        (_, None) => ("stopped", "Minecraft was stopped.".to_owned()),
+    });
+    ExitSummary {
+        code,
+        kind,
+        message,
+        reason,
+        seconds,
+    }
+}
+
+// ------------------------------------------------------------------------------ logs
+
+/// `logs/games/<instance>/`
+pub fn logs_dir(root: &PortableRoot, id: &InstanceId) -> PathBuf {
+    root.logs_dir().join("games").join(id.as_str())
+}
+
+fn prune(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .collect();
+    files.sort();
+    let excess = files.len().saturating_sub(KEEP_LOGS);
+    for old in files.into_iter().take(excess) {
+        let _ = fs::remove_file(old);
+    }
+}
+
+struct SessionLog {
+    file: File,
+    written: u64,
+    redactor: Redactor,
+    capped: bool,
+}
+
+impl SessionLog {
+    fn open(dir: &Path, name: &str, redactor: Redactor) -> std::io::Result<(Self, PathBuf)> {
+        fs::create_dir_all(dir)?;
+        prune(dir);
+        let path = dir.join(name);
+        Ok((
+            Self {
+                file: File::create(&path)?,
+                written: 0,
+                redactor,
+                capped: false,
+            },
+            path,
+        ))
+    }
+
+    /// The command line header: written whole (it can be long), with secrets replaced.
+    fn header(&mut self, text: &str) {
+        let clean = self.redactor.apply(text);
+        if writeln!(self.file, "{clean}").is_ok() {
+            self.written += clean.len() as u64 + 1;
+        }
+    }
+
+    fn line(&mut self, text: &str) {
+        if self.capped {
+            return;
+        }
+        let clean = self.redactor.apply(text);
+        let clipped: String = clean.chars().take(MAX_LINE_CHARS).collect();
+        if self.written + clipped.len() as u64 > MAX_LOG_BYTES {
+            let _ = writeln!(self.file, "[log truncated: size limit reached]");
+            self.capped = true;
+            return;
+        }
+        if writeln!(self.file, "{clipped}").is_ok() {
+            self.written += clipped.len() as u64 + 1;
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------ supervising
+
+pub struct Supervised {
+    pub exit: ExitSummary,
+    /// Seconds added to the playtime totals (`None` if no session was running).
+    pub banked_seconds: Option<u64>,
+    pub log_path: Option<PathBuf>,
+}
+
+async fn pump<R: AsyncRead + Unpin>(r: R, tx: mpsc::UnboundedSender<String>) {
+    let mut lines = BufReader::new(r).lines();
+    while let Ok(Some(l)) = lines.next_line().await {
+        if tx.send(l).is_err() {
+            break;
+        }
+    }
+}
+
+pub struct Watch<'a> {
+    pub root: &'a PortableRoot,
+    pub instance: &'a InstanceId,
+    /// Secret values to hide in the log (never written anywhere).
+    pub secrets: &'a [String],
+    /// The command line as already-redacted text, written at the top of the log.
+    pub header: &'a str,
+    /// The playtime session, begun right after the successful spawn.
+    pub tracker: Option<SessionTracker>,
+    pub heartbeat: Duration,
+    pub grace: Duration,
+    pub now_unix: fn() -> i64,
+}
+
+/// Runs until the child exits. `on_playing` fires once if it is still alive after the grace period.
+pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()) -> Supervised {
+    let started = Instant::now();
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let mut readers = Vec::new();
+    if let Some(o) = child.stdout.take() {
+        readers.push(tokio::spawn(pump(o, tx.clone())));
+    }
+    if let Some(e) = child.stderr.take() {
+        readers.push(tokio::spawn(pump(e, tx.clone())));
+    }
+    drop(tx);
+
+    let stamp = (watch.now_unix)();
+    let (mut log, log_path) = match SessionLog::open(
+        &logs_dir(watch.root, watch.instance),
+        &format!("{stamp}.log"),
+        Redactor::new(watch.secrets),
+    ) {
+        Ok((l, p)) => (Some(l), Some(p)),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open the game session log");
+            (None, None)
+        }
+    };
+    if let Some(l) = log.as_mut() {
+        l.line(&format!(
+            "Clade game session, instance {}, started at unix time {stamp}",
+            watch.instance
+        ));
+        l.header(&format!("Command: {}", watch.header));
+        l.line("---");
+    }
+
+    let mut tracker = watch.tracker;
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL_LINES);
+    let mut heartbeat = tokio::time::interval(watch.heartbeat);
+    heartbeat.tick().await; // the first tick fires at once
+    let grace = tokio::time::sleep(watch.grace);
+    tokio::pin!(grace);
+    let mut playing = false;
+    let redactor = Redactor::new(watch.secrets);
+    let feed = |line: String, log: &mut Option<SessionLog>, tail: &mut VecDeque<String>| {
+        if let Some(l) = log.as_mut() {
+            l.line(&line);
+        }
+        if tail.len() == TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(redactor.apply(&line));
+    };
+
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status.ok(),
+            Some(line) = rx.recv() => feed(line, &mut log, &mut tail),
+            _ = heartbeat.tick() => {
+                if let Some(t) = tracker.as_mut() {
+                    if let Err(e) = t.tick((watch.now_unix)(), Instant::now()) {
+                        tracing::warn!(error = %e, "playtime heartbeat failed");
+                    }
+                }
+            }
+            () = &mut grace, if !playing => {
+                playing = true;
+                on_playing();
+            }
+        }
+    };
+
+    // The process is gone: collect what it printed last.
+    for r in readers {
+        let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
+    }
+    while let Ok(line) = rx.try_recv() {
+        feed(line, &mut log, &mut tail);
+    }
+
+    let ran = started.elapsed();
+    let banked_seconds = tracker.take().and_then(|t| {
+        match t.finish(
+            &PlaytimeStore::new(watch.root),
+            (watch.now_unix)(),
+            Instant::now(),
+        ) {
+            Ok(b) => Some(b.seconds),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not bank the playtime session");
+                None
+            }
+        }
+    });
+
+    let tail_vec: Vec<String> = tail.into_iter().collect();
+    let exit = summarize(status, ran, &tail_vec);
+    if let Some(l) = log.as_mut() {
+        l.line("---");
+        l.line(&format!(
+            "Exited with code {} after {} s ({:?}). {}",
+            exit.code.map_or("unknown".to_owned(), |c| c.to_string()),
+            exit.seconds,
+            exit.kind,
+            exit.message
+        ));
+    }
+    Supervised {
+        exit,
+        banked_seconds,
+        log_path,
+    }
+}
+
+#[cfg(test)]
+mod tests;
