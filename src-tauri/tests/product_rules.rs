@@ -1,6 +1,6 @@
 //! Executable product rules. These tests exist so the launcher cannot drift into a content
 //! marketplace by accident. If one fails, do not weaken it to make a change pass: the product
-//! philosophy in CLAUDE.md ("Product philosophy") must be changed first, on purpose.
+//! philosophy in docs/TECHNICAL.md and README.md must be changed first, on purpose.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,7 +82,7 @@ fn no_content_platform_or_content_browser_anywhere_in_the_product() {
 #[test]
 fn network_allow_list_is_exactly_minecraft_microsoft_sign_in_and_loader_runtimes() {
     // Changing this list changes what the launcher can contact. Update it only together with
-    // the product rules in CLAUDE.md, never to add a mod/modpack/shader/resource-pack source.
+    // the product rules in docs/TECHNICAL.md, never to add a mod/modpack/shader/resource-pack source.
     let approved = [
         "mojang.com",
         "minecraft.net",

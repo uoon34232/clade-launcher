@@ -23,7 +23,7 @@ pub struct DownloadPolicy {
     allowed: &'static [&'static str],
 }
 
-/// The only hosts the launcher may ever contact. Product rule (see CLAUDE.md): the launcher
+/// The only hosts the launcher may ever contact. Product rule (see docs/TECHNICAL.md, "Downloads, verification and repair"): the launcher
 /// is vanilla-first and is not a content store, so there are deliberately NO mod,
 /// modpack, shader or resource-pack platforms here (no third-party content platforms, no generic
 /// code hosts). Each addition widens what a compromised manifest can make us fetch, and

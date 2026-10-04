@@ -1,6 +1,6 @@
 //! Instances: isolated Minecraft profiles. Every profile is explicitly Vanilla or Modded.
 //!
-//! Product rules this module enforces (see CLAUDE.md, "Product philosophy" and "Instances"):
+//! Product rules this module enforces (see docs/TECHNICAL.md, "Profiles and isolation"):
 //! - **Explicit choice.** Creating a profile requires an explicit [`Profile`]: `Vanilla` or
 //!   `Modded { loader, .. }`. There is deliberately no default and no way to "upgrade" a
 //!   vanilla instance into a modded one in place. The user always chooses the Minecraft version.

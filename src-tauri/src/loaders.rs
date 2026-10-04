@@ -1,6 +1,6 @@
 //! Mod *loader* support: official sources only, loaders only.
 //!
-//! Scope (product rules, see CLAUDE.md "Product philosophy"): the launcher prepares Minecraft
+//! Scope (product rules, see docs/TECHNICAL.md): the launcher prepares Minecraft
 //! and, for Modded instances, exactly one loader taken from that loader's own official host.
 //! It never searches, lists, recommends or downloads mods, modpacks, shaders or resource
 //! packs. After setup the user adds their own content to the instance folders by hand.

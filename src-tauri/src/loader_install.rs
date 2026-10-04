@@ -1,6 +1,6 @@
 //! Portable, sandboxed loader installation.
 //!
-//! Rule (CLAUDE.md, "Portability"): installing Fabric, Forge, NeoForge or Quilt must never use
+//! Rule (docs/TECHNICAL.md, "Loaders"): installing Fabric, Forge, NeoForge or Quilt must never use
 //! the global `.minecraft`, a user-profile cache, the system TEMP directory or any other
 //! machine-specific path. Everything a loader installer reads, writes or generates stays inside
 //! the portable launcher root, and nothing here ever needs administrator rights.
@@ -32,7 +32,7 @@
 //! Fabric and Quilt run no installer: [`library_relpath`] derives where each library from the
 //! (untrusted) version profile goes under `libraries/`, safely.
 //!
-//! Residual limits (documented in CLAUDE.md): the JVM may still write Java preferences to the
+//! Residual limits (documented in docs/TECHNICAL.md): the JVM may still write Java preferences to the
 //! Windows registry (it cannot be redirected), and the installer makes its own network
 //! requests (the Forge installer enforces its own trusted-host list).
 

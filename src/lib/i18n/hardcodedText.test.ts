@@ -133,7 +133,7 @@ describe("no user-facing text outside the localization layer", () => {
     const hits = all.flatMap((f) => findHardcodedText(readFileSync(f, "utf8"), relative(ROOT, f)));
     expect(
       hits,
-      "Add the text to src/locales/en.ts and ru.ts and read it with t(...) (see CLAUDE.md, Localization)",
+      "Add the text to src/locales/en.ts and ru.ts and read it with t(...) (see docs/TECHNICAL.md, Localization)",
     ).toEqual([]);
   });
 

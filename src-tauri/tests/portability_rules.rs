@@ -1,4 +1,4 @@
-//! Executable portability rules (CLAUDE.md, "Portability"). They scan the launcher's own
+//! Executable portability rules (docs/TECHNICAL.md, "Portable filesystem architecture"). They scan the launcher's own
 //! production Rust code for constructs that would tie data or behaviour to one machine: the
 //! system TEMP directory, user-profile/AppData locations, ambient environment lookups, bare
 //! process spawning (which would inherit the user's environment) and hard-coded absolute paths.
@@ -204,7 +204,7 @@ fn the_scanner_actually_detects_violations() {
 #[test]
 fn every_exception_is_listed_so_new_ones_get_reviewed() {
     // Adding a `portability-allow:` exception must be a conscious, reviewed change: update this
-    // list together with the justification in CLAUDE.md.
+    // list together with the justification in docs/TECHNICAL.md.
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &mut files);

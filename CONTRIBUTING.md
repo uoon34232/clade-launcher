@@ -13,7 +13,7 @@ Please avoid opening requests for a built-in mod marketplace, advertising feed, 
 
 ## Building and checking
 
-The prerequisites and the build steps are in the [README](README.md#building-from-source). Architecture notes, product rules and the portability and security requirements are in [CLAUDE.md](CLAUDE.md); please read the relevant sections before touching storage, accounts, downloads, extraction, process launch or the interface text.
+The prerequisites and build steps are in the [technical documentation](docs/TECHNICAL.md#2-building-from-source), which also describes the architecture and the portability, security and product rules. Please read the relevant sections before touching storage, accounts, downloads, extraction, process launch or the interface text.
 
 Run these before opening a pull request, and make sure they pass:
 
