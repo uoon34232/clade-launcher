@@ -1,0 +1,94 @@
+name: CI
+
+# Runs the project's complete validation suite on every pull request and on every push to main.
+# It never builds or publishes a release, needs no secrets, and cannot reach a Microsoft or Minecraft
+# account: every test uses synthetic data (see docs/TECHNICAL.md, "Automated guards and tests").
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Clade is a Windows application and the interface checks (layout, fonts) are verified on Windows,
+# so every job runs on a Windows runner.
+# Every action is pinned to the full commit SHA of a reviewed release (the tag is in the comment), so a moved
+# or compromised tag cannot change what runs here. Update them deliberately, not automatically.
+jobs:
+  frontend:
+    name: Frontend (typecheck, lint, unit tests, build)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The pnpm version comes from "packageManager" in package.json (action v6 supports pnpm 12).
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner's preinstalled stable toolchain, plus the two components the checks need.
+      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  e2e:
+    name: E2E (Playwright, Chromium)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium
+      - run: pnpm test:e2e
+      # Only on failure: the HTML report, screenshots and traces. They contain synthetic test data only.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: playwright-diagnostics
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -15,17 +15,19 @@ Please avoid opening requests for a built-in mod marketplace, advertising feed, 
 
 The prerequisites and build steps are in the [technical documentation](docs/TECHNICAL.md#2-building-from-source), which also describes the architecture and the portability, security and product rules. Please read the relevant sections before touching storage, accounts, downloads, extraction, process launch or the interface text.
 
-Run these before opening a pull request, and make sure they pass:
+Run these before opening a pull request, and make sure they pass. The same checks run automatically in CI on every pull request.
 
 ```bash
 pnpm check                              # typecheck + eslint + vitest
+pnpm build                              # production build of the frontend
+pnpm test:e2e                           # browser end-to-end tests
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-End-to-end layout tests run with `pnpm test:e2e` (the first run needs `pnpm exec playwright install chromium`).
+The end-to-end tests need Playwright's Chromium. Install it once with `pnpm exec playwright install chromium`. They use a stand-in backend with synthetic data, so they never need a Microsoft account or a network connection ([how they work](docs/TECHNICAL.md#17-automated-guards-and-tests)).
 
 The guard tests in `src-tauri/tests/` and the frontend scans enforce the product, portability and localization rules. Do not weaken them to make a change pass; if a rule has to change, change it deliberately and explain why.
 

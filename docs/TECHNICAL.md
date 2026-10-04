@@ -48,17 +48,26 @@ pnpm install        # frontend dependencies
 pnpm tauri dev      # builds the Rust side (first build downloads crates) and starts Clade
 ```
 
-Checks that must pass before a change is proposed:
+Checks that must pass before a change is proposed (the same checks run in CI on every pull request):
 
 ```bash
 pnpm check                              # typecheck + eslint + vitest
+pnpm build                              # typecheck + production build of the frontend
+pnpm test:e2e                           # browser end-to-end tests (needs Chromium, see below)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-End-to-end layout tests use Playwright and need a browser once: `pnpm exec playwright install chromium`, then `pnpm test:e2e`.
+The end-to-end tests run in Playwright's Chromium. Install it once with the standard command, then run the suite:
+
+```bash
+pnpm exec playwright install chromium
+pnpm test:e2e
+```
+
+They start the Vite dev server themselves, need no Tauri window, no network and no account, and write only to the git-ignored `test-results/` and `playwright-report/` folders.
 
 During development Clade keeps its data in `src-tauri/target/debug/clade-root`, never in your user profile. Do not use `pnpm tauri build`: installers are disabled on purpose (see [Release packaging](#18-release-packaging)).
 
@@ -302,8 +311,11 @@ These hold for all new code. Reporting vulnerabilities is covered in [SECURITY.m
 - **`src-tauri/tests/portability_rules.rs`** scans all production Rust and fails on ambient environment lookups, the system TEMP, Tauri AppData paths, `dirs`/`directories`, bare process spawning, `.minecraft` path literals and hard-coded absolute Windows paths. Each genuine exception needs a `portability-allow:` comment and is pinned in the test.
 - **`src-tauri/tests/product_rules.rs`** fails if a content-platform or content-browser name appears in source, configuration or dependencies, if the download allow-list differs from the approved set, or if an API-key setting appears.
 - **`src-tauri/tests/icon_rules.rs`** checks that the build notices icon changes, that every configured icon exists and that the Windows icon keeps its small sizes.
-- **Frontend tests** cover the localization rules above, the ban on browser storage for launcher state, and the interface itself (Vitest and Testing Library); Playwright covers layout at several window sizes.
+- **Frontend unit tests** cover the localization rules above, the ban on browser storage for launcher state, a guard that keeps test fixtures out of production code (`src/lib/e2eIsolation.test.ts`), and the interface components (Vitest and Testing Library).
+- **Browser end-to-end tests** (`e2e/`, Playwright with Chromium) check what a person sees and does: the home screen and headline, English/Russian switching, Settings, the profile selector and Create profile (Vanilla and Modded), accounts, preparation progress and failures, the launch lifecycle, and keyboard and focus behaviour. They use accessible roles and labels rather than CSS selectors, wait on real application state rather than timers, and fail on any console error or uncaught exception.
 - Rust unit tests cover version-rule evaluation, command construction, the download pipeline, the vault, the sign-in flow against a scripted transport, playtime recovery and more, using temporary folders and fake network layers. Tests never contact live Mojang endpoints.
+
+**How the end-to-end fixtures work.** The tests run the unmodified production frontend. Playwright injects a stand-in for the Tauri backend (`e2e/support/fakeBackend.ts`) before the page loads: it implements the same commands and events the frontend uses (`src/lib/*/api.ts`), keeps its state only in the page, and holds long operations such as a preparation open until the test advances them, so every intermediate state can be asserted deterministically. The data (`e2e/support/fixtures.ts`) is obviously synthetic: accounts named `FixtureAlex` and `FixtureBlake` with all-zero UUIDs, a short invented version catalog, and no tokens of any kind. The fake never starts a Microsoft sign-in (the command is refused), never touches the network or disk, and lives only under `e2e/`, so a release build contains no fake backend or fake account; `src/lib/e2eIsolation.test.ts` fails if production code ever defines the Tauri bridge, imports test support or carries a fixture account. The real Rust command, process and launch logic is covered by the Rust tests.
 
 If a rule has to change, change the documentation and the guard deliberately, with the reason, rather than weakening the guard to make a change pass.
 
