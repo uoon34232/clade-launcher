@@ -78,17 +78,20 @@ The small cat motif discussed for the launcher UI is better treated as a subtle 
 
 ## Application icon
 
-The final icon should have:
+The approved Clade mark is a white, custom-cut **C** on a warm clay rounded-square tile. The source files are `docs/media/logo-mark-final.svg` and `.png`.
+
+The Windows icon (`src-tauri/icons/icon.ico`) carries the 16, 20, 24, 32, 40, 48, 64, 128 and 256 px sizes, each rendered from the vector so the C stays crisp. The other files in `src-tauri/icons/` are generated from the same mark.
+
+The icon should keep:
 
 - one strong silhouette;
 - minimal internal detail;
 - good contrast against both light and dark Windows surfaces;
-- a neutral warm or graphite base with a restrained clay accent;
 - no text.
 
-Required export targets should eventually include the Windows icon sizes needed by Tauri and GitHub/social uses.
-
 ## GitHub banner
+
+The approved banner and social preview are `docs/media/banner-final.*` and `docs/media/social-preview.png`. The guidance below describes their composition.
 
 Recommended composition:
 

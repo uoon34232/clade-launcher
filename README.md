@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/media/banner-final.png" alt="Clade Launcher. Simple. Portable. Yours." width="100%">
+</p>
+
 # Clade Launcher
 
 > **Simple. Portable. Yours.**
@@ -6,9 +10,29 @@ Clade Launcher is an independent, minimal and fully portable launcher for **Mine
 
 Clade is built around a simple idea: the launcher should stay out of the way and let you manage and play Minecraft without turning into a content marketplace.
 
+## Preview
+
+### A quiet launcher that stays out of the way
+
+<p align="center"><img src="docs/media/hero-interaction.gif" alt="Clicking the headline on the Clade home screen changes the phrase" width="720"></p>
+
+### Accounts stay independent from your profiles
+
+<p align="center"><img src="docs/media/account-menu.gif" alt="Switching accounts and opening an account card" width="720"></p>
+
+### Create Vanilla or modded profiles
+
+<p align="center"><img src="docs/media/create-profile.gif" alt="Creating a profile: Vanilla or Modded, the version list and the loader choice" width="720"></p>
+
+### English and Русский
+
+<p align="center"><img src="docs/media/settings-language.gif" alt="Switching the launcher between English and Russian in Settings" width="720"></p>
+
+The recordings show the real application with development fixture accounts, not a mock-up.
+
 ## Highlights
 
-- Fully portable — extract, run, and move the folder
+- Fully portable: extract, run, and move the folder
 - No installer required
 - Launcher-managed Java runtimes
 - Bundled portable WebView2 runtime
@@ -20,8 +44,27 @@ Clade is built around a simple idea: the launcher should stay out of the way and
 - File verification and repair
 - Reuse of already prepared profiles while offline
 - Per-profile and lifetime playtime tracking
-- English and Russian UI planned for the first public preview
+- English and Russian interface, including the native start-up dialogs
 - No built-in mod, modpack, shader, or resource-pack marketplace
+
+## Project status
+
+Clade Launcher is in active pre-release development. No stable public release has been published yet.
+
+Implemented and covered by automated tests:
+
+- the portable architecture, encrypted credential vault and isolated profiles;
+- profile creation against the official Minecraft and loader catalogs;
+- preparation of Minecraft, managed Java and the selected loader, with verification and repair;
+- the Microsoft / Xbox / Minecraft sign-in flow, up to Mojang's approval step;
+- the launch core: command construction for modern, legacy and loader-based versions, an isolated process environment, lifecycle tracking, crash summaries and playtime;
+- complete English and Russian localization, including the native dialogs shown before the interface exists.
+
+Still pending before the first preview:
+
+- **Real authenticated Minecraft launch.** Clade's Microsoft application ID is awaiting Minecraft Services approval. Until Mojang approves it, sign-in stops at that step, so the final end-to-end launch with a real account has **not** been verified. The launch pipeline has only been exercised with controlled development fixtures and placeholder identities; nothing is claimed beyond that.
+- Skin and cape management (it needs a real signed-in account first).
+- Release packaging, clean-machine verification, release automation and a signed self-updater.
 
 ## Vanilla-first
 
@@ -69,9 +112,9 @@ Windows itself may still create normal operating-system artifacts such as recent
 
 Clade is designed for legitimate Microsoft / Minecraft accounts only.
 
-Authentication uses Microsoft's official sign-in flow. Clade does **not** ask for or store your Microsoft password.
+Authentication uses Microsoft's official sign-in flow in your system browser. Clade does **not** ask for or store your Microsoft password.
 
-Sensitive launcher credentials are stored locally in an encrypted portable vault. Account identity is kept independent from Minecraft profiles, so switching accounts does not alter a profile's saves, mods, settings, or playtime.
+Sensitive launcher credentials are stored locally in an encrypted portable vault protected by a master passphrase. Account identity is kept independent from Minecraft profiles, so switching accounts does not alter a profile's saves, mods, settings, or playtime.
 
 There is no cracked, guest, or offline-account bypass mode.
 
@@ -85,7 +128,7 @@ Clade uses official Microsoft, Xbox, Mojang, and Minecraft services where requir
 - verify the account state required for launching;
 - support official Java profile features such as skins and owned capes when those controls are enabled.
 
-Clade's Microsoft application ID is currently awaiting Minecraft Services approval. The launch pipeline has been implemented and tested with controlled development fixtures, but the final end-to-end authenticated launch test will only be performed after that approval.
+Clade's Microsoft application ID is currently awaiting Minecraft Services approval (see [Project status](#project-status)).
 
 ## Profiles and versions
 
@@ -123,59 +166,55 @@ Launcher-controlled profiles, settings, account metadata, caches, logs, runtimes
 
 Clade does not require an account with a third-party mod distribution platform and does not contain a built-in content marketplace.
 
-## Languages
+## Building from source
 
-Clade is being prepared with exactly two interface languages for the first public preview:
+Clade is a Tauri 2 application: a Rust backend in `src-tauri/` and a React + TypeScript + Vite frontend in `src/`. It targets 64-bit Windows 10/11.
 
-- English
-- Русский
+You need:
 
-The language can be changed from launcher settings without redesigning the rest of the interface.
+- [Rust](https://rustup.rs/) (stable, MSVC toolchain) and the Visual Studio C++ build tools;
+- [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/) (the exact version is pinned in `package.json`);
+- the Microsoft Edge WebView2 Runtime (already present on current Windows 10/11).
 
-## Project status
+```bash
+pnpm install        # downloads the frontend dependencies
+pnpm tauri dev      # builds the Rust side (first build downloads crates) and starts Clade
+```
 
-Clade Launcher is in active pre-release development.
+Quality checks, all of which should pass before a change is proposed:
 
-The core portable architecture, profile preparation, loader support, repair pipeline, managed Java runtime handling, process lifecycle, and launch command construction are implemented and under test.
+```bash
+pnpm check                              # typecheck + eslint + vitest
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
 
-Before the first public preview, the project is still completing:
+End-to-end layout tests use Playwright and need a browser once: `pnpm exec playwright install chromium`, then `pnpm test:e2e`.
 
-- English / Russian localization;
-- public source-code audit and publication;
-- real Microsoft / Minecraft end-to-end launch verification after AppID approval;
-- release packaging and clean-machine verification;
-- release automation and updater work.
+In development Clade keeps its data in `src-tauri/target/debug/clade-root`, never in your user profile.
 
-No stable public release has been published yet.
+### What is, and is not, in this repository
 
-## First public preview
+In Git: the source, tests, lockfiles (`pnpm-lock.yaml`, `src-tauri/Cargo.lock`), configuration, localization catalogs, the application icons, the packaging script and this documentation.
 
-The first public preview is expected to include:
+Not in Git, and fetched or generated when you need it:
 
-- portable Windows build;
-- Vanilla and modded profiles;
-- multiple Minecraft versions;
-- Microsoft account support;
-- Fabric / Forge / NeoForge / Quilt;
-- automatic Java runtime management;
-- file verification and repair;
-- playtime tracking;
-- English and Russian UI;
-- public source code.
+- `node_modules/` and `src-tauri/target/` (installed and built locally);
+- Minecraft versions, libraries, assets, Java runtimes and mod loaders, which Clade downloads at run time from the official Mojang and loader hosts into the Clade folder;
+- the WebView2 Fixed Version Runtime, which you download from Microsoft only when building a release (`scripts/package-portable.ps1`);
+- any Clade data folder, accounts, vault, logs or portable release archives.
 
-The initial release is planned as a preview rather than a `1.0` release.
+Architecture notes, product rules and the portability and security requirements are in [CLAUDE.md](CLAUDE.md).
 
 ## Technology
 
-Clade is built with:
+Clade is built with Tauri 2, Rust, React, TypeScript, Vite and Tailwind CSS. The interface uses the Fraunces and Instrument Sans typefaces (both open-licensed, installed from npm).
 
-- Tauri 2
-- Rust
-- React
-- TypeScript
-- Vite
+## License
 
-Build instructions will be documented when the source tree is published for the first public preview.
+Clade Launcher is licensed under the [Apache License 2.0](LICENSE).
 
 ## Security
 
