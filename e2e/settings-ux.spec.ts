@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { DEFAULT_CONFIG } from "./support/fixtures";
 import { expect, test } from "./support/test";
-import { settingsButton, text, textRu } from "./support/ui";
+import { accountTrigger, settingsButton, text, textRu } from "./support/ui";
 
 const openSettings = async (page: Page) => {
   await settingsButton(page).click();
@@ -96,7 +96,11 @@ test.describe("reduced motion saved as On", () => {
     await openApp();
     await expect(page.locator("html")).toHaveAttribute("data-motion", "reduce");
     const dialog = await openSettings(page);
-    await expect(dialog.getByRole("radio", { name: text("settings.motion.on") })).toBeChecked();
+    await expect(
+      dialog
+        .getByRole("radiogroup", { name: text("settings.motion") })
+        .getByRole("radio", { name: text("settings.motion.on") }),
+    ).toBeChecked();
   });
 });
 
@@ -322,7 +326,16 @@ test.describe("reset settings", () => {
     await expect(dialog.getByText(text("settings.resetConfirm"))).toHaveCount(0);
 
     await expect(dialog.getByRole("switch", { name: text("settings.sound") })).toBeChecked();
-    await expect(dialog.getByRole("radio", { name: text("settings.motion.system") })).toBeChecked();
+    await expect(
+      dialog
+        .getByRole("radiogroup", { name: text("settings.motion") })
+        .getByRole("radio", { name: text("settings.motion.system") }),
+    ).toBeChecked();
+    await expect(
+      dialog
+        .getByRole("radiogroup", { name: text("settings.transparency") })
+        .getByRole("radio", { name: text("settings.transparency.system") }),
+    ).toBeChecked();
     await expect(dialog.getByRole("radio", { name: text("settings.memory.auto") })).toBeChecked();
     await expect(dialog.getByRole("radio", { name: text("settings.onLaunch.keep") })).toBeChecked();
     await expect(page.locator("html")).toHaveAttribute("data-motion", "system");
@@ -406,4 +419,248 @@ test.describe("settings persistence", () => {
     }));
     expect(stored).toEqual({ local: 0, session: 0, databases: 0, cookies: "" });
   });
+});
+
+test.describe("transparency effects", () => {
+  const html = (page: Page) => page.locator("html");
+  const group = (dialog: Awaited<ReturnType<typeof openSettings>>) =>
+    dialog.getByRole("radiogroup", { name: text("settings.transparency") });
+
+  test("offers Follow Windows, On and Off, follows Windows by default and applies each choice live", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    // Windows has transparency on in the synthetic machine, so "Follow Windows" means glass
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    await expect(html(page)).toHaveAttribute("data-glass-live", "true");
+    const dialog = await openSettings(page);
+    const g = group(dialog);
+    await expect(
+      g.getByRole("radio", { name: text("settings.transparency.system") }),
+    ).toBeChecked();
+
+    await g.getByRole("radio", { name: text("settings.transparency.off") }).click();
+    await expect(g.getByRole("radio", { name: text("settings.transparency.off") })).toBeChecked();
+    // Off is a true opaque fallback: nothing glass-related is left on the page
+    await expect(html(page)).toHaveAttribute("data-glass", "off");
+    await expect(html(page)).not.toHaveAttribute("data-glass-live", /.*/);
+    const off = await page.evaluate(() => {
+      const dock = getComputedStyle(document.querySelector("nav")!);
+      return {
+        dockFilter: dock.backdropFilter,
+        pageBase: getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+      };
+    });
+    expect(off.dockFilter).toBe("none");
+    expect(off.pageBase).toBe("rgb(243, 237, 227)"); // fully opaque, the classic look
+    // (the open card eases between materials for a moment, so wait for it to settle)
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const m = getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!);
+          return [m.backdropFilter, m.backgroundColor];
+        }),
+      )
+      .toEqual(["none", "rgb(246, 240, 230)"]);
+
+    await g.getByRole("radio", { name: text("settings.transparency.on") }).click();
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    const on = await page.evaluate(() => ({
+      dockFilter: getComputedStyle(document.querySelector("nav")!).backdropFilter,
+      pageBase: getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+    }));
+    expect(on.dockFilter).toBe("none"); // the blur is the window material's, never a CSS filter (it costs GPU)
+    expect(on.pageBase).toMatch(/^rgba\(243, 237, 227, 0\.\d+\)$/);
+
+    await g.getByRole("radio", { name: text("settings.transparency.system") }).click();
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    expect((await backend.calls("set_transparency")).map((c) => c.args)).toEqual([
+      { mode: "off" },
+      { mode: "on" },
+      { mode: "system" },
+    ]);
+    expect((await backend.state()).ui.transparency).toBe("system");
+  });
+
+  test("is named in Russian too", async ({ page, openApp }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    await dialog.getByRole("radio", { name: "Русский" }).click();
+    const ru = page.getByRole("dialog");
+    await expect(
+      ru.getByRole("radiogroup", { name: textRu("settings.transparency") }),
+    ).toBeVisible();
+    for (const k of ["system", "on", "off"] as const)
+      await expect(
+        ru.getByRole("radio", { name: textRu(`settings.transparency.${k}`) }).last(),
+      ).toBeVisible();
+  });
+
+  test("does not depend on reduced motion in either direction", async ({ page, openApp }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    const motion = dialog.getByRole("radiogroup", { name: text("settings.motion") });
+    await motion.getByRole("radio", { name: text("settings.motion.on") }).click();
+    await expect(html(page)).toHaveAttribute("data-motion", "reduce");
+    await expect(html(page)).toHaveAttribute("data-glass", "on"); // reduced motion keeps the material
+    await group(dialog)
+      .getByRole("radio", { name: text("settings.transparency.off") })
+      .click();
+    await expect(html(page)).toHaveAttribute("data-glass", "off");
+    await expect(html(page)).toHaveAttribute("data-motion", "reduce"); // and Off keeps the motion choice
+  });
+
+  test("Reset settings puts it back to Follow Windows", async ({ page, backend, openApp }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    await group(dialog)
+      .getByRole("radio", { name: text("settings.transparency.off") })
+      .click();
+    await expect(html(page)).toHaveAttribute("data-glass", "off");
+    await dialog.getByRole("button", { name: text("settings.reset") }).click();
+    await page.getByRole("button", { name: text("settings.resetDo") }).click();
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    expect((await backend.state()).ui.transparency).toBe("system");
+  });
+});
+
+test.describe("transparency effects when Windows has them off", () => {
+  test.use({
+    backendConfig: { windows: { transparencyEffects: false, highContrast: false } },
+  });
+
+  test("Follow Windows is opaque, and On asks for glass but says Windows is not drawing it", async ({
+    page,
+    openApp,
+  }) => {
+    await openApp();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "off");
+    const dialog = await openSettings(page);
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.transparency") })
+      .getByRole("radio", { name: text("settings.transparency.on") })
+      .click();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "on");
+    await expect(page.locator("html")).toHaveAttribute("data-glass-live", "false");
+  });
+});
+
+test.describe("transparency effects with Windows High Contrast", () => {
+  test.use({
+    backendConfig: { windows: { transparencyEffects: true, highContrast: true } },
+  });
+
+  test("stay opaque even when On is chosen", async ({ page, openApp }) => {
+    await openApp();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "off");
+    const dialog = await openSettings(page);
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.transparency") })
+      .getByRole("radio", { name: text("settings.transparency.on") })
+      .click();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "off");
+  });
+});
+
+test.describe("the account menu material", () => {
+  const menuStyle = (page: Page) =>
+    page.evaluate(() => {
+      const m = getComputedStyle(document.querySelector('[data-slot="dropdown-menu-content"]')!);
+      return { bg: m.backgroundColor, filter: m.backdropFilter };
+    });
+
+  test("is translucent smoked glass with glass on, with no CSS blur, and fully opaque graphite when off", async ({
+    page,
+    openApp,
+  }) => {
+    await openApp();
+    await accountTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    const on = await menuStyle(page);
+    expect(on.bg).toMatch(/^rgba\(43, 38, 34, 0\.\d+\)$/);
+    expect(on.filter).toBe("none");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    // Off: the same menu is the classic opaque graphite
+    await page.evaluate(() => {
+      document.documentElement.dataset.glass = "off";
+      delete document.documentElement.dataset.glassLive;
+    });
+    await accountTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect.poll(() => menuStyle(page)).toEqual({ bg: "rgb(47, 42, 38)", filter: "none" });
+  });
+
+  test("the profile menu uses the same material", async ({ page, openApp }) => {
+    await openApp();
+    const trigger = page.getByRole("navigation", { name: "Clade" }).getByRole("button").nth(1);
+    await trigger.click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    const on = await menuStyle(page);
+    expect(on.bg).toMatch(/^rgba\(43, 38, 34, 0\.\d+\)$/);
+    expect(on.filter).toBe("none");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await page.evaluate(() => {
+      document.documentElement.dataset.glass = "off";
+      delete document.documentElement.dataset.glassLive;
+    });
+    await trigger.click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect.poll(() => menuStyle(page)).toEqual({ bg: "rgb(47, 42, 38)", filter: "none" });
+  });
+});
+
+test.describe("dock menus keep their rectangle", () => {
+  const box = async (page: Page) => {
+    const b = await page.locator('[data-slot="dropdown-menu-content"]').boundingBox();
+    if (!b) throw new Error("the menu is not open");
+    return b;
+  };
+  const near = (a: number, b: number) => Math.abs(a - b) <= 0.5;
+
+  for (const [name, index] of [
+    ["Account", 0],
+    ["Profile", 1],
+  ] as const) {
+    test(`the ${name} menu does not move or resize while the pointer moves over it`, async ({
+      page,
+      openApp,
+    }) => {
+      await openApp();
+      // the dock rises into place when the window opens; wait for it, or the menu would follow it
+      await page.waitForTimeout(1800);
+      const trigger = page
+        .getByRole("navigation", { name: "Clade" })
+        .getByRole("button")
+        .nth(index);
+      await trigger.hover();
+      await trigger.click();
+      await expect(page.getByRole("menu")).toBeVisible();
+      // let the opening animation finish, then take the rectangle the menu opened with
+      await page.waitForTimeout(500);
+      const opened = await box(page);
+
+      const items = page.locator('[data-slot="dropdown-menu-content"] [role^="menuitem"]');
+      const targets = [items.first(), items.last(), items.first(), items.last()];
+      for (const t of targets) {
+        await t.hover();
+        await page.waitForTimeout(250);
+        const now = await box(page);
+        for (const k of ["x", "y", "width", "height"] as const)
+          expect(near(now[k], opened[k]), name + " " + k + ": " + opened[k] + " -> " + now[k]).toBe(
+            true,
+          );
+      }
+      // and over the empty padding of the menu itself
+      await page.mouse.move(opened.x + 3, opened.y + 3);
+      await page.waitForTimeout(250);
+      const edge = await box(page);
+      for (const k of ["x", "y", "width", "height"] as const)
+        expect(near(edge[k], opened[k]), name + " " + k + " at the edge").toBe(true);
+    });
+  }
 });

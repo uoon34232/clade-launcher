@@ -1,6 +1,7 @@
 //! Read-only facts about the machine that launching and preparing need: how much RAM there is
 //! (to pick the game's memory) and how much free disk space the Clade folder's drive has.
-//! Nothing here reads the environment or the registry and nothing is stored.
+//! Nothing here reads the environment or the registry directly and nothing is stored. Two Windows
+//! display preferences (transparency effects, High Contrast) are read through their OS APIs.
 
 use std::path::Path;
 
@@ -44,6 +45,59 @@ pub fn system_locale() -> Option<String> {
 #[cfg(not(windows))]
 pub fn system_locale() -> Option<String> {
     None
+}
+
+/// The Windows "Transparency effects" preference, read through the documented
+/// `UISettings.AdvancedEffectsEnabled` property (read-only; nothing is written anywhere). `None`
+/// where it cannot be read.
+#[cfg(windows)]
+pub fn transparency_effects_enabled() -> Option<bool> {
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+    use windows::UI::ViewManagement::UISettings;
+    // WinRT needs an initialised thread; a short-lived one keeps this independent of the caller's.
+    std::thread::spawn(|| {
+        // SAFETY: paired with the RoUninitialize below on the same thread.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.ok()?;
+        let value = UISettings::new()
+            .and_then(|u| u.AdvancedEffectsEnabled())
+            .ok();
+        // SAFETY: balances the successful RoInitialize above.
+        unsafe { RoUninitialize() };
+        value
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
+#[cfg(not(windows))]
+pub fn transparency_effects_enabled() -> Option<bool> {
+    None
+}
+
+/// Whether Windows High Contrast is on (glass is never used then).
+#[cfg(windows)]
+pub fn high_contrast() -> bool {
+    use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETHIGHCONTRAST};
+    // SAFETY: HIGHCONTRASTW is plain data; its size field is set as the API requires and the
+    // pointer is valid for the duration of the call.
+    unsafe {
+        let mut hc: HIGHCONTRASTW = std::mem::zeroed();
+        hc.cbSize = std::mem::size_of::<HIGHCONTRASTW>() as u32;
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            std::ptr::from_mut(&mut hc).cast(),
+            0,
+        ) != 0
+            && hc.dwFlags & HCF_HIGHCONTRASTON != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn high_contrast() -> bool {
+    false
 }
 
 /// Free space, in bytes, available to this user on the drive that holds `path`.

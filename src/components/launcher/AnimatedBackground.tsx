@@ -66,7 +66,7 @@ const FIELDS: Field[] = [
 
 export function AnimatedBackground() {
   return (
-    <div aria-hidden className="bg-ivory pointer-events-none absolute inset-0 overflow-hidden">
+    <div aria-hidden className="page-base pointer-events-none absolute inset-0 overflow-hidden">
       {FIELDS.map((f, i) => (
         <div
           key={i}

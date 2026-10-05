@@ -5,6 +5,7 @@ import { installInputModality } from "@/lib/inputModality";
 import { resolveLocale, setLocale } from "@/lib/i18n";
 import { loadUiSettings, onUiSettingsChanged, type UiSettings } from "@/lib/settings/uiSettings";
 import { setMotionMode } from "@/lib/motion";
+import { applyGlass, loadGlassStatus, onGlassStatusChanged } from "@/lib/glass";
 import { sound } from "@/lib/sound/soundService";
 
 const localeOf = (s: UiSettings) => resolveLocale(s.language, s.systemLocale);
@@ -19,6 +20,10 @@ async function main() {
   const ui = await loadUiSettings();
   sound.hydrate(soundOf(ui));
   setMotionMode(ui.reducedMotion);
+  // The window material is cosmetic: the page starts opaque and only switches once the backend says
+  // the material is really on.
+  applyGlass(await loadGlassStatus());
+  void onGlassStatusChanged(applyGlass);
   // An explicit language choice wins; before one is ever made the Windows language decides.
   setLocale(localeOf(ui));
   void onUiSettingsChanged((s) => {

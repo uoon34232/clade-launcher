@@ -9,10 +9,12 @@ import {
   saveBehavior,
   saveMemory,
   saveReducedMotion,
+  saveTransparency,
   type MotionMode,
   type OnExit,
   type OnLaunch,
   type SaveResult,
+  type TransparencyMode,
 } from "@/lib/settings/uiSettings";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound, sound } from "@/lib/sound/soundService";
@@ -51,7 +53,7 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
 
   return (
     <Modal open={open} onOpenChange={close} size="xl" locked={confirming}>
-      <div className="-mb-1">
+      <div className="-mb-4">
         <ModalHeader title={t("settings.title")} />
       </div>
       <SettingsBody
@@ -90,7 +92,7 @@ function SettingsBody({
           <SupportSection support={support} confirming={confirming} setConfirming={setConfirming} />
         </div>
       </div>
-      <div className="border-graphite/10 mt-1 flex items-center justify-between gap-4 border-t pt-3">
+      <div className="border-graphite/10 mt-1 flex items-center justify-between gap-4 border-t pt-2">
         <div className="flex items-center gap-4">
           <p className="text-ink-muted/75 text-[0.75rem] leading-snug">
             <span className="block">Clade</span>
@@ -128,7 +130,7 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className={stacked ? "flex flex-col gap-2" : "flex items-center justify-between gap-4"}>
+    <div className={stacked ? "flex flex-col gap-1.5" : "flex items-center justify-between gap-4"}>
       <span id={id} className="text-graphite text-[0.9375rem]">
         {label}
       </span>
@@ -147,7 +149,7 @@ function InterfaceSection() {
   useEffect(() => sound.subscribe(setS), []);
 
   return (
-    <ModalSection title={t("settings.interface")} compact>
+    <ModalSection title={t("settings.interface")} compact className="gap-1.5 py-2">
       <Row id="language-label" label={t("settings.language")}>
         <Segmented
           compact
@@ -217,6 +219,23 @@ function InterfaceSection() {
           ]}
         />
       </Row>
+
+      <Row id="transparency-label" label={t("settings.transparency")} stacked>
+        <Segmented<TransparencyMode>
+          compact
+          label={t("settings.transparency")}
+          value={ui.transparency}
+          onChange={(mode) => {
+            playSound("select");
+            void saveTransparency(mode);
+          }}
+          options={[
+            { value: "system", label: t("settings.transparency.system") },
+            { value: "on", label: t("settings.transparency.on") },
+            { value: "off", label: t("settings.transparency.off") },
+          ]}
+        />
+      </Row>
     </ModalSection>
   );
 }
@@ -239,7 +258,7 @@ function MinecraftSection() {
   };
 
   return (
-    <ModalSection title={t("settings.minecraft")} compact>
+    <ModalSection title={t("settings.minecraft")} compact className="gap-1.5 py-2">
       <Row id="memory-label" label={t("settings.memory")} stacked>
         <Segmented<"auto" | "custom">
           compact

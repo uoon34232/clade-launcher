@@ -15,6 +15,8 @@ import { listen } from "@tauri-apps/api/event";
 import { isLocale, type Locale } from "@/lib/i18n/core";
 
 export type MotionMode = "system" | "on" | "off";
+/** Whether the translucent window material follows Windows, is always tried, or is never used. */
+export type TransparencyMode = "system" | "on" | "off";
 export type OnLaunch = "keep_open" | "hide";
 export type OnExit = "show" | "stay_hidden";
 
@@ -38,6 +40,8 @@ export interface UiSettings {
   systemLocale: string | null;
   /** Whether decorative motion follows Windows, is always reduced, or is never reduced. */
   reducedMotion: MotionMode;
+  /** The "Transparency effects" choice: follow Windows, on, or off. Separate from reduced motion. */
+  transparency: TransparencyMode;
   /** True once the first-run introduction was finished or skipped. */
   onboardingDone: boolean;
   /** The global game memory in MiB, or `null` for the automatic policy. */
@@ -56,6 +60,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   language: null,
   systemLocale: null,
   reducedMotion: "system",
+  transparency: "system",
   // A backend that cannot be read must never trap anyone in the introduction, so the fallback is
   // "already seen". The real backend reports the true value.
   onboardingDone: true,
@@ -128,6 +133,7 @@ export function parseUiSettings(raw: unknown): UiSettings {
         ? o.systemLocale
         : null,
     reducedMotion: oneOf(o.reducedMotion, ["system", "on", "off"], "system"),
+    transparency: oneOf(o.transparency, ["system", "on", "off"], "system"),
     onboardingDone:
       typeof o.onboardingDone === "boolean" ? o.onboardingDone : DEFAULT_UI_SETTINGS.onboardingDone,
     memoryMb: typeof o.memoryMb === "number" && o.memoryMb > 0 ? Math.round(o.memoryMb) : null,
@@ -251,6 +257,9 @@ async function change(
 export const saveReducedMotion = (mode: MotionMode) =>
   change("set_reduced_motion", { mode }, { reducedMotion: mode });
 
+export const saveTransparency = (mode: TransparencyMode) =>
+  change("set_transparency", { mode }, { transparency: mode });
+
 /** `null` selects the automatic memory policy. */
 export const saveMemory = (mb: number | null) => change("set_memory", { mb }, { memoryMb: mb });
 
@@ -277,6 +286,7 @@ export const resetUiSettings = () =>
       soundVolume: DEFAULT_UI_SETTINGS.soundVolume,
       language: null,
       reducedMotion: "system",
+      transparency: "system",
       memoryMb: null,
       onLaunch: "keep_open",
       onExit: "show",

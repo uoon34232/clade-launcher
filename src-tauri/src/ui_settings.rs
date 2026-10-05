@@ -48,6 +48,8 @@ pub struct UiSettingsDto {
     pub system_locale: Option<String>,
     /// `system`, `on` or `off`.
     pub reduced_motion: String,
+    /// `system`, `on` or `off`: the window-material ("Transparency effects") choice.
+    pub transparency: String,
     /// False until the first-run introduction was finished or skipped.
     pub onboarding_done: bool,
     /// The global game memory in MiB, or `None` for the automatic policy.
@@ -83,6 +85,7 @@ impl UiSettingsDto {
             language: s.ui.language.clone(),
             system_locale: crate::system::system_locale(),
             reduced_motion: s.ui.reduced_motion.clone(),
+            transparency: s.ui.transparency.clone(),
             onboarding_done: s.ui.onboarding_done,
             memory_mb: s.minecraft.memory_mb,
             memory: MemoryInfo {
@@ -108,6 +111,16 @@ impl SettingsState {
                 .max_concurrent_downloads,
         )
         .clamp(1, 16)
+    }
+
+    /// The transparency-effects choice (`system`, `on` or `off`).
+    pub fn transparency(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ui
+            .transparency
+            .clone()
     }
 
     /// The instance selected in the dock, if any (an id, never a path).
@@ -243,6 +256,8 @@ fn apply(
     let (dto, changed) = state.update(change).map_err(CodedError::storage)?;
     if changed {
         let _ = app.emit(CHANGED_EVENT, dto);
+        // The window material depends on a setting (and a reset can change it): re-resolve it now.
+        crate::glass::refresh(app);
     }
     Ok(())
 }
@@ -263,6 +278,21 @@ pub fn set_reduced_motion(
     apply(&app, &state, |s| {
         let before = s.ui.reduced_motion.clone();
         s.set_reduced_motion(&mode) && s.ui.reduced_motion != before
+    })
+}
+
+#[tauri::command]
+pub fn set_transparency(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    mode: String,
+) -> Result<(), CodedError> {
+    if !crate::settings::TRANSPARENCY_MODES.contains(&mode.as_str()) {
+        return Err(unsupported());
+    }
+    apply(&app, &state, |s| {
+        let before = s.ui.transparency.clone();
+        s.set_transparency(&mode) && s.ui.transparency != before
     })
 }
 
@@ -352,6 +382,7 @@ mod tests {
                 language: None,
                 system_locale: dto.system_locale.clone(),
                 reduced_motion: "system".into(),
+                transparency: "system".into(),
                 onboarding_done: false,
                 memory_mb: None,
                 memory: dto.memory.clone(),
@@ -443,6 +474,7 @@ mod tests {
             language: Some("ru".into()),
             system_locale: Some("ru-RU".into()),
             reduced_motion: "on".into(),
+            transparency: "off".into(),
             onboarding_done: true,
             memory_mb: Some(4096),
             memory: MemoryInfo {
@@ -457,6 +489,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["reducedMotion"], "on");
+        assert_eq!(json["transparency"], "off");
         assert_eq!(json["onboardingDone"], true);
         assert_eq!(json["memoryMb"], 4096);
         assert_eq!(json["memory"]["max"], 12288);

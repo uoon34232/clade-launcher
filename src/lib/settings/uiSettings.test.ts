@@ -25,6 +25,7 @@ import {
   saveMemory,
   saveReducedMotion,
   saveSoundSettings,
+  saveTransparency,
   subscribeUiSettings,
 } from "./uiSettings";
 
@@ -233,6 +234,39 @@ describe("outside the launcher (plain browser, tests)", () => {
     expect(set).not.toHaveBeenCalled();
     const off = await onUiSettingsChanged(() => {});
     expect(off()).toBeUndefined();
+  });
+});
+
+describe("the transparency preference", () => {
+  it("defaults to following Windows, also for an older backend that does not send it", () => {
+    expect(DEFAULT_UI_SETTINGS.transparency).toBe("system");
+    expect(parseUiSettings({}).transparency).toBe("system");
+    expect(parseUiSettings({ reducedMotion: "on" }).transparency).toBe("system");
+  });
+
+  it("accepts the three modes and repairs anything else to system", () => {
+    for (const m of ["system", "on", "off"])
+      expect(parseUiSettings({ transparency: m }).transparency).toBe(m);
+    for (const bad of ["glass", "", 1, true, null, {}])
+      expect(parseUiSettings({ transparency: bad }).transparency).toBe("system");
+  });
+
+  it("is independent of reduced motion", () => {
+    expect(parseUiSettings({ reducedMotion: "on" }).transparency).toBe("system");
+    expect(parseUiSettings({ transparency: "on" }).reducedMotion).toBe("system");
+  });
+
+  it("is saved through its own backend command and restored by a reset", async () => {
+    asTauri();
+    expect(await saveTransparency("off")).toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledWith("set_transparency", { mode: "off" });
+    asBrowser();
+    await saveTransparency("on");
+    expect(getUiSettings().transparency).toBe("on");
+    await saveReducedMotion("on");
+    expect(getUiSettings().transparency).toBe("on");
+    await resetUiSettings();
+    expect(getUiSettings().transparency).toBe("system");
   });
 });
 

@@ -33,6 +33,9 @@ impl Default for SoundPrefs {
 
 /// How the interface treats decorative motion: follow Windows, always reduce, or never reduce.
 pub const MOTION_MODES: [&str; 3] = ["system", "on", "off"];
+/// How the window material (the translucent "glass" treatment) is chosen: follow the Windows
+/// "Transparency effects" preference, always try it, or never use it.
+pub const TRANSPARENCY_MODES: [&str; 3] = ["system", "on", "off"];
 /// What Clade does with its window when Minecraft starts.
 pub const ON_LAUNCH_MODES: [&str; 2] = ["keep_open", "hide"];
 /// What Clade does with its window when Minecraft closes.
@@ -51,6 +54,8 @@ pub struct UiPrefs {
     pub language: Option<String>,
     /// `system` (follow Windows), `on` or `off`.
     pub reduced_motion: String,
+    /// `system` (follow the Windows "Transparency effects" setting), `on` or `off`.
+    pub transparency: String,
     /// True once the first-run introduction was finished or skipped. Kept in the portable folder,
     /// so moving it to another PC does not show the introduction again.
     pub onboarding_done: bool,
@@ -63,6 +68,7 @@ impl Default for UiPrefs {
             last_phrase: None,
             language: None,
             reduced_motion: "system".to_owned(),
+            transparency: "system".to_owned(),
             onboarding_done: false,
         }
     }
@@ -166,6 +172,9 @@ impl UiPrefs {
         }
         if !MOTION_MODES.contains(&self.reduced_motion.as_str()) {
             self.reduced_motion = Self::default().reduced_motion;
+        }
+        if !TRANSPARENCY_MODES.contains(&self.transparency.as_str()) {
+            self.transparency = Self::default().transparency;
         }
     }
 }
@@ -331,6 +340,13 @@ impl LauncherSettings {
                     d.ui.reduced_motion,
                     &mut bad,
                 ),
+                transparency: leaf(
+                    &ui,
+                    "transparency",
+                    "ui.transparency",
+                    d.ui.transparency,
+                    &mut bad,
+                ),
                 onboarding_done: leaf(
                     &ui,
                     "onboarding_done",
@@ -453,6 +469,15 @@ impl LauncherSettings {
             return false;
         }
         self.ui.reduced_motion = mode.to_owned();
+        true
+    }
+
+    /// Records the transparency-effects choice. Returns false (and changes nothing) for an unknown mode.
+    pub fn set_transparency(&mut self, mode: &str) -> bool {
+        if !TRANSPARENCY_MODES.contains(&mode) {
+            return false;
+        }
+        self.ui.transparency = mode.to_owned();
         true
     }
 
@@ -693,6 +718,7 @@ mod tests {
         .unwrap();
         let s = LauncherSettings::load_or_default(&p).unwrap();
         assert_eq!(s.ui.reduced_motion, "system");
+        assert_eq!(s.ui.transparency, "system");
         assert!(
             !s.ui.onboarding_done,
             "an old folder shows the introduction once"
@@ -714,6 +740,7 @@ mod tests {
         let p = d.path().join("data").join("settings.json");
         let mut s = LauncherSettings::default();
         assert!(s.set_reduced_motion("on"));
+        assert!(s.set_transparency("off"));
         assert_eq!(s.set_memory(Some(4096), Some(16_384)), Ok(true));
         assert!(s.set_behavior(Some("hide"), Some("stay_hidden")));
         assert!(s.complete_onboarding());
@@ -727,6 +754,7 @@ mod tests {
         );
         for needle in [
             "\"reduced_motion\": \"on\"",
+            "\"transparency\": \"off\"",
             "\"onboarding_done\": true",
             "\"memory_mb\": 4096",
             "\"on_launch\": \"hide\"",
@@ -784,6 +812,22 @@ mod tests {
         let mut m = MinecraftPrefs::default();
         m.sanitize(Some(16_384));
         assert_eq!(m.memory_mb, None, "automatic stays automatic");
+    }
+
+    #[test]
+    fn transparency_is_independent_of_reduced_motion_and_rejects_unknown_values() {
+        let mut s = LauncherSettings::default();
+        assert_eq!(s.ui.transparency, "system");
+        assert!(!s.set_transparency("glass"));
+        assert!(!s.set_transparency(""));
+        assert_eq!(s.ui.transparency, "system");
+        // the two preferences never imply each other
+        assert!(s.set_reduced_motion("on"));
+        assert_eq!(s.ui.transparency, "system");
+        assert!(s.set_transparency("on"));
+        assert!(s.set_transparency("off"));
+        assert_eq!(s.ui.reduced_motion, "on");
+        assert_eq!(s.ui.transparency, "off");
     }
 
     #[test]
@@ -847,6 +891,7 @@ mod tests {
         s.set_sound(Some(false), Some(0.1));
         s.set_language("ru");
         s.set_reduced_motion("on");
+        s.set_transparency("off");
         s.set_memory(Some(6144), Some(16_384)).unwrap();
         s.set_behavior(Some("hide"), Some("stay_hidden"));
         s.complete_onboarding();
@@ -861,6 +906,7 @@ mod tests {
         assert!(back.ui.sound.enabled && (back.ui.sound.volume - 0.5).abs() < f32::EPSILON);
         assert_eq!(back.ui.language, None);
         assert_eq!(back.ui.reduced_motion, "system");
+        assert_eq!(back.ui.transparency, "system");
         assert_eq!(back.minecraft.memory_mb, None);
         assert_eq!(back.behavior, BehaviorPrefs::default());
         // not reset: the introduction was seen, the selection and download concurrency stay
@@ -986,6 +1032,7 @@ mod tests {
                 "last_phrase": "take-your-time",
                 "language": "ru",
                 "reduced_motion": "on",
+                "transparency": "off",
                 "onboarding_done": true
             },
             "minecraft": { "memory_mb": 4096 },
@@ -1025,6 +1072,7 @@ mod tests {
         assert_eq!(s.ui.last_phrase.as_deref(), Some("take-your-time"));
         assert_eq!(s.ui.language.as_deref(), Some("ru"));
         assert_eq!(s.ui.reduced_motion, "on");
+        assert_eq!(s.ui.transparency, "off");
         assert!(s.ui.onboarding_done);
         assert_eq!(s.minecraft.memory_mb, Some(4096));
         assert_eq!(s.behavior.on_launch, "hide");
@@ -1058,6 +1106,9 @@ mod tests {
         if keep("ui.reduced_motion") {
             assert_eq!(s.ui.reduced_motion, "on");
         }
+        if keep("ui.transparency") {
+            assert_eq!(s.ui.transparency, "off");
+        }
         if keep("ui.onboarding_done") {
             assert!(s.ui.onboarding_done);
         }
@@ -1079,6 +1130,8 @@ mod tests {
         let cases = [
             ("ui.reduced_motion", json!("sometimes"), "ui.reduced_motion"),
             ("ui.reduced_motion", json!(7), "ui.reduced_motion"),
+            ("ui.transparency", json!("glassy"), "ui.transparency"),
+            ("ui.transparency", json!(true), "ui.transparency"),
             ("behavior.on_launch", json!("explode"), "behavior.on_launch"),
             ("behavior.on_launch", json!(true), "behavior.on_launch"),
             ("behavior.on_exit", json!("quit"), "behavior.on_exit"),
@@ -1113,6 +1166,7 @@ mod tests {
             // and the broken value itself ended up somewhere safe
             match name {
                 "ui.reduced_motion" => assert_eq!(s.ui.reduced_motion, "system", "{bad}"),
+                "ui.transparency" => assert_eq!(s.ui.transparency, "system", "{bad}"),
                 "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "keep_open", "{bad}"),
                 "behavior.on_exit" => assert_eq!(s.behavior.on_exit, "show", "{bad}"),
                 "minecraft.memory_mb" => {

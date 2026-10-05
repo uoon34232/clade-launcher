@@ -28,6 +28,7 @@ export interface FixtureUiSettings {
   language: "en" | "ru" | null;
   systemLocale: string | null;
   reducedMotion: "system" | "on" | "off";
+  transparency: "system" | "on" | "off";
   onboardingDone: boolean;
   memoryMb: number | null;
   /** What the (synthetic) computer allows, in MiB. */
@@ -71,6 +72,8 @@ export interface BackendConfig {
   loaders: Record<string, FixtureLoaderOption[]>;
   /** Games that are already running when the window opens. */
   runs: Record<string, "launching" | "playing">;
+  /** The (synthetic) Windows "Transparency effects" preference, and whether High Contrast is on. */
+  windows: { transparencyEffects: boolean; highContrast: boolean };
 }
 
 const ZERO_UUID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -197,6 +200,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     language: "en",
     systemLocale: "en-US",
     reducedMotion: "system",
+    transparency: "system",
     // Most tests are not about the introduction, so it counts as already seen; its own tests turn it on.
     onboardingDone: true,
     memoryMb: null,
@@ -208,4 +212,5 @@ export const DEFAULT_CONFIG: BackendConfig = {
   catalog: CATALOG,
   loaders: LOADERS,
   runs: {},
+  windows: { transparencyEffects: true, highContrast: false },
 };
