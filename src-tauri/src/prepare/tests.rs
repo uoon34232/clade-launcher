@@ -551,6 +551,39 @@ async fn a_truncated_or_corrupted_file_is_detected_and_repaired() {
 }
 
 #[tokio::test]
+async fn verify_files_also_checks_and_repairs_the_managed_java_runtime() {
+    let w = world("1.21.4", Era::Modern);
+    let id = vanilla(&w);
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    let java = java_install::find_installed(&w.root, "java-runtime-delta").unwrap();
+    let modules = java.home.join("lib").join("modules");
+    let good = fs::read(&modules).unwrap();
+
+    // same size, different bytes (a damaged jvm/module file): java.exe is intact, so the runtime still
+    // resolves, and neither the quick check nor an ordinary preparation can see it
+    let mut damaged = good.clone();
+    damaged[7] ^= 0xFF;
+    fs::write(&modules, &damaged).unwrap();
+    assert!(java_install::find_installed(&w.root, "java-runtime-delta").is_some());
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(fs::read(&modules).unwrap(), damaged);
+
+    // the explicit full verification finds it and replaces it, using the runtime's own manifest
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    prepare_instance(&deep, &id).await.unwrap();
+    assert_eq!(fs::read(&modules).unwrap(), good);
+    // nothing but the managed runtime was involved: it is still the one under runtimes/java
+    let again = java_install::find_installed(&w.root, "java-runtime-delta").unwrap();
+    assert!(again.exe.starts_with(w.root.java_runtimes_dir()));
+
+    // and a missing file is restored too
+    fs::remove_file(java.home.join("bin").join("javaw.exe")).unwrap();
+    prepare_instance(&deep, &id).await.unwrap();
+    assert!(java.home.join("bin").join("javaw.exe").is_file());
+}
+
+#[tokio::test]
 async fn cancelling_leaves_the_profile_pending() {
     let w = world("1.21.4", Era::Modern);
     let id = vanilla(&w);

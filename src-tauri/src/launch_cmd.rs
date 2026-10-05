@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -44,6 +44,7 @@ use crate::net::Transport;
 use crate::playtime::PlaytimeStore;
 use crate::portable::PortableRoot;
 use crate::prepare::check_installed;
+use crate::profile_lock::{Activity, ProfileLocks};
 use crate::profiles::now_unix;
 use crate::runtimes::{resolve_java, ManagedJava};
 use crate::ui_settings::SettingsState;
@@ -111,6 +112,7 @@ pub struct LaunchState {
     pub root: PortableRoot,
     sessions: Mutex<HashMap<String, Entry>>,
     exit_when_idle: AtomicBool,
+    locks: Arc<ProfileLocks>,
 }
 
 impl LaunchState {
@@ -119,7 +121,14 @@ impl LaunchState {
             root,
             sessions: Mutex::new(HashMap::new()),
             exit_when_idle: AtomicBool::new(false),
+            locks: Arc::new(ProfileLocks::default()),
         }
+    }
+
+    /// Shares the per-profile lock registry with preparation (see `profile_lock`).
+    pub fn with_locks(mut self, locks: Arc<ProfileLocks>) -> Self {
+        self.locks = locks;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
@@ -128,10 +137,17 @@ impl LaunchState {
 
     /// Reserves the instance so a second Play click cannot start a second game. `false` if taken.
     pub fn claim(&self, id: &InstanceId) -> bool {
+        self.claim_checked(id).is_ok()
+    }
+
+    /// [`Self::claim`] that also says what the profile is busy with when it is refused: the game is
+    /// already starting or running (`Launching`), or its files are being prepared (`Preparing`).
+    pub fn claim_checked(&self, id: &InstanceId) -> Result<(), Activity> {
         let mut s = self.lock();
         if s.contains_key(id.as_str()) {
-            return false;
+            return Err(Activity::Launching);
         }
+        self.locks.claim(id.as_str(), Activity::Launching)?;
         s.insert(
             id.to_string(),
             Entry {
@@ -139,7 +155,7 @@ impl LaunchState {
                 pid: None,
             },
         );
-        true
+        Ok(())
     }
 
     fn set_pid(&self, id: &InstanceId, pid: u32) {
@@ -156,6 +172,7 @@ impl LaunchState {
 
     pub fn release(&self, id: &InstanceId) {
         self.lock().remove(id.as_str());
+        self.locks.release(id.as_str());
     }
 
     /// Is a game process alive (started and not yet exited)? Closing the window while this is
@@ -392,11 +409,20 @@ pub async fn launch_profile(
 ) -> Result<(), LaunchFailure> {
     let iid =
         InstanceId::new(&id).map_err(|_| fail("not_found", "That profile no longer exists."))?;
-    if !state.claim(&iid) {
-        return Err(fail(
-            "already_running",
-            "This profile is already starting or running.",
-        ));
+    match state.claim_checked(&iid) {
+        Ok(()) => {}
+        Err(Activity::Launching) => {
+            return Err(fail(
+                "already_running",
+                "This profile is already starting or running.",
+            ))
+        }
+        Err(Activity::Preparing) => {
+            return Err(fail(
+                "already_preparing",
+                "This profile is being set up. Wait for it to finish.",
+            ))
+        }
     }
     emit(&app, &iid, "launching", None);
     let result = start(&app, &state, &auth, &accounts, &iid).await;
@@ -404,6 +430,8 @@ pub async fn launch_profile(
         tracing::info!(code = e.code, "launch did not start");
         state.release(&iid);
         emit(&app, &iid, "stopped", None);
+        // A launch that could not start is always shown, even if the window was hidden.
+        reveal(&app);
     }
     result
 }
@@ -500,37 +528,82 @@ async fn start(
         ls.release(&id);
         tracing::info!(code = ?outcome.exit.code, kind = ?outcome.exit.kind, "game process ended");
         emit(&app, &id, "stopped", Some((&outcome.exit).into()));
-        // Clade was closed while the game ran: now that it is over, finish quitting.
-        if ls.exit_when_idle() && !ls.has_live_game() {
-            app.exit(0);
-        } else if !ls.has_live_game() {
-            window_after_game(&app);
-        }
+        // What happens to the window now that the game is over.
+        apply_window_plan(
+            &app,
+            outcome.exit.kind,
+            ls.exit_when_idle(),
+            ls.has_live_game(),
+        );
     });
     Ok(())
 }
 
-/// "When Minecraft closes" (Settings): bring Clade's window back, or let a window that was hidden
-/// when the game started stay out of sight, in which case Clade quietly ends with the game (it has
-/// no tray and runs no background service; starting it again brings it up). A window that is
-/// already on screen is left alone.
-fn window_after_game(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("main") else {
-        return;
-    };
-    if w.is_visible().unwrap_or(true) {
-        return;
+/// What to do with Clade's window when a game has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPlan {
+    /// Leave the window as it is.
+    Leave,
+    /// Bring the window to the front (show, restore, focus).
+    Reveal,
+    /// Finish quitting: Clade has nothing left to do and no window the person is looking at.
+    Quit,
+}
+
+/// The rules for the window after a game ended:
+/// - another game is still running: nothing changes yet;
+/// - Clade's window was closed during the game: the delayed quit finishes (unchanged behaviour);
+/// - the game failed to start or crashed: the window **always** comes back, so the explanation can be
+///   seen. "Stay hidden" never hides a failure;
+/// - a normal exit follows "When Minecraft closes": a window already on screen is left alone, a
+///   hidden one is shown again, or, with "Stay hidden", Clade quietly ends with the game (it has no
+///   tray and no background service; starting it again brings it up).
+pub fn window_plan(
+    kind: ExitKind,
+    closed_during_game: bool,
+    another_game_running: bool,
+    window_visible: bool,
+    stay_hidden: bool,
+) -> WindowPlan {
+    if another_game_running {
+        return WindowPlan::Leave;
     }
-    if app
-        .state::<SettingsState>()
-        .behavior()
-        .stays_hidden_on_exit()
-    {
-        app.exit(0);
+    if closed_during_game {
+        return WindowPlan::Quit;
+    }
+    if kind != ExitKind::Normal {
+        return WindowPlan::Reveal;
+    }
+    if window_visible {
+        return WindowPlan::Leave;
+    }
+    if stay_hidden {
+        WindowPlan::Quit
     } else {
+        WindowPlan::Reveal
+    }
+}
+
+fn reveal(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+fn apply_window_plan(app: &AppHandle, kind: ExitKind, closed: bool, another_running: bool) {
+    let visible = app
+        .get_webview_window("main")
+        .is_none_or(|w| w.is_visible().unwrap_or(true));
+    let stay_hidden = app
+        .state::<SettingsState>()
+        .behavior()
+        .stays_hidden_on_exit();
+    match window_plan(kind, closed, another_running, visible, stay_hidden) {
+        WindowPlan::Leave => {}
+        WindowPlan::Reveal => reveal(app),
+        WindowPlan::Quit => app.exit(0),
     }
 }
 

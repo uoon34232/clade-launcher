@@ -647,3 +647,53 @@ fn seed_dev_fixture_accounts() {
             .unwrap();
     }
 }
+
+// ---- what happens to the window when a game ends
+
+#[test]
+fn a_failure_is_always_shown_whatever_the_window_preferences_say() {
+    use crate::game_session::ExitKind::{Crashed, FailedToStart, Normal};
+    use WindowPlan::{Leave, Quit, Reveal};
+    // (kind, closed during the game, another game running, window visible, stay hidden) -> plan
+    let cases = [
+        // a normal exit follows "When Minecraft closes"
+        (Normal, false, false, true, false, Leave),
+        (Normal, false, false, true, true, Leave),
+        (Normal, false, false, false, false, Reveal),
+        (Normal, false, false, false, true, Quit),
+        // hide on start + stay hidden, then the game crashes or never starts: the window comes back
+        (Crashed, false, false, false, true, Reveal),
+        (FailedToStart, false, false, false, true, Reveal),
+        (Crashed, false, false, false, false, Reveal),
+        // a failure also brings forward a window that is visible but buried or minimized
+        (Crashed, false, false, true, true, Reveal),
+        (FailedToStart, false, false, true, false, Reveal),
+        // closing Clade during the game keeps its meaning: it finishes quitting once the game ends
+        (Normal, true, false, false, false, Quit),
+        (Normal, true, false, false, true, Quit),
+        // while another game still runs nothing changes yet
+        (Crashed, false, true, false, true, Leave),
+        (Normal, false, true, false, true, Leave),
+    ];
+    for (kind, closed, other, visible, stay, want) in cases {
+        assert_eq!(
+            window_plan(kind, closed, other, visible, stay),
+            want,
+            "{kind:?} closed={closed} other={other} visible={visible} stay_hidden={stay}"
+        );
+    }
+}
+
+#[test]
+fn stay_hidden_can_only_ever_quit_after_a_clean_exit() {
+    use crate::game_session::ExitKind;
+    for kind in [ExitKind::Crashed, ExitKind::FailedToStart] {
+        for visible in [true, false] {
+            assert_ne!(
+                window_plan(kind, false, false, visible, true),
+                WindowPlan::Quit,
+                "a failure must never end Clade silently"
+            );
+        }
+    }
+}

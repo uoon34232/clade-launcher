@@ -1,5 +1,5 @@
 import { expect, test } from "./support/test";
-import { playButton, text } from "./support/ui";
+import { playButton, profileTrigger, text } from "./support/ui";
 
 // These tests cover the launch UI lifecycle against the fake backend. The real process handling,
 // the command line and the pre-launch checks are covered by the Rust tests.
@@ -184,5 +184,50 @@ test.describe("when the launch is refused", () => {
     await dialog.getByRole("button", { name: text("common.tryAgain") }).click();
     await expect(playButton(page)).toHaveText(text("play.launching"));
     expect(await backend.calls("launch_profile")).toHaveLength(2);
+  });
+});
+
+test.describe("a profile's files and its game exclude each other", () => {
+  test("Verify files is unavailable while the game starts or runs, and comes back afterwards", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    const verify = () => page.getByRole("menuitem", { name: text("profile.verify") });
+    await openApp();
+    await profileTrigger(page).click();
+    await expect(verify()).toBeEnabled();
+    await page.keyboard.press("Escape");
+
+    await playButton(page).click();
+    await expect(playButton(page)).toHaveText(text("play.launching"));
+    await profileTrigger(page).click();
+    await expect(verify()).toBeDisabled();
+    await page.keyboard.press("Escape");
+
+    await backend.playing("survival");
+    await profileTrigger(page).click();
+    await expect(verify()).toBeDisabled();
+    await page.keyboard.press("Escape");
+
+    await backend.stopped("survival", { kind: "normal", reason: "normal", code: 0 });
+    await profileTrigger(page).click();
+    await expect(verify()).toBeEnabled();
+    expect(await backend.calls("prepare_profile")).toHaveLength(0);
+  });
+
+  test("a launch refused because the profile is being set up says so in words", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await backend.refuseNextLaunch("already_preparing");
+    await playButton(page).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("alert")).toHaveText(text("error.launch.already_preparing"));
+    await dialog.getByRole("button", { name: text("common.close") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(playButton(page)).toHaveText(text("play.play"));
   });
 });

@@ -126,6 +126,7 @@ export const ru: Record<MessageKey, Message> = {
   "prepare.stage.minecraft": "Загрузка Minecraft",
   "prepare.stage.minecraft.verify": "Проверка Minecraft",
   "prepare.stage.libraries": "Загрузка библиотек",
+  "prepare.stage.java.verify": "Проверка Java",
   "prepare.stage.libraries.verify": "Проверка библиотек",
   "prepare.stage.assets": "Загрузка ресурсов",
   "prepare.stage.assets.verify": "Проверка ресурсов",
@@ -309,6 +310,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.launch.not_ready": "Профиль нужно подготовить перед запуском.",
   "error.launch.unsupported": "Этот профиль не удаётся запустить.",
   "error.launch.already_running": "Этот профиль уже запускается или запущен.",
+  "error.launch.already_preparing": "Этот профиль сейчас готовится. Дождись завершения.",
   "error.launch.spawn_failed": "Не удалось запустить Java.",
 
   "error.prepare.unknown": "Не удалось подготовить профиль.",
@@ -325,6 +327,8 @@ export const ru: Record<MessageKey, Message> = {
   "error.prepare.disk_space":
     "На диске, где находится Clade, не хватает места: нужно около {required}, доступно {available}. Освободи место и повтори.",
   "error.prepare.busy": "Сейчас готовится другой профиль. Дождись завершения.",
+  "error.prepare.already_running":
+    "Этот профиль запускается или запущен. Закрой игру, прежде чем готовить или проверять его.",
 
   "error.signIn.unknown": "Не удалось войти.",
   "error.signIn.timed_out":

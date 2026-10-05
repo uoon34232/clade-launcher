@@ -335,6 +335,13 @@ fn profile_summary(root: &PortableRoot) -> String {
             "Profiles that could not be loaded: {}\n",
             listing.problems.len()
         ));
+        // Their files are left exactly as they are; only the folder name and the reason are listed.
+        for (folder, reason) in &listing.problems {
+            out.push_str(&format!(
+                "- {folder}: {}\n",
+                reason.lines().next().unwrap_or("")
+            ));
+        }
     }
     out
 }

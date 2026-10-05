@@ -16,6 +16,7 @@
 use std::fs;
 use std::io;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
@@ -34,6 +35,9 @@ const MAX_FILES: usize = 20_000;
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const JAVA_EXE: &str = "bin/java.exe";
 const STAGING: &str = "java-staging";
+/// Written beside `runtime.json` at install time: every file of the runtime with the SHA-1 and size
+/// Mojang's manifest gave for it. It is what lets "Verify files" check the whole runtime, offline.
+const FILES_RECORD: &str = "runtime-files.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum JavaError {
@@ -256,6 +260,7 @@ pub async fn install_runtime<S: Streamer>(
         java_exe_sha256: sha256_hex(&java_exe.to_path(&staging))?,
         java_exe,
     };
+    atomic_write(&staging.join(FILES_RECORD), &record_bytes(&plan.files)?)?;
     atomic_write(
         &staging.join("runtime.json"),
         &serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
@@ -265,6 +270,106 @@ pub async fn install_runtime<S: Streamer>(
     }
     fs::rename(&staging, &target)?;
     resolve_java(root, &id).map_err(|_| JavaError::Manifest("installed runtime failed its check"))
+}
+
+// ------------------------------------------------------------------------------ full verification
+
+#[derive(Serialize, Deserialize)]
+struct RecordedFile {
+    path: String,
+    url: String,
+    sha1: String,
+    size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FilesRecord {
+    schema: u32,
+    files: Vec<RecordedFile>,
+}
+
+fn record_bytes(files: &[RuntimeFile]) -> io::Result<Vec<u8>> {
+    let record = FilesRecord {
+        schema: 1,
+        files: files
+            .iter()
+            .map(|f| RecordedFile {
+                path: f.path.as_str().to_owned(),
+                url: f.download.url.to_string(),
+                sha1: f.download.sha1.clone(),
+                size: f.download.size,
+            })
+            .collect(),
+    };
+    serde_json::to_vec_pretty(&record).map_err(io::Error::other)
+}
+
+/// The files recorded when `id` was installed. `None` for a runtime installed before the record
+/// existed, or when the record is unreadable or fails the same checks as a fresh manifest (a bad
+/// entry means the whole record is not trusted).
+pub fn recorded_files(root: &PortableRoot, id: &str) -> Option<Vec<RuntimeFile>> {
+    let dir = runtime_dir(root, id).ok()?;
+    let record: FilesRecord =
+        serde_json::from_slice(&fs::read(dir.join(FILES_RECORD)).ok()?).ok()?;
+    if record.schema != 1 || record.files.len() > MAX_FILES {
+        return None;
+    }
+    record
+        .files
+        .into_iter()
+        .map(|f| {
+            Some(RuntimeFile {
+                path: RelPath::new(&f.path).ok()?,
+                download: download_of(&serde_json::json!({
+                    "sha1": f.sha1,
+                    "size": f.size,
+                    "url": f.url,
+                }))?,
+            })
+        })
+        .collect()
+}
+
+/// The authoritative file list for fully verifying an installed runtime, or `None` when there is
+/// none to be had (and then verification stays limited to `java.exe`, which `resolve_java` always
+/// checks):
+/// - the list recorded when the runtime was installed, which needs no network; or
+/// - for a runtime installed before that record existed, Mojang's current manifest for `component`,
+///   but only if it describes exactly this installed version. The list is then recorded for next time.
+///
+/// Files that Mojang's manifest does not cover (anything the runtime folder gained later) are not
+/// judged: no hash is invented for them.
+pub async fn verification_files<F: Fetcher>(
+    root: &PortableRoot,
+    java: &ManagedJava,
+    component: Option<&str>,
+    fetcher: &F,
+) -> Option<Vec<RuntimeFile>> {
+    if let Some(files) = recorded_files(root, &java.id) {
+        return Some(files);
+    }
+    let plan = plan_runtime(fetcher, component?).await.ok()?;
+    if runtime_id(&plan.release.component, &plan.release.version_name) != java.id {
+        return None; // a newer runtime exists; this older one has no authoritative list any more
+    }
+    if let Ok(bytes) = record_bytes(&plan.files) {
+        let _ = atomic_write(&java.home.join(FILES_RECORD), &bytes); // best effort
+    }
+    Some(plan.files)
+}
+
+/// Download jobs that check every listed file of an installed runtime and replace the missing or
+/// damaged ones (the downloader keeps files that verify and fetches only what does not).
+pub fn verification_jobs(java: &ManagedJava, files: &[RuntimeFile]) -> Vec<FileJob> {
+    files
+        .iter()
+        .map(|f| FileJob {
+            url: f.download.url.clone(),
+            dest: f.path.to_path(&java.home),
+            expected: Expected::Sha1(f.download.sha1.clone()),
+            size: Some(f.download.size),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -363,6 +468,129 @@ mod tests {
         assert_eq!(again.id, java.id);
         assert!(find_installed(&w.root, "java-runtime-gamma").is_none());
         assert_eq!(w.streamer.total_calls(), calls_before);
+    }
+
+    // ---- full verification
+
+    async fn installed(w: &World) -> (RuntimePlan, ManagedJava) {
+        let plan = plan_runtime(&w.fetcher, "java-runtime-delta")
+            .await
+            .unwrap();
+        let java = install_runtime(&w.root, &plan, 21, &downloader(w), 4)
+            .await
+            .unwrap();
+        (plan, java)
+    }
+
+    async fn repair(w: &World, java: &ManagedJava, files: &[RuntimeFile]) -> usize {
+        downloader(w)
+            .fetch_all(verification_jobs(java, files), 4)
+            .await
+            .unwrap()
+            .downloaded
+    }
+
+    #[tokio::test]
+    async fn the_install_records_every_file_and_a_damaged_runtime_is_found_and_repaired() {
+        let w = world();
+        let (plan, java) = installed(&w).await;
+        let recorded = recorded_files(&w.root, &java.id).expect("the file list was recorded");
+        assert_eq!(recorded, plan.files);
+
+        // java.exe is intact, so the everyday check still accepts the runtime...
+        fs::write(java.home.join("lib").join("modules"), vec![9u8; 5000]).unwrap(); // same size
+        fs::remove_file(java.home.join("bin").join("javaw.exe")).unwrap();
+        assert!(
+            find_installed(&w.root, "java-runtime-delta").is_some(),
+            "the cheap launch-time check only looks at java.exe"
+        );
+        // ...but a full verification covers every file, offline (the record is local)
+        let offline = FakeFetcher::new();
+        let files = verification_files(&w.root, &java, Some("java-runtime-delta"), &offline)
+            .await
+            .unwrap();
+        let before = w.streamer.total_calls();
+        assert_eq!(
+            repair(&w, &java, &files).await,
+            2,
+            "exactly the damaged files"
+        );
+        assert_eq!(w.streamer.total_calls(), before + 2);
+        assert_eq!(
+            fs::read(java.home.join("lib").join("modules")).unwrap(),
+            w.files[2].1
+        );
+        assert_eq!(
+            fs::read(java.home.join("bin").join("javaw.exe")).unwrap(),
+            w.files[1].1
+        );
+        // a second run finds nothing to do
+        assert_eq!(repair(&w, &java, &files).await, 0);
+        // and the launch-time identity check is unchanged: still java.exe's hash
+        assert!(resolve_java(&w.root, &java.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_older_install_without_a_record_is_verified_from_mojangs_manifest_when_it_matches() {
+        let w = world();
+        let (plan, java) = installed(&w).await;
+        fs::remove_file(java.home.join(FILES_RECORD)).unwrap(); // as installed by an earlier Clade
+        assert!(recorded_files(&w.root, &java.id).is_none());
+
+        // offline: nothing authoritative to check against, so only java.exe is covered
+        let offline = FakeFetcher::new();
+        assert!(
+            verification_files(&w.root, &java, Some("java-runtime-delta"), &offline)
+                .await
+                .is_none()
+        );
+        // the user-chosen runtime case has no component to look up either
+        assert!(verification_files(&w.root, &java, None, &w.fetcher)
+            .await
+            .is_none());
+
+        // online and the same version: the manifest is used, and recorded for next time
+        let files = verification_files(&w.root, &java, Some("java-runtime-delta"), &w.fetcher)
+            .await
+            .unwrap();
+        assert_eq!(files, plan.files);
+        assert!(recorded_files(&w.root, &java.id).is_some());
+
+        // online but Mojang now offers a newer version: this install has no list, nothing is invented
+        fs::remove_file(java.home.join(FILES_RECORD)).unwrap();
+        let newer = FakeFetcher::new();
+        let manifest = r#"{"files":{"bin/java.exe":{"type":"file","downloads":{"raw":{"sha1":"0123456789abcdef0123456789abcdef01234567","size":1,"url":"https://piston-data.mojang.com/x"}}}}}"#;
+        let manifest_url = "https://piston-meta.mojang.com/v1/packages/m/manifest.json";
+        let index = format!(
+            r#"{{"windows-x64":{{"java-runtime-delta":[{{"manifest":{{"sha1":"{}","size":1,"url":"{manifest_url}"}},"version":{{"name":"21.0.9"}}}}]}}}}"#,
+            sha1_of(manifest.as_bytes())
+        );
+        newer.ok(RUNTIME_INDEX_URL, index);
+        newer.ok(manifest_url, manifest);
+        assert!(
+            plan_runtime(&newer, "java-runtime-delta").await.is_ok(),
+            "the newer plan itself is valid"
+        );
+        assert!(
+            verification_files(&w.root, &java, Some("java-runtime-delta"), &newer)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tampered_record_is_not_trusted() {
+        let w = world();
+        let (_plan, java) = installed(&w).await;
+        let path = java.home.join(FILES_RECORD);
+        for bad in [
+            "not json".to_owned(),
+            r#"{"schema":1,"files":[{"path":"../x.dll","url":"https://piston-data.mojang.com/x","sha1":"0123456789abcdef0123456789abcdef01234567","size":1}]}"#.to_owned(),
+            r#"{"schema":1,"files":[{"path":"a.dll","url":"https://piston-data.mojang.com/x","sha1":"zz","size":1}]}"#.to_owned(),
+        ] {
+            fs::write(&path, bad).unwrap();
+            assert!(recorded_files(&w.root, &java.id).is_none());
+        }
     }
 
     #[tokio::test]

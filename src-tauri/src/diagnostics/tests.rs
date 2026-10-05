@@ -230,3 +230,22 @@ fn a_failure_is_reported_as_a_stable_code() {
     let coded: CodedError = err.into();
     assert_eq!(coded.code, "diagnostics_failed");
 }
+
+#[test]
+fn a_profile_that_cannot_be_read_is_named_in_the_summary_and_left_untouched() {
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let broken = r.instances_dir().join("broken");
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(broken.join("instance.json"), b"{ not json").unwrap();
+    let summary = profile_summary(&r);
+    assert!(
+        summary.contains("Profiles that could not be loaded: 1"),
+        "{summary}"
+    );
+    assert!(summary.contains("- broken:"), "{summary}");
+    assert_eq!(
+        fs::read(broken.join("instance.json")).unwrap(),
+        b"{ not json"
+    );
+}

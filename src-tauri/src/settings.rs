@@ -10,7 +10,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::instances::InstanceId;
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, quarantine_corrupt};
 use crate::portable::root::LAYOUT_VERSION;
 
 /// UI sound preferences ("Sound effects" switch and volume).
@@ -208,22 +208,209 @@ pub enum SettingsError {
 }
 
 impl LauncherSettings {
+    /// Startup loading: like [`Self::load_or_default`], except that a file whose *contents* are
+    /// damaged (empty, truncated, malformed JSON, or values that cannot be read) never stops
+    /// Clade. The damaged file is moved aside (`settings.json.corrupt`, never overwriting an
+    /// earlier backup) and the defaults are used. A newer folder layout and real filesystem
+    /// failures (permissions, a locked or unreadable file) are still reported as errors, and so is
+    /// a failure to move the damaged file aside, because carrying on would overwrite it later.
+    pub fn load_or_recover(path: &Path) -> Result<Self, SettingsError> {
+        match Self::load_or_default(path) {
+            Err(SettingsError::Invalid(e)) => {
+                // Only where the damage is is logged, never what the file said.
+                let moved = quarantine_corrupt(path)?;
+                tracing::warn!(
+                    line = e.line(),
+                    column = e.column(),
+                    kind = ?e.classify(),
+                    backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
+                    "settings.json was damaged; it was set aside and the defaults are in use"
+                );
+                Ok(Self::default().sanitized())
+            }
+            other => other,
+        }
+    }
+
+    /// Reads a settings document one value at a time. A value that cannot be read as what it should
+    /// be falls back to its default; every readable sibling is kept. `None` only when the document
+    /// is not a JSON object. Returns the dotted names of the values that were reset (never their
+    /// contents).
+    fn salvage(value: &serde_json::Value) -> Option<(Self, Vec<String>)> {
+        use serde::de::DeserializeOwned;
+        use serde_json::{Map, Value};
+
+        fn leaf<T: DeserializeOwned>(
+            obj: &Map<String, Value>,
+            key: &str,
+            path: &str,
+            default: T,
+            bad: &mut Vec<String>,
+        ) -> T {
+            match obj.get(key) {
+                None => default,
+                Some(v) => serde_json::from_value(v.clone()).unwrap_or_else(|_| {
+                    bad.push(path.to_owned());
+                    default
+                }),
+            }
+        }
+        fn section(
+            obj: &Map<String, Value>,
+            key: &str,
+            bad: &mut Vec<String>,
+        ) -> Map<String, Value> {
+            match obj.get(key) {
+                None => Map::new(),
+                Some(Value::Object(m)) => m.clone(),
+                Some(_) => {
+                    bad.push(key.to_owned());
+                    Map::new()
+                }
+            }
+        }
+
+        let root = value.as_object()?;
+        let d = Self::default();
+        let mut bad = Vec::new();
+        let ui = section(root, "ui", &mut bad);
+        let sound = section(&ui, "sound", &mut bad);
+        let minecraft = section(root, "minecraft", &mut bad);
+        let behavior = section(root, "behavior", &mut bad);
+        let settings = Self {
+            layout_version: leaf(
+                root,
+                "layout_version",
+                "layout_version",
+                d.layout_version,
+                &mut bad,
+            ),
+            last_instance: leaf(
+                root,
+                "last_instance",
+                "last_instance",
+                d.last_instance,
+                &mut bad,
+            ),
+            max_concurrent_downloads: leaf(
+                root,
+                "max_concurrent_downloads",
+                "max_concurrent_downloads",
+                d.max_concurrent_downloads,
+                &mut bad,
+            ),
+            ui: UiPrefs {
+                sound: SoundPrefs {
+                    enabled: leaf(
+                        &sound,
+                        "enabled",
+                        "ui.sound.enabled",
+                        d.ui.sound.enabled,
+                        &mut bad,
+                    ),
+                    volume: leaf(
+                        &sound,
+                        "volume",
+                        "ui.sound.volume",
+                        d.ui.sound.volume,
+                        &mut bad,
+                    ),
+                },
+                last_phrase: leaf(
+                    &ui,
+                    "last_phrase",
+                    "ui.last_phrase",
+                    d.ui.last_phrase,
+                    &mut bad,
+                ),
+                language: leaf(&ui, "language", "ui.language", d.ui.language, &mut bad),
+                reduced_motion: leaf(
+                    &ui,
+                    "reduced_motion",
+                    "ui.reduced_motion",
+                    d.ui.reduced_motion,
+                    &mut bad,
+                ),
+                onboarding_done: leaf(
+                    &ui,
+                    "onboarding_done",
+                    "ui.onboarding_done",
+                    d.ui.onboarding_done,
+                    &mut bad,
+                ),
+            },
+            minecraft: MinecraftPrefs {
+                memory_mb: leaf(
+                    &minecraft,
+                    "memory_mb",
+                    "minecraft.memory_mb",
+                    d.minecraft.memory_mb,
+                    &mut bad,
+                ),
+            },
+            behavior: BehaviorPrefs {
+                on_launch: leaf(
+                    &behavior,
+                    "on_launch",
+                    "behavior.on_launch",
+                    d.behavior.on_launch,
+                    &mut bad,
+                ),
+                on_exit: leaf(
+                    &behavior,
+                    "on_exit",
+                    "behavior.on_exit",
+                    d.behavior.on_exit,
+                    &mut bad,
+                ),
+            },
+        };
+        Some((settings, bad))
+    }
+
+    fn sanitized(mut self) -> Self {
+        self.ui.sanitize();
+        self.behavior.sanitize();
+        self.minecraft.sanitize(crate::system::total_memory_mb());
+        self
+    }
+
     pub fn load_or_default(path: &Path) -> Result<Self, SettingsError> {
-        let mut s: Self = match fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b)?,
+        let s: Self = match fs::read(path) {
+            Ok(b) => {
+                // Syntax first, so a file from a newer Clade whose shape this build cannot read is
+                // reported as "too new" and not mistaken for damage.
+                let value: serde_json::Value = serde_json::from_slice(&b)?;
+                let layout = value
+                    .get("layout_version")
+                    .and_then(serde_json::Value::as_u64);
+                if let Some(found) = layout.filter(|l| *l > u64::from(LAYOUT_VERSION)) {
+                    return Err(SettingsError::FolderTooNew {
+                        found: u32::try_from(found).unwrap_or(u32::MAX),
+                        supported: LAYOUT_VERSION,
+                    });
+                }
+                match serde_json::from_value::<Self>(value.clone()) {
+                    Ok(s) => s,
+                    // Valid JSON in which some value has the wrong shape (a number where text
+                    // belongs, a path where an id belongs): reset only those values and keep every
+                    // other setting. Only a document that is not a settings object at all is an error.
+                    Err(e) => match Self::salvage(&value) {
+                        Some((s, unusable)) => {
+                            tracing::warn!(
+                                fields = ?unusable,
+                                "some settings had unusable values; only those were reset to their defaults"
+                            );
+                            s
+                        }
+                        None => return Err(e.into()),
+                    },
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(e) => return Err(e.into()),
         };
-        if s.layout_version > LAYOUT_VERSION {
-            return Err(SettingsError::FolderTooNew {
-                found: s.layout_version,
-                supported: LAYOUT_VERSION,
-            });
-        }
-        s.ui.sanitize();
-        s.behavior.sanitize();
-        s.minecraft.sanitize(crate::system::total_memory_mb());
-        Ok(s)
+        Ok(s.sanitized())
     }
 
     /// Applies a sound-preference change. Returns whether anything changed.
@@ -352,12 +539,19 @@ mod tests {
     }
 
     #[test]
-    fn absolute_or_escaping_paths_in_a_copied_file_are_rejected() {
+    fn absolute_or_escaping_paths_in_a_copied_file_never_survive_and_never_stop_startup() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("settings.json");
         for bad in ["C:/Users/x/.minecraft", "../../outside", "/etc", "Upper"] {
-            fs::write(&p, format!("{{\"last_instance\":\"{bad}\"}}")).unwrap();
-            assert!(LauncherSettings::load_or_default(&p).is_err(), "{bad}");
+            // the one unusable value is reset, the other settings are kept
+            fs::write(
+                &p,
+                format!("{{\"last_instance\":\"{bad}\",\"ui\":{{\"language\":\"ru\"}}}}"),
+            )
+            .unwrap();
+            let s = LauncherSettings::load_or_default(&p).unwrap();
+            assert_eq!(s.last_instance, None, "{bad}");
+            assert_eq!(s.ui.language.as_deref(), Some("ru"), "{bad}");
         }
     }
 
@@ -685,5 +879,316 @@ mod tests {
         ] {
             assert_eq!(fs::read(root.join(rel)).unwrap(), bytes, "{rel}");
         }
+    }
+
+    // ---- startup recovery of a damaged settings file
+
+    fn recover(contents: &[u8]) -> (tempfile::TempDir, std::path::PathBuf, LauncherSettings) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        fs::write(&p, contents).unwrap();
+        let s = LauncherSettings::load_or_recover(&p).unwrap();
+        (d, p, s)
+    }
+
+    #[test]
+    fn a_damaged_file_never_stops_startup_and_is_kept_aside() {
+        // not a settings document at all: unreadable as JSON, or not an object
+        let damaged: [&[u8]; 6] = [
+            b"",
+            b"{\"layout_version\": 1, \"ui\": {\"sound\": {\"enabled\": tr",
+            b"this is not json at all",
+            b"[1, 2, 3]",
+            b"null",
+            b"\"just a string\"",
+        ];
+        for bytes in damaged {
+            let (d, p, s) = recover(bytes);
+            assert_eq!(s, LauncherSettings::default(), "{bytes:?}");
+            assert!(!p.exists(), "the damaged file left its place");
+            assert_eq!(
+                fs::read(d.path().join("settings.json.corrupt")).unwrap(),
+                bytes,
+                "the damaged file was preserved untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn an_earlier_corrupt_backup_is_never_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        fs::write(d.path().join("settings.json.corrupt"), b"first").unwrap();
+        fs::write(&p, b"{ broken").unwrap();
+        LauncherSettings::load_or_recover(&p).unwrap();
+        assert_eq!(
+            fs::read(d.path().join("settings.json.corrupt")).unwrap(),
+            b"first"
+        );
+        let others: Vec<_> = fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("settings.json.corrupt-"))
+            .collect();
+        assert_eq!(others.len(), 1);
+        assert_eq!(fs::read(d.path().join(&others[0])).unwrap(), b"{ broken");
+    }
+
+    #[test]
+    fn recovery_leaves_valid_missing_and_newer_files_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        // missing: defaults, nothing created
+        assert_eq!(
+            LauncherSettings::load_or_recover(&p).unwrap(),
+            LauncherSettings::default()
+        );
+        assert!(!p.exists());
+        // an old file (before the newer sections existed) loads as before and stays put
+        let old = r#"{"layout_version":1,"last_instance":"survival","ui":{"sound":{"enabled":false,"volume":0.2},"language":"ru"}}"#;
+        fs::write(&p, old).unwrap();
+        let s = LauncherSettings::load_or_recover(&p).unwrap();
+        assert_eq!(s.ui.language.as_deref(), Some("ru"));
+        assert_eq!(fs::read_to_string(&p).unwrap(), old);
+        // a newer Clade's file is an error, not "damage": it must not be moved aside
+        fs::write(&p, r#"{"layout_version": 999, "ui": 5}"#).unwrap();
+        assert!(matches!(
+            LauncherSettings::load_or_recover(&p),
+            Err(SettingsError::FolderTooNew { .. })
+        ));
+        assert!(p.is_file());
+    }
+
+    #[test]
+    fn a_real_filesystem_failure_is_not_turned_into_defaults() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        // a directory where the file should be: reading it fails for a reason that is not "damage"
+        fs::create_dir(&p).unwrap();
+        assert!(matches!(
+            LauncherSettings::load_or_recover(&p),
+            Err(SettingsError::Io(_))
+        ));
+        assert!(p.is_dir(), "nothing was moved or replaced");
+        assert!(!d.path().join("settings.json.corrupt").exists());
+    }
+
+    // ---- valid JSON with unusable values: repair those values only, keep everything else
+
+    /// A settings document in which every setting has a distinctive, valid, non-default value.
+    fn full_valid() -> serde_json::Value {
+        serde_json::json!({
+            "layout_version": 1,
+            "last_instance": "survival",
+            "max_concurrent_downloads": 5,
+            "ui": {
+                "sound": { "enabled": false, "volume": 0.25 },
+                "last_phrase": "take-your-time",
+                "language": "ru",
+                "reduced_motion": "on",
+                "onboarding_done": true
+            },
+            "minecraft": { "memory_mb": 4096 },
+            "behavior": { "on_launch": "hide", "on_exit": "stay_hidden" }
+        })
+    }
+
+    fn load_json(v: &serde_json::Value) -> (tempfile::TempDir, LauncherSettings) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        fs::write(&p, serde_json::to_vec(v).unwrap()).unwrap();
+        let s = LauncherSettings::load_or_recover(&p).unwrap();
+        assert!(p.is_file(), "a repairable file is never moved aside");
+        let aside = fs::read_dir(d.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".corrupt")
+            })
+            .count();
+        assert_eq!(aside, 0, "no quarantine for a file that can be repaired");
+        (d, s)
+    }
+
+    #[test]
+    fn a_fully_valid_file_loads_exactly_as_written() {
+        let (_d, s) = load_json(&full_valid());
+        assert_eq!(
+            s.last_instance.as_ref().map(|i| i.as_str()),
+            Some("survival")
+        );
+        assert_eq!(s.max_concurrent_downloads, 5);
+        assert!(!s.ui.sound.enabled && (s.ui.sound.volume - 0.25).abs() < f32::EPSILON);
+        assert_eq!(s.ui.last_phrase.as_deref(), Some("take-your-time"));
+        assert_eq!(s.ui.language.as_deref(), Some("ru"));
+        assert_eq!(s.ui.reduced_motion, "on");
+        assert!(s.ui.onboarding_done);
+        assert_eq!(s.minecraft.memory_mb, Some(4096));
+        assert_eq!(s.behavior.on_launch, "hide");
+        assert_eq!(s.behavior.on_exit, "stay_hidden");
+    }
+
+    /// Every other setting of `full_valid` must be unchanged after breaking one value.
+    fn assert_siblings_kept(s: &LauncherSettings, except: &str) {
+        let keep = |name: &str| name != except;
+        if keep("last_instance") {
+            assert_eq!(
+                s.last_instance.as_ref().map(|i| i.as_str()),
+                Some("survival")
+            );
+        }
+        if keep("max_concurrent_downloads") {
+            assert_eq!(s.max_concurrent_downloads, 5);
+        }
+        if keep("ui.sound.enabled") {
+            assert!(!s.ui.sound.enabled);
+        }
+        if keep("ui.sound.volume") {
+            assert!((s.ui.sound.volume - 0.25).abs() < f32::EPSILON);
+        }
+        if keep("ui.last_phrase") {
+            assert_eq!(s.ui.last_phrase.as_deref(), Some("take-your-time"));
+        }
+        if keep("ui.language") {
+            assert_eq!(s.ui.language.as_deref(), Some("ru"));
+        }
+        if keep("ui.reduced_motion") {
+            assert_eq!(s.ui.reduced_motion, "on");
+        }
+        if keep("ui.onboarding_done") {
+            assert!(s.ui.onboarding_done);
+        }
+        if keep("minecraft.memory_mb") {
+            assert_eq!(s.minecraft.memory_mb, Some(4096));
+        }
+        if keep("behavior.on_launch") {
+            assert_eq!(s.behavior.on_launch, "hide");
+        }
+        if keep("behavior.on_exit") {
+            assert_eq!(s.behavior.on_exit, "stay_hidden");
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_valid_json_but_not_supported_is_repaired_alone() {
+        // (path, bad value, what it must become, or None when only "siblings kept" is checked)
+        use serde_json::json;
+        let cases = [
+            ("ui.reduced_motion", json!("sometimes"), "ui.reduced_motion"),
+            ("ui.reduced_motion", json!(7), "ui.reduced_motion"),
+            ("behavior.on_launch", json!("explode"), "behavior.on_launch"),
+            ("behavior.on_launch", json!(true), "behavior.on_launch"),
+            ("behavior.on_exit", json!("quit"), "behavior.on_exit"),
+            ("minecraft.memory_mb", json!(900_000), "minecraft.memory_mb"),
+            ("minecraft.memory_mb", json!(-5), "minecraft.memory_mb"),
+            ("minecraft.memory_mb", json!("lots"), "minecraft.memory_mb"),
+            ("ui.sound.volume", json!(9.0), "ui.sound.volume"),
+            ("ui.sound.volume", json!("loud"), "ui.sound.volume"),
+            ("ui.sound.enabled", json!("yes"), "ui.sound.enabled"),
+            ("ui.language", json!("fr"), "ui.language"),
+            ("ui.language", json!(3), "ui.language"),
+            ("ui.last_phrase", json!("NOT a slug!"), "ui.last_phrase"),
+            ("ui.onboarding_done", json!("done"), "ui.onboarding_done"),
+            (
+                "max_concurrent_downloads",
+                json!(100_000),
+                "max_concurrent_downloads",
+            ),
+            ("last_instance", json!("../../elsewhere"), "last_instance"),
+            ("last_instance", json!(12), "last_instance"),
+        ];
+        for (path, bad, name) in cases {
+            let mut doc = full_valid();
+            let mut cur = &mut doc;
+            let parts: Vec<&str> = path.split('.').collect();
+            for part in &parts[..parts.len() - 1] {
+                cur = cur.get_mut(*part).unwrap();
+            }
+            cur[parts[parts.len() - 1]] = bad.clone();
+            let (_d, s) = load_json(&doc);
+            assert_siblings_kept(&s, name);
+            // and the broken value itself ended up somewhere safe
+            match name {
+                "ui.reduced_motion" => assert_eq!(s.ui.reduced_motion, "system", "{bad}"),
+                "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "keep_open", "{bad}"),
+                "behavior.on_exit" => assert_eq!(s.behavior.on_exit, "show", "{bad}"),
+                "minecraft.memory_mb" => {
+                    let m = s.minecraft.memory_mb;
+                    assert!(
+                        m.is_none() || m.is_some_and(|v| (1024..=32_768).contains(&v)),
+                        "{bad}"
+                    );
+                }
+                "ui.sound.volume" => assert!((0.0..=1.0).contains(&s.ui.sound.volume), "{bad}"),
+                "ui.language" => assert_eq!(s.ui.language, None, "{bad}"),
+                "ui.last_phrase" => assert_eq!(s.ui.last_phrase, None, "{bad}"),
+                "last_instance" => assert_eq!(s.last_instance, None, "{bad}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_section_of_the_wrong_shape_resets_only_that_section() {
+        for section in ["ui", "minecraft", "behavior"] {
+            let mut doc = full_valid();
+            doc[section] = serde_json::json!([1, 2, 3]);
+            let (_d, s) = load_json(&doc);
+            match section {
+                "ui" => {
+                    assert_eq!(s.ui, UiPrefs::default());
+                    assert_eq!(s.minecraft.memory_mb, Some(4096));
+                    assert_eq!(s.behavior.on_launch, "hide");
+                }
+                "minecraft" => {
+                    assert_eq!(s.minecraft, MinecraftPrefs::default());
+                    assert_eq!(s.ui.language.as_deref(), Some("ru"));
+                    assert_eq!(s.behavior.on_exit, "stay_hidden");
+                }
+                _ => {
+                    assert_eq!(s.behavior, BehaviorPrefs::default());
+                    assert_eq!(s.ui.language.as_deref(), Some("ru"));
+                    assert_eq!(s.minecraft.memory_mb, Some(4096));
+                }
+            }
+            assert_eq!(
+                s.last_instance.as_ref().map(|i| i.as_str()),
+                Some("survival")
+            );
+        }
+    }
+
+    #[test]
+    fn several_unusable_values_are_each_reset_and_the_rest_survive() {
+        let mut doc = full_valid();
+        doc["ui"]["reduced_motion"] = serde_json::json!(false);
+        doc["behavior"]["on_exit"] = serde_json::json!("nope");
+        doc["minecraft"]["memory_mb"] = serde_json::json!("x");
+        doc["last_instance"] = serde_json::json!("C:/x");
+        let (_d, s) = load_json(&doc);
+        assert_eq!(s.ui.reduced_motion, "system");
+        assert_eq!(s.behavior.on_exit, "show");
+        assert_eq!(s.minecraft.memory_mb, None);
+        assert_eq!(s.last_instance, None);
+        // untouched
+        assert_eq!(s.ui.language.as_deref(), Some("ru"));
+        assert_eq!(s.behavior.on_launch, "hide");
+        assert!(s.ui.onboarding_done);
+        assert!(!s.ui.sound.enabled);
+    }
+
+    #[test]
+    fn a_newer_layout_is_still_reported_even_if_its_shape_is_unreadable() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        fs::write(&p, r#"{"layout_version": 999, "ui": 5, "minecraft": "x"}"#).unwrap();
+        assert!(matches!(
+            LauncherSettings::load_or_recover(&p),
+            Err(SettingsError::FolderTooNew { .. })
+        ));
+        assert!(p.is_file());
     }
 }

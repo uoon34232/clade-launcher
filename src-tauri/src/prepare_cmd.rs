@@ -21,6 +21,7 @@ use crate::loader_prepare::ProcessRunner;
 use crate::net::HttpFetcher;
 use crate::portable::PortableRoot;
 use crate::prepare::{prepare_instance, Ctx, PrepareError, Tracker};
+use crate::profile_lock::{Activity, ProfileLocks};
 use crate::profiles::{now_unix, snapshot, ProfilesDto};
 use crate::ui_settings::SettingsState;
 
@@ -37,6 +38,7 @@ pub struct PrepareState {
     pub loader_downloads: Result<HttpFetcher, String>,
     running: Mutex<Option<(InstanceId, Arc<Cancel>)>>,
     failed: Mutex<HashMap<String, PrepareFailure>>,
+    locks: Arc<ProfileLocks>,
 }
 
 impl PrepareState {
@@ -55,7 +57,32 @@ impl PrepareState {
             loader_downloads,
             running: Mutex::new(None),
             failed: Mutex::new(HashMap::new()),
+            locks: Arc::new(ProfileLocks::default()),
         }
+    }
+
+    /// Shares the per-profile lock registry with the launcher, so a profile is never prepared while
+    /// its game runs, nor launched while it is prepared.
+    pub fn with_locks(mut self, locks: Arc<ProfileLocks>) -> Self {
+        self.locks = locks;
+        self
+    }
+
+    /// Starts a preparation of `id`, or says why not. One preparation at a time overall, and never
+    /// for a profile whose game is starting or running. The checks and the claims happen under one
+    /// lock, so two commands cannot both get through.
+    pub(crate) fn begin(&self, id: &InstanceId, cancel: &Arc<Cancel>) -> Result<(), PrepareError> {
+        let mut running = lock(&self.running);
+        if running.is_some() {
+            return Err(PrepareError::Busy);
+        }
+        match self.locks.claim(id.as_str(), Activity::Preparing) {
+            Ok(()) => {}
+            Err(Activity::Launching) => return Err(PrepareError::GameRunning),
+            Err(Activity::Preparing) => return Err(PrepareError::Busy),
+        }
+        *running = Some((id.clone(), cancel.clone()));
+        Ok(())
     }
 }
 
@@ -141,10 +168,11 @@ impl PrepareState {
     }
 }
 
-struct Running<'a>(&'a PrepareState);
+struct Running<'a>(&'a PrepareState, String);
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         *lock(&self.0.running) = None;
+        self.0.locks.release(&self.1);
     }
 }
 
@@ -164,14 +192,10 @@ pub async fn prepare_profile(
     let instance =
         InstanceId::new(&id).map_err(|_| PrepareFailure::from(&PrepareError::NotFound))?;
     let cancel = Cancel::new();
-    {
-        let mut running = lock(&state.running);
-        if running.is_some() {
-            return Err((&PrepareError::Busy).into());
-        }
-        *running = Some((instance.clone(), cancel.clone()));
+    if let Err(refused) = state.begin(&instance, &cancel) {
+        return Err((&refused).into());
     }
-    let _guard = Running(&state);
+    let _guard = Running(&state, id.clone());
     lock(&state.failed).remove(&id);
 
     let outcome = run(
@@ -285,6 +309,47 @@ mod tests {
         // Other failures carry no parameters.
         let plain = serde_json::to_value(PrepareFailure::from(&PrepareError::Busy)).unwrap();
         assert!(plain.get("params").is_none());
+    }
+
+    #[test]
+    fn launching_and_preparing_the_same_profile_exclude_each_other_but_other_profiles_do_not() {
+        use crate::launch_cmd::LaunchState;
+        use crate::profile_lock::Activity;
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        let locks = Arc::new(ProfileLocks::default());
+        let prep = state(root.clone()).with_locks(locks.clone());
+        let launch = LaunchState::new(root).with_locks(locks);
+        let (a, b) = (InstanceId::new("a").unwrap(), InstanceId::new("b").unwrap());
+        let cancel = Cancel::new();
+
+        // a running game: its profile cannot be prepared or verified, another one can
+        assert!(launch.claim(&a));
+        assert!(matches!(
+            prep.begin(&a, &cancel),
+            Err(PrepareError::GameRunning)
+        ));
+        assert_eq!(
+            PrepareFailure::from(&PrepareError::GameRunning).code,
+            "already_running"
+        );
+        assert!(prep.begin(&b, &cancel).is_ok(), "profile B is independent");
+
+        // one preparation at a time overall (unchanged), and its own profile cannot be launched
+        assert!(matches!(prep.begin(&b, &cancel), Err(PrepareError::Busy)));
+        assert_eq!(launch.claim_checked(&b), Err(Activity::Preparing));
+        assert!(launch.claim_checked(&InstanceId::new("c").unwrap()).is_ok());
+
+        // ending each operation frees its profile again
+        launch.release(&a);
+        *lock(&prep.running) = None;
+        prep.locks.release("b");
+        assert!(prep.begin(&a, &cancel).is_ok());
+        assert_eq!(launch.claim_checked(&a), Err(Activity::Preparing));
+        *lock(&prep.running) = None;
+        prep.locks.release("a");
+        assert!(launch.claim(&a));
+        assert!(launch.claim(&b), "b is free again too");
     }
 
     #[test]

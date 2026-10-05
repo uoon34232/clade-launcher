@@ -83,6 +83,10 @@ pub enum PrepareError {
     NotFound,
     #[error("Another profile is being set up. Wait for it to finish.")]
     Busy,
+    #[error(
+        "This profile is starting or running. Close the game before setting it up or verifying it."
+    )]
+    GameRunning,
 }
 
 impl PrepareError {
@@ -100,6 +104,7 @@ impl PrepareError {
             Self::DiskSpace { .. } => "disk_space",
             Self::NotFound => "not_found",
             Self::Busy => "busy",
+            Self::GameRunning => "already_running",
         }
     }
 }
@@ -819,6 +824,36 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
         _ => None,
     };
 
+    // A full verification also covers the managed Java runtime that is already installed: every file
+    // the runtime's manifest lists is checked and the damaged or missing ones are fetched again.
+    // (A runtime that is about to be installed fresh needs no check, and the everyday launch only
+    // re-hashes java.exe.) Without an authoritative list the check stays at java.exe; nothing is
+    // invented for files no manifest covers.
+    let java_verify: Option<(ManagedJava, Vec<java_install::RuntimeFile>)> = if ctx.verify_all
+        && runtime_plan.is_none()
+    {
+        let (installed, component) = match &inst.java {
+            JavaChoice::Auto => (
+                java_install::find_installed(ctx.root, &plan.java.component),
+                Some(plan.java.component.as_str()),
+            ),
+            JavaChoice::Runtime { id } => (resolve_java(ctx.root, id).ok(), None),
+        };
+        match installed {
+            Some(java) => java_install::verification_files(ctx.root, &java, component, ctx.meta)
+                .await
+                .map(|files| (java, files)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if ctx.verify_all && runtime_plan.is_none() && java_verify.is_none() {
+        tracing::info!(
+            "no authoritative file list for the Java runtime; only java.exe was checked"
+        );
+    }
+
     let loader = match &inst.profile {
         Profile::Vanilla => None,
         Profile::Modded {
@@ -844,6 +879,9 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
         assets.as_ref().map(|a| &a.1),
         runtime_plan.as_ref(),
     ));
+    if let Some((_, files)) = &java_verify {
+        progress.plan_bytes(files.iter().map(|f| f.download.size).sum());
+    }
     if let Some((_, _, Some(p))) = &loader {
         progress.plan_bytes(planned_bytes(&p.plan, None, None));
     }
@@ -879,6 +917,20 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
     // ---- 2. Java
     let java = ensure_java(ctx, &dl, &inst, &plan, runtime_plan.as_ref()).await?;
     ctx.check_cancel()?;
+    if let Some((installed, files)) = &java_verify {
+        ctx.tracker.enter(
+            Stage::Java,
+            ctx.label("Preparing Java", "Verifying Java"),
+            Some(files.len() as u64),
+            false,
+        );
+        dl.fetch_all(
+            java_install::verification_jobs(installed, files),
+            ctx.concurrency,
+        )
+        .await?;
+        ctx.check_cancel()?;
+    }
 
     // ---- 3. the game file and logging configuration
     let mut jobs = vec![FileJob {

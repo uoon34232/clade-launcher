@@ -23,6 +23,7 @@ pub mod playtime;
 pub mod portable;
 pub mod prepare;
 pub mod prepare_cmd;
+pub mod profile_lock;
 pub mod profile_service;
 pub mod profiles;
 pub mod runtimes;
@@ -115,7 +116,7 @@ pub fn run() {
     };
     startup::init_logging(&root);
 
-    let launcher_settings = settings::LauncherSettings::load_or_default(&root.settings_file())
+    let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
         .unwrap_or_else(|e| {
             let id = match e {
                 settings::SettingsError::FolderTooNew { .. } => StartupMessage::FolderTooNew,
@@ -130,6 +131,13 @@ pub fn run() {
     // Remove loader-install staging trees left behind by a crash.
     if let Err(e) = loader_install::sweep_stale(&root) {
         tracing::warn!(error = %e, "could not clean stale loader staging");
+    }
+    // A profile whose instance.json cannot be read is hidden from the list but never touched; say so
+    // in the log (and in the diagnostics) instead of letting it vanish without a trace.
+    if let Ok(listing) = instances::InstanceStore::new(&root).list() {
+        for (folder, reason) in &listing.problems {
+            tracing::warn!(profile_folder = %folder, %reason, "a profile could not be read; its files were left untouched");
+        }
     }
     // Bank any game session that was cut short by a crash or power loss last time.
     match playtime::PlaytimeStore::new(&root).recover() {
@@ -166,6 +174,8 @@ pub fn run() {
         ))
         .map_err(|e| e.to_string()),
     );
+    // One lock registry for both: launching and preparing the same profile exclude each other.
+    let profile_locks = std::sync::Arc::new(profile_lock::ProfileLocks::default());
     let prepare_state = prepare_cmd::PrepareState::new(
         root.clone(),
         net::HttpFetcher::new(download_policy::DownloadPolicy::new(
@@ -178,8 +188,9 @@ pub fn run() {
         ))
         .map_err(|e| e.to_string()),
         net::HttpFetcher::for_downloads(loaders::official_policy()).map_err(|e| e.to_string()),
-    );
-    let launch_state = launch_cmd::LaunchState::new(root.clone());
+    )
+    .with_locks(profile_locks.clone());
+    let launch_state = launch_cmd::LaunchState::new(root.clone()).with_locks(profile_locks);
     let settings_state = ui_settings::SettingsState::new(root.settings_file(), launcher_settings);
     let webview_dir = root.webview_data_dir();
     let state = AppState {

@@ -19,6 +19,8 @@ interface Props {
   /** What the primary button shows for the selected profile. */
   playState: PlayState;
   onVerifyProfile: () => void;
+  /** The selected profile's game is starting or running, so "Verify files" is unavailable. */
+  verifyDisabled?: boolean;
   onOpenSettings: () => void;
 }
 
@@ -42,6 +44,7 @@ export function LauncherDock(p: Props) {
           onSelect={p.onSelectProfile}
           onCreate={p.onCreateProfile}
           onVerify={p.onVerifyProfile}
+          verifyDisabled={p.verifyDisabled}
         />
         <PlayButton onClick={p.onPlay} state={p.playState} />
         <SettingsButton onClick={p.onOpenSettings} />

@@ -23,28 +23,88 @@ const animatedProperties = (page: Page) =>
       .flatMap((a) => (a.effect as KeyframeEffect).getKeyframes().flatMap((k) => Object.keys(k)))
       .filter((k) => !["offset", "easing", "composite", "computedOffset"].includes(k));
   });
+/** Where the cat sits inside Settings. Relative to the dialog, so the dialog re-centring itself
+ *  (late font loading, a slow machine) is not mistaken for the cat moving. */
 const position = (page: Page) =>
   cat(page).evaluate((el) => {
     const b = el.getBoundingClientRect();
-    return [Math.round(b.left), Math.round(b.top)];
+    const d = el.closest('[role="dialog"]')?.getBoundingClientRect();
+    return [Math.round(b.left - (d?.left ?? 0)), Math.round(b.top - (d?.top ?? 0))];
   });
+
+/**
+ * Watches the drawn cat (the button and the union of its strokes) frame by frame for `ms` and
+ * returns the largest distance, in pixels, that any edge strayed from where it started. Everything
+ * is measured relative to the Settings dialog, so a re-centring dialog is not mistaken for the cat
+ * moving, and nothing depends on when a frame is sampled: a cat that really moves is seen in any
+ * frame, whatever the timing.
+ */
+const maxDisplacement = (page: Page, ms: number) =>
+  page.evaluate(
+    (duration) =>
+      new Promise<number>((resolve) => {
+        const button = document.querySelector('[aria-label="Cat"]');
+        const dialog = button?.closest('[role="dialog"]');
+        if (!button || !dialog) return resolve(Number.POSITIVE_INFINITY);
+        const edges = () => {
+          const d = dialog.getBoundingClientRect();
+          const b = button.getBoundingClientRect();
+          const parts = [...button.querySelectorAll("path")].map((p) => p.getBoundingClientRect());
+          const left = Math.min(...parts.map((r) => r.left));
+          const right = Math.max(...parts.map((r) => r.right));
+          const bottom = Math.max(...parts.map((r) => r.bottom));
+          return [b.left - d.left, b.top - d.top, left - d.left, right - d.left, bottom - d.top];
+        };
+        const start = edges();
+        let worst = 0;
+        const t0 = performance.now();
+        const frame = () => {
+          const now = edges();
+          worst = Math.max(worst, ...now.map((v, i) => Math.abs(v - start[i])));
+          if (performance.now() - t0 < duration) requestAnimationFrame(frame);
+          else resolve(worst);
+        };
+        frame();
+      }),
+    ms,
+  );
 
 test.describe("the cat in Settings", () => {
   test("reacts to a click in place and stays there", async ({ page, openApp }) => {
     await openApp();
     await openSettings(page);
     const before = await position(page);
+    // watch every frame of the whole reaction while it is triggered
+    const watching = maxDisplacement(page, 900);
     await cat(page).click();
     await expect(cat(page)).toHaveAttribute("data-reaction", "full");
     // ears, eyes, tail and body move; the button itself never does
     const moving = await animatedProperties(page);
     expect(moving).toContain("transform");
     expect(await position(page)).toEqual(before);
+    // the small movements of ears, tail and body stay within a few pixels: it never runs anywhere
+    expect(await watching).toBeLessThanOrEqual(4);
     // it settles back by itself and is still there
     await expect(cat(page)).not.toHaveAttribute("data-reaction", /.+/);
     await expect(cat(page)).toBeVisible();
     expect(await position(page)).toEqual(before);
     expect(await animatedProperties(page)).toEqual([]);
+  });
+
+  test("the displacement check itself notices a cat that runs away", async ({ page, openApp }) => {
+    await openApp();
+    await openSettings(page);
+    const watching = maxDisplacement(page, 600);
+    // simulate the old behaviour: the whole drawing slides 60 px to the right
+    await page.evaluate(() =>
+      document
+        .querySelector('[aria-label="Cat"] svg')
+        ?.animate([{ transform: "translateX(0)" }, { transform: "translateX(60px)" }], {
+          duration: 300,
+          fill: "forwards",
+        }),
+    );
+    expect(await watching).toBeGreaterThan(20);
   });
 
   test("works from the keyboard (Enter and Space) and keeps focus", async ({ page, openApp }) => {

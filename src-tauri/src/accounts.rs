@@ -74,6 +74,20 @@ impl AccountsFile {
         }
     }
 
+    /// Like [`Self::load`], but says where the list came from: `None` when there is no
+    /// `accounts.json` at all, `Some` only for a file that exists and parsed. A caller that is about
+    /// to do something destructive on the strength of "these are the accounts" must use this: a
+    /// missing file is *not* an empty list, and a damaged one is an error.
+    pub fn load_authoritative(path: &Path) -> io::Result<Option<Self>> {
+        match fs::read(path) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn save(&self, path: &Path) -> io::Result<()> {
         atomic_write(
             path,

@@ -24,18 +24,44 @@ pub enum RuntimeSource {
     System,
 }
 
+/// WebView2 variables that would let the environment Clade was started from decide where its web
+/// engine lives or how it runs, instead of Clade: the runtime folder and the profile folder
+/// (always scrubbed), and extra browser command-line arguments (scrubbed in release builds; a
+/// development build keeps this one so DevTools can be attached for debugging).
+const ALWAYS_SCRUBBED: [&str; 2] = [
+    "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+    "WEBVIEW2_USER_DATA_FOLDER",
+];
+const RELEASE_SCRUBBED: [&str; 1] = ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"];
+
+/// The variables removed at startup.
+pub fn scrubbed_overrides(debug_build: bool) -> Vec<&'static str> {
+    let mut names = ALWAYS_SCRUBBED.to_vec();
+    if !debug_build {
+        names.extend(RELEASE_SCRUBBED);
+    }
+    names
+}
+
+/// Removes inherited WebView2 overrides. Only these names are touched: nothing else Clade or Windows
+/// needs is cleared.
+fn scrub_overrides(debug_build: bool) {
+    for name in scrubbed_overrides(debug_build) {
+        // Called once at startup, before any other thread exists.
+        // portability-allow: drops an inherited WebView2 override so only Clade's own choice applies
+        std::env::remove_var(name);
+    }
+}
+
 /// Must run before any WebView is created.
 pub fn select_runtime(root: &PortableRoot) -> RuntimeSource {
+    scrub_overrides(cfg!(debug_assertions));
     let dir = root.fixed_webview2_dir();
     if dir.join("msedgewebview2.exe").is_file() {
-        // Called once at startup, before any other thread exists.
         // portability-allow: points WebView2 at the runtime bundled inside the launcher folder
         std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &dir);
         RuntimeSource::Bundled
     } else {
-        // Make sure a stray variable inherited from the environment cannot redirect us.
-        // portability-allow: drops an inherited override so only the bundled runtime can be chosen
-        std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
         RuntimeSource::System
     }
 }
@@ -49,4 +75,59 @@ pub fn runtime_version() -> Result<String, String> {
 #[cfg(not(windows))]
 pub fn runtime_version() -> Result<String, String> {
     Ok("n/a".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_builds_scrub_all_three_overrides_and_nothing_else() {
+        let release = scrubbed_overrides(false);
+        assert_eq!(
+            release,
+            [
+                "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+                "WEBVIEW2_USER_DATA_FOLDER",
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+            ]
+        );
+        assert!(release.iter().all(|n| n.starts_with("WEBVIEW2_")));
+        // a development build keeps the DevTools hook, and still protects the folders
+        assert_eq!(
+            scrubbed_overrides(true),
+            [
+                "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+                "WEBVIEW2_USER_DATA_FOLDER"
+            ]
+        );
+    }
+
+    #[test]
+    fn inherited_overrides_are_really_removed_and_unrelated_variables_survive() {
+        // The names are WebView2's own; no other test reads them.
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", "somewhere-else");
+        std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", "another-runtime");
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--remote-debugging-port=1",
+        );
+        std::env::set_var("CLADE_TEST_UNRELATED_VARIABLE", "kept");
+
+        scrub_overrides(true);
+        assert!(std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none());
+        assert!(std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_none());
+        assert!(
+            std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_some(),
+            "a development build keeps the DevTools hook"
+        );
+
+        scrub_overrides(false);
+        assert!(std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none());
+        assert_eq!(
+            std::env::var("CLADE_TEST_UNRELATED_VARIABLE").as_deref(),
+            Ok("kept")
+        );
+        std::env::remove_var("CLADE_TEST_UNRELATED_VARIABLE");
+    }
 }
