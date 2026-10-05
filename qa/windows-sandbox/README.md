@@ -15,8 +15,8 @@ that `%SystemRoot%\System32\WindowsSandbox.exe` exists; if it does not, it stage
 enable the feature yourself (Settings > System > Optional features > More Windows features > Windows
 Sandbox, then restart) and stops.
 
-The development machine this was written on (Windows 11 Pro 26300) does **not** have the feature installed
-(no `WindowsSandbox.exe`), so the launch path below was validated only up to the dry run.
+You must install and enable Windows Sandbox yourself before a real run; the QA tooling never enables it
+automatically. Use `-DryRun` to stage and resolve the configuration without starting anything.
 
 ## Configurations
 
@@ -54,10 +54,21 @@ scripts\qa\Start-QaSandbox.ps1 -Zip C:\path\to\Clade-Launcher-Portable.zip -Mode
 
 Inside the sandbox, `sandbox-run.ps1` (started by the LogonCommand) verifies the checksum, extracts the
 package to `Desktop\Clade QA\` (a path with a space), prints the environment report, takes the **before**
-audit snapshot and prints what to do next. Start `Clade.exe` by hand, run the rows from
-[`docs/QA-WINDOWS.md`](../../docs/QA-WINDOWS.md), close Clade and run `C:\CladeQA\after.ps1` for the
-**after** snapshot and the comparison. Reports (`environment-report.txt`, the two snapshots,
-`audit-compare.txt`) land in `C:\CladeQA\results`, which is the host's `results` folder.
+audit snapshot and prints a banner with the three things you need:
+
+1. **Clade folder**: `C:\Users\WDAGUtilityAccount\Desktop\Clade QA\Clade-Launcher` (the exact path is printed).
+   Start `Clade.exe` from there by hand and run the rows from [`docs/QA-WINDOWS.md`](../../docs/QA-WINDOWS.md).
+2. **AFTER command**: close Clade, then type `C:\CladeQA\run-after.cmd` (or double-click `run-after.cmd` on the
+   Desktop). It runs the after snapshot and the comparison through `powershell.exe -ExecutionPolicy Bypass`
+   for that one process only, so the default Restricted policy needs no change and no policy is ever
+   modified. `after.ps1` next to it is what it runs; do not call `after.ps1` directly under Restricted.
+3. **Results**: `environment-report.txt`, the two snapshots and `audit-compare.txt` (UTF-8) are written to
+   `C:\CladeQA\results`, which is the host's `results` folder printed by `Start-QaSandbox.ps1`
+   (`%TEMP%\clade-qa-<timestamp>\results`).
+
+Use **one** Sandbox window at a time. Windows Sandbox allows a single instance; close the old one (its
+contents are discarded) before starting another run, and copy anything you need from the results folder first.
+The clipboard is disabled on purpose, so commands must be typed; they are short for that reason.
 
 The sandbox user (`WDAGUtilityAccount`) is an administrator inside the sandbox; Clade itself is `asInvoker`
 and still must not ask for elevation (that is a test row).

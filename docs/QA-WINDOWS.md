@@ -32,6 +32,11 @@ Related: [RELEASE.md](RELEASE.md) (how the ZIP is built), [`qa/windows-sandbox/`
 | `scripts/qa/portable-audit.ps1` | before/after snapshot of the places a portable app must not write, and a comparison | nothing but its own JSON files in `-OutDir` |
 | `scripts/smoke-test-package.ps1` | the automated package smoke test (checksum, allowlist, start, bundled runtime) | an extraction folder under `%TEMP%` |
 
+Inside Windows Sandbox the same before/after steps are wrapped for you: after testing, close Clade and run
+`C:\CladeQA\run-after.cmd` (process-local `-ExecutionPolicy Bypass`; the Restricted policy is never changed).
+Use only one Sandbox window at a time and keep the clipboard disabled; see
+[`qa/windows-sandbox/README.md`](../qa/windows-sandbox/README.md).
+
 Typical run on any machine:
 
 ```powershell

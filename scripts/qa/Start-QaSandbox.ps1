@@ -86,5 +86,6 @@ if (-not (Test-Path -LiteralPath $sandboxExe)) {
   return
 }
 if ($DryRun) { Write-Output 'Dry run: the sandbox was not started.'; return }
-Write-Output 'Starting Windows Sandbox ...'
+Write-Output 'Starting Windows Sandbox (only one Sandbox window can run; close any open one first) ...'
+Write-Output ('After testing, the reports are in: ' + $results)
 Start-Process -FilePath $wsb
