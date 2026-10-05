@@ -94,6 +94,27 @@ describe("the QA scripts", () => {
   });
 });
 
+describe("the in-sandbox runner", () => {
+  const run = read("qa/windows-sandbox", "sandbox-run.ps1");
+  const code = run.replace(/^\s*#.*$/gm, "");
+  it("writes audit-compare.txt as explicit UTF-8, not via Tee-Object / Out-File", () => {
+    expect(code).toMatch(/WriteAllText\('\$results\\audit-compare\.txt'.*UTF8Encoding/);
+    expect(code).not.toMatch(/Tee-Object|Out-File|>\s*'?\$results/);
+  });
+  it("creates run-after.cmd with a process-local ExecutionPolicy Bypass and never sets a policy", () => {
+    expect(code).toContain("C:\\CladeQA\\run-after.cmd");
+    expect(code).toMatch(/-NoProfile -ExecutionPolicy Bypass -File "C:\\CladeQA\\after\.ps1"/);
+    expect(code).not.toMatch(/Set-ExecutionPolicy/i);
+  });
+  it("prints the Clade path, the AFTER command, the results location and the one-instance note", () => {
+    expect(run).toMatch(/Extracted Clade folder/);
+    expect(run).toMatch(/type exactly this[\s\S]*run-after\.cmd/);
+    expect(run).toMatch(/Results appear on the HOST/);
+    expect(run).toMatch(/only ONE Sandbox window/);
+    expect(run).toMatch(/Clipboard is disabled/);
+  });
+});
+
 describe("the Windows Sandbox configurations", () => {
   it("are the three documented ones", () => {
     expect(configs.sort()).toEqual([
