@@ -1,0 +1,137 @@
+name: Release
+
+# Builds the portable Windows package for a release tag and creates a DRAFT GitHub release from it.
+# Nothing is published automatically: a person reviews the draft, and publishes it (or deletes it) by hand.
+# See docs/RELEASE.md for the whole procedure, the inputs a release needs, and how to abort.
+#
+# Triggered only by pushing a tag that starts with "v". It never runs for branches or pull requests.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No permissions by default. Each job asks for exactly what it needs.
+permissions: {}
+
+# One release run per tag; a second run for the same tag waits instead of racing the first.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Every action is pinned to the full commit SHA of a reviewed release (the tag is in the comment).
+jobs:
+  build:
+    name: Build, package and verify
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the whole history, only to prove the tag is on main
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Fail before building anything if the tag, the versions and the changelog do not agree, or if the
+      # tagged commit is not part of main.
+      - name: Tag, versions and changelog agree
+        shell: pwsh
+        run: |
+          node scripts/release/check-versions.mjs --tag "$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE) { exit 1 }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE) { throw "The tagged commit is not on main; a release is only built from main." }
+
+      - name: The pinned WebView2 runtime is configured
+        run: node scripts/release/webview2.mjs status --need-url
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      # The exact toolchain from rust-toolchain.toml. No build cache is used for a release.
+      - run: rustup toolchain install
+      - run: pnpm install --frozen-lockfile
+
+      # The same gates as normal CI, on the tagged commit.
+      - run: pnpm check
+      - name: Rust gates
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - run: pnpm exec playwright install chromium
+      - run: pnpm test:e2e
+
+      # The pinned runtime CAB, from the one URL in scripts/release/webview2-runtime.json, verified against
+      # the pinned SHA-256 before it is used for anything.
+      - name: Obtain the pinned WebView2 runtime
+        id: webview2
+        shell: pwsh
+        run: |
+          $cab = node scripts/release/webview2.mjs fetch --out "$env:RUNNER_TEMP/webview2"
+          if ($LASTEXITCODE) { exit 1 }
+          "cab=$cab" >> $env:GITHUB_OUTPUT
+
+      - name: Build and package (production Tauri build, notices, ZIP, validation)
+        shell: pwsh
+        run: ./scripts/package-portable.ps1 -WebView2Cab "${{ steps.webview2.outputs.cab }}" -Tag "$env:GITHUB_REF_NAME" -OutDir dist-portable
+
+      - name: Smoke test the package
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          ./scripts/smoke-test-package.ps1 -Zip dist-portable/Clade-Launcher-Portable.zip -ExpectedVersion $v
+
+      - name: Release notes from the changelog
+        run: node scripts/release/check-versions.mjs --tag "$GITHUB_REF_NAME" --notes dist-portable/release-notes.md
+
+      # Only these three files leave the build job.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-package
+          path: |
+            dist-portable/Clade-Launcher-Portable.zip
+            dist-portable/Clade-Launcher-Portable.zip.sha256
+            dist-portable/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    name: Create the draft release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only job that can write to the repository, and it only creates a draft.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-package
+          path: release
+
+      - name: The checksum matches the ZIP
+        working-directory: release
+        run: sha256sum --check Clade-Launcher-Portable.zip.sha256
+
+      # A preview (any tag with a suffix such as -preview or -rc) and any 0.x release is marked as a
+      # pre-release. The release is ALWAYS a draft: publishing it is a manual decision.
+      - name: Create the draft
+        working-directory: release
+        run: |
+          flags="--draft"
+          case "$GITHUB_REF_NAME" in
+            *-*|v0.*) flags="$flags --prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            Clade-Launcher-Portable.zip Clade-Launcher-Portable.zip.sha256 \
+            $flags --verify-tag --title "Clade Launcher $GITHUB_REF_NAME" --notes-file release-notes.md

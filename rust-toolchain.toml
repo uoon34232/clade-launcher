@@ -1,0 +1,8 @@
+# The Rust toolchain every build of Clade uses, locally and in CI: an exact release, not "stable", so
+# a new compiler can never change a build or a lint result by itself. Raise it deliberately, in its
+# own change, after the full validation passes on the new version.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]

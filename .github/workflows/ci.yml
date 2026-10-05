@@ -36,6 +36,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The version must be the same in every file that states it (the release tooling's own tests run in pnpm check).
+      - run: node scripts/release/check-versions.mjs
       - run: pnpm check
       - run: pnpm build
 
@@ -50,8 +52,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The runner's preinstalled stable toolchain, plus the two components the checks need.
-      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      # The exact toolchain pinned in rust-toolchain.toml (with rustfmt and clippy), never "stable".
+      - run: rustup toolchain install
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -59,12 +61,12 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'src-tauri/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
 
   e2e:
     name: E2E (Playwright, Chromium)

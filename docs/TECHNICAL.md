@@ -330,9 +330,17 @@ If a rule has to change, change the documentation and the guard deliberately, wi
 
 ## 18. Release packaging
 
-`scripts/package-portable.ps1` builds the portable archive: it extracts the WebView2 Fixed Version Runtime from a CAB obtained directly from Microsoft, **refuses to continue unless `msedgewebview2.exe` has a valid Microsoft signature**, builds with a static C runtime, and assembles `Clade-Launcher/` and `Clade-Launcher-Portable.zip` with a checksum. Installers are disabled (`bundle.active` is false) because a portable build must never run one. The runtime's licence text ships inside the archive (`scripts/licenses/`). A `-WithoutWebView2` switch exists for development only and produces a differently named archive.
+The operating procedure is in [RELEASE.md](RELEASE.md); this section is the summary of how the pieces fit.
 
-The application icon is `src-tauri/icons/icon.ico`. `build.rs` tells Cargo to watch it, so a changed icon is rebuilt into the executable.
+- **Build.** The distributable `Clade.exe` is built with `pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc` (never plain `cargo build --release`, which would not embed the interface and the production protocol), by `scripts/package-portable.ps1`, with the pinned toolchain (`rust-toolchain.toml`), `--locked`, `pnpm install --frozen-lockfile`, a statically linked C runtime, and build-machine paths remapped out of the binary (Rust `--remap-path-prefix`, C `/d1trimfile`). Installers are disabled (`bundle.active` is false) because a portable build must never run one.
+- **Package.** `scripts/release/package.mjs` stages only the named inputs in a clean folder (`Clade.exe`, `README.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt`, the WebView2 licence, the WebView2 runtime) and writes a deterministic `Clade-Launcher-Portable.zip` and its `.sha256`. `scripts/release/validate-package.mjs` checks the staged names before the ZIP is written and the finished ZIP afterwards against an explicit allowlist (fail closed): no user data, no development files, required files present, no developer paths or secrets in the shipped text, none of the build machine's paths in the executable, the expected version and the release CSP embedded.
+- **Versions.** `scripts/release/check-versions.mjs` requires one version in `package.json`, `Cargo.toml`, `tauri.conf.json` and `Cargo.lock`, a valid release tag that agrees with it, and a `CHANGELOG.md` entry.
+- **WebView2.** The runtime is one pinned Fixed Version CAB whose version, URL and SHA-256 live in `scripts/release/webview2-runtime.json` (empty until a person supplies them). The hash is verified before extraction, the executable must carry a valid Microsoft signature and the pinned version, and the runtime's licence text ships with it (`scripts/licenses/`).
+- **Notices.** `scripts/release/generate-notices.mjs` writes `THIRD-PARTY-NOTICES.txt` from `cargo metadata` (the crates linked into the Windows binary) and from the installed packages that the interface source imports, including both fonts; it states what it could not cover.
+- **Smoke test.** `scripts/smoke-test-package.ps1` validates, extracts and starts the package and checks the portable folders, the bundled runtime and that nothing contacts the development server.
+- **Workflow.** `.github/workflows/release.yml` runs only for pushed `v*` tags, with no default permissions; the build job is read-only and only the draft-release job can write. It creates a draft (and a pre-release for previews), never a published release.
+
+The runtime's redistribution terms, the unsigned executable, the lack of automatic runtime updates and the remaining manual validation are listed in [RELEASE.md](RELEASE.md#10-known-limits).
 
 ## 19. Known limitations and current status
 

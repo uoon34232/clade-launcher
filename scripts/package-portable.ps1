@@ -1,121 +1,146 @@
 <#
 .SYNOPSIS
-  Builds Clade-Launcher-Portable.zip: a self-contained folder that runs from any Windows x64 PC or USB drive.
+  Builds Clade-Launcher-Portable.zip (and its .sha256): a self-contained folder for any 64-bit Windows PC
+  or USB drive.
 
 .DESCRIPTION
-  1. Builds the frontend and a release Clade.exe with the C runtime linked statically
-     (no Visual C++ redistributable needed on the target PC).
-  2. Assembles Clade-Launcher/ with the standard portable layout.
-  3. Bundles a WebView2 *Fixed Version* runtime into Clade-Launcher/runtimes/webview2/ so the target PC
-     needs no WebView2 installation. This is required; there is no silent fallback to an installer.
-  4. Zips the folder and writes a SHA-256 file next to it.
+  1. Checks that the version is the same in every place it is written (and matches -Tag when given).
+  2. Builds the production Clade.exe the Tauri way (pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc),
+     with the C runtime linked statically and developer paths remapped out of the binary.
+  3. Checks the pinned WebView2 Fixed Version Runtime CAB against the SHA-256 in
+     scripts/release/webview2-runtime.json, extracts it, and requires a valid Microsoft signature and the
+     pinned version.
+  4. Generates THIRD-PARTY-NOTICES.txt from the dependency lock files.
+  5. Stages ONLY the allowed files in a clean folder, writes a deterministic ZIP and its SHA-256, and
+     validates the finished ZIP against the package allowlist.
 
-.PARAMETER WebView2Dir
-  Directory holding the extracted Fixed Version runtime (it must contain msedgewebview2.exe).
-  Get the x64 "Fixed Version" CAB from https://developer.microsoft.com/microsoft-edge/webview2/
-  and extract it with:  expand.exe -F:* <file>.cab <target-dir>   (the CAB contains one versioned folder;
-  point -WebView2Dir at that folder). The runtime is NOT updated automatically: re-package to ship fixes.
+  The distributable binary is never built with plain `cargo build --release`: the Tauri build is what
+  embeds the interface and uses the production protocol.
+
+.PARAMETER WebView2Cab
+  The x64 Fixed Version CAB obtained directly from Microsoft. Its SHA-256 must equal the pin in
+  scripts/release/webview2-runtime.json, which a person must fill in (see docs/RELEASE.md). There is no
+  way around the pin for a release package.
+
+.PARAMETER Tag
+  The release tag (for example v0.1.0-preview). When given, it must match the version and the changelog.
+
+.PARAMETER SkipBuild
+  Reuse an already built src-tauri\target\x86_64-pc-windows-msvc\release\clade-launcher.exe (the CI job
+  builds it in an earlier step with the same flags).
 
 .PARAMETER WithoutWebView2
-  Development only. Produces a zip that depends on the target PC already having WebView2. The resulting
-  zip is named Clade-Launcher-Portable-NO-WEBVIEW2.zip so it cannot be mistaken for a release.
+  Development only. Produces Clade-Launcher-Portable-NO-WEBVIEW2.zip, which depends on the PC's own
+  WebView2 and can never pass the release validation.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
-  [Parameter(ParameterSetName = 'Release')] [string] $WebView2Dir,
-  [Parameter(ParameterSetName = 'Release')] [string] $WebView2Cab,
+  [Parameter(ParameterSetName = 'Release', Mandatory = $true)] [string] $WebView2Cab,
   [Parameter(ParameterSetName = 'Dev', Mandatory = $true)] [switch] $WithoutWebView2,
-  [string] $OutDir
+  [string] $Tag,
+  [string] $OutDir,
+  [switch] $SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = Resolve-Path (Join-Path $PSScriptRoot '..')
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $target = 'x86_64-pc-windows-msvc'
-if (-not $OutDir) { $OutDir = Join-Path $repo 'dist-portable' }
-$outDir = [System.IO.Path]::GetFullPath($OutDir)
+$outDir = [System.IO.Path]::GetFullPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
+$rel = Join-Path $repo 'scripts\release'
+function Run-Node { & node @args; if ($LASTEXITCODE) { throw "node $($args -join ' ') failed" } }
 
+# ---- 1. one version everywhere
+$checkArgs = @((Join-Path $rel 'check-versions.mjs'), '--root', $repo)
+if ($Tag) { $checkArgs += @('--tag', $Tag) }
+Run-Node @checkArgs
+$version = (Get-Content (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
+
+# ---- 1b. the pinned WebView2 runtime is checked FIRST, so a missing pin or a wrong CAB fails in seconds, not after a build
 if (-not $WithoutWebView2) {
-  if ($WebView2Cab) {
-    # Microsoft.WebView2.FixedVersionRuntime.<ver>.x64.cab -> extract with the built-in expand.exe.
-    $cab = (Resolve-Path $WebView2Cab).Path
-    $WebView2Dir = Join-Path ([System.IO.Path]::GetTempPath()) ('wv2-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $WebView2Dir | Out-Null
-    & (Join-Path $env:windir 'System32\expand.exe') -F:* $cab $WebView2Dir | Out-Null
-    if ($LASTEXITCODE) { throw "expand.exe failed on $cab" }
-    $found = Get-ChildItem $WebView2Dir -Recurse -Filter msedgewebview2.exe | Select-Object -First 1
-    if (-not $found) { throw "msedgewebview2.exe not found inside $cab" }
-    $WebView2Dir = $found.Directory.FullName
-  }
-  if (-not $WebView2Dir) { throw 'Pass -WebView2Cab <file.cab> or -WebView2Dir <folder> (or -WithoutWebView2 for development only).' }
-  $WebView2Dir = (Resolve-Path $WebView2Dir).Path
-  $wv = Join-Path $WebView2Dir 'msedgewebview2.exe'
-  if (-not (Test-Path $wv)) { throw "msedgewebview2.exe not found in '$WebView2Dir'." }
-  # Never ship a runtime that is not genuinely signed by Microsoft.
-  $sig = Get-AuthenticodeSignature $wv
-  if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
-    throw "msedgewebview2.exe is not validly signed by Microsoft Corporation (status: $($sig.Status))."
-  }
-  Write-Host "WebView2 Fixed Version runtime $((Get-Item $wv).VersionInfo.ProductVersion), Authenticode signature valid"
+  Run-Node (Join-Path $rel 'webview2.mjs') status                  # says exactly what is not configured yet
+  $cab = (Resolve-Path $WebView2Cab).Path
+  Run-Node (Join-Path $rel 'webview2.mjs') verify --cab $cab       # SHA-256 against the pin, before anything is extracted
 }
 
-Push-Location $repo
-try {
-  # Static CRT only for the final target artifacts. Passing --target keeps build scripts and
-  # proc-macros on the normal host toolchain path, so incremental builds stay fast.
-  $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
-  pnpm install --frozen-lockfile
-  if ($LASTEXITCODE) { throw 'pnpm install failed' }
-  pnpm tauri build --no-bundle --target $target   # --no-bundle: never produce an installer
-  if ($LASTEXITCODE) { throw 'tauri build failed' }
-} finally {
-  Remove-Item Env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-  Pop-Location
-}
-
+# ---- 2. the production build
 $exe = Join-Path $repo "src-tauri\target\$target\release\clade-launcher.exe"
+# Strings that must not end up inside the shipped binary: this machine's profile and source folders, in
+# long and 8.3 form. Rust and C paths are remapped at build time; the validation proves it worked.
+$shortPath = { param($p) try { (New-Object -ComObject Scripting.FileSystemObject).GetFolder($p).ShortPath } catch { $null } }
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+$rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+$forbid = @($env:USERPROFILE, $repo, $cargoHome, $rustupHome) + @($env:USERPROFILE, $repo, $cargoHome, $rustupHome | ForEach-Object { if (Test-Path $_) { & $shortPath $_ } }) |
+  Where-Object { $_ } | Sort-Object -Unique
+if (-not $SkipBuild) {
+  Push-Location $repo
+  try {
+    $flags = "-C target-feature=+crt-static --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$rustupHome=/rustup --remap-path-prefix=$repo=/clade"
+    # Static CRT and path remapping only for the final target artifacts. Passing --target keeps build scripts
+    # and proc-macros on the normal host toolchain path.
+    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+    # The C code that is compiled into the binary (the TLS library) records its source paths too; MSVC's
+    # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered.
+    $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
+    pnpm install --frozen-lockfile
+    if ($LASTEXITCODE) { throw 'pnpm install failed' }
+    pnpm tauri build --no-bundle --target $target -- -- --locked
+    if ($LASTEXITCODE) { throw 'tauri build failed' }
+  } finally {
+    Remove-Item Env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS, Env:CFLAGS -ErrorAction SilentlyContinue
+    Pop-Location
+  }
+}
 if (-not (Test-Path $exe)) { throw "Release binary not found: $exe" }
 
-$stage = Join-Path $outDir 'Clade-Launcher'
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-New-Item -ItemType Directory -Path $stage | Out-Null
-Copy-Item $exe (Join-Path $stage 'Clade.exe')
-
-# Standard layout (the app also creates anything missing on first start).
-foreach ($d in 'data','instances','runtimes','runtimes\java','minecraft','libraries','assets','cache','cache\tmp','cache\downloads','cache\updates','logs') {
-  New-Item -ItemType Directory -Path (Join-Path $stage $d) -Force | Out-Null
-}
-
+# ---- 3. the WebView2 Fixed Version Runtime
+$wvDir = $null
 if (-not $WithoutWebView2) {
-  Copy-Item $WebView2Dir (Join-Path $stage 'runtimes\webview2') -Recurse
-  # The runtime's license requires passing its terms on to end users.
-  $lic = Join-Path $stage 'licenses'
-  New-Item -ItemType Directory -Path $lic -Force | Out-Null
-  Copy-Item (Join-Path $PSScriptRoot 'licenses\*.txt') $lic
+  $cfg = Get-Content (Join-Path $rel 'webview2-runtime.json') -Raw | ConvertFrom-Json
+  $work = Join-Path ([System.IO.Path]::GetTempPath()) ('clade-wv2-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $work | Out-Null
+  try {
+    & (Join-Path $env:windir 'System32\expand.exe') -F:* $cab $work | Out-Null
+    if ($LASTEXITCODE) { throw "expand.exe failed on $cab" }
+    $found = Get-ChildItem $work -Recurse -Filter msedgewebview2.exe | Select-Object -First 1
+    if (-not $found) { throw "msedgewebview2.exe not found inside $cab" }
+    $wvSource = $found.Directory.FullName
+    $sig = Get-AuthenticodeSignature (Join-Path $wvSource 'msedgewebview2.exe')
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+      throw "msedgewebview2.exe is not validly signed by Microsoft Corporation (status: $($sig.Status))."
+    }
+    $wvVersion = (Get-Item (Join-Path $wvSource 'msedgewebview2.exe')).VersionInfo.ProductVersion
+    if ($wvVersion -ne $cfg.version) { throw "WebView2 runtime is $wvVersion but the pinned version is $($cfg.version)." }
+    Write-Host "WebView2 Fixed Version ${wvVersion}: SHA-256 matches the pin, Authenticode signature valid"
+    $wvDir = Join-Path $outDir 'webview2-extracted'
+    if (Test-Path $wvDir) { Remove-Item $wvDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    Copy-Item $wvSource $wvDir -Recurse
+  } finally { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-@"
-Clade Launcher (portable)
-===================
-Run Clade.exe. Nothing needs to be installed and no administrator rights are required.
+# ---- 4. notices, 5. package + validation
+New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+$notices = Join-Path $outDir 'THIRD-PARTY-NOTICES.txt'
+Push-Location $repo
+try { Run-Node (Join-Path $rel 'generate-notices.mjs') --out $notices --strict } finally { Pop-Location }
 
-Everything the launcher stores (accounts, instances, Minecraft files, Java runtimes, logs) lives in this
-folder. Copy or move the WHOLE folder to take it to another PC. Do not copy Clade.exe alone.
-
- - Use an NTFS or exFAT drive. FAT32 cannot store files larger than 4 GB.
- - Close Clade before unplugging the drive.
- - Keep the folder path short (for example E:\Clade-Launcher) when possible.
- - Your accounts are protected by a master passphrase; Microsoft may still ask you to sign in again.
-"@ | Set-Content -Path (Join-Path $stage 'README.txt') -Encoding UTF8
+$pkgArgs = @((Join-Path $rel 'package.mjs'), '--exe', $exe, '--license', (Join-Path $repo 'LICENSE'), '--notices', $notices,
+  '--webview2-license', (Join-Path $PSScriptRoot 'licenses\WebView2-Fixed-Version-License.txt'), '--version', $version, '--out', $outDir)
+if ($WithoutWebView2) { $pkgArgs += '--no-webview2' } else { $pkgArgs += @('--webview2', $wvDir) }
+Run-Node @pkgArgs
 
 $zipName = if ($WithoutWebView2) { 'Clade-Launcher-Portable-NO-WEBVIEW2.zip' } else { 'Clade-Launcher-Portable.zip' }
 $zip = Join-Path $outDir $zipName
-if (Test-Path $zip) { Remove-Item $zip -Force }
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+$valArgs = @((Join-Path $rel 'validate-package.mjs'), $zip, '--version', $version, '--csp-from', (Join-Path $repo 'src-tauri\tauri.conf.json'))
+foreach ($f in $forbid) { $valArgs += @('--forbid-string', $f) }
+if ($WithoutWebView2) { $valArgs += '--allow-missing-webview2' }
+Run-Node @valArgs
 
+if ($wvDir -and (Test-Path $wvDir)) { Remove-Item $wvDir -Recurse -Force }   # large and already inside the ZIP
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-"$hash  $zipName" | Set-Content -Path "$zip.sha256" -Encoding ASCII
+$expected = ((Get-Content "$zip.sha256" -Raw) -split '\s+')[0]
+if ($hash -ne $expected) { throw "SHA-256 file ($expected) does not match the ZIP ($hash)." }
 Write-Host ""
 Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
 Write-Host "SHA-256 $hash"
-if ($WithoutWebView2) { Write-Warning 'This build has NO bundled WebView2 runtime and is for development only.' }
+if ($WithoutWebView2) { Write-Warning 'This build has NO bundled WebView2 runtime and is for development only; it fails the release validation.' }

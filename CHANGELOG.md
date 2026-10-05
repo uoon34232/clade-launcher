@@ -37,7 +37,7 @@ The project is currently pre-release. Versioned entries will begin with the firs
 
 - Minecraft Services AppID approval. Until Mojang approves Clade's Microsoft application ID, sign-in stops at that step, so the final authenticated end-to-end launch with a real account has **not** been verified. The launch pipeline has only been exercised with development fixtures.
 - Final portable release packaging and clean-machine verification.
-- GitHub Actions release automation.
+- GitHub Actions release automation: the tag-driven draft-release workflow, the packaging tools and the validation exist (see `docs/RELEASE.md`); the approved WebView2 runtime pin and the first real run are still to come.
 - Portable self-update design and implementation.
 - Official skin and owned-cape management after real authenticated account verification.
 
