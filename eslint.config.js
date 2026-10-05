@@ -20,4 +20,10 @@ export default tseslint.config(
     },
   },
   { files: ["*.config.{js,ts}"], ...tseslint.configs.disableTypeChecked },
+  // Release tooling: plain Node scripts, outside the interface's TypeScript project.
+  {
+    files: ["scripts/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: { ...tseslint.configs.disableTypeChecked.languageOptions, globals: globals.node },
+  },
 );

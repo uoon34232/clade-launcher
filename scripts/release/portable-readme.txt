@@ -1,0 +1,30 @@
+Clade Launcher {{VERSION}} (portable)
+=====================================
+
+Clade is a portable launcher for Minecraft: Java Edition on Windows.
+
+To start
+ 1. Extract the whole ZIP to a normal folder. Do not run Clade.exe from inside the ZIP.
+ 2. Run Clade.exe. Nothing needs to be installed and no administrator rights are needed.
+
+Your data
+ - Everything Clade stores (accounts, profiles, game files, Java runtimes, settings, logs) is kept in
+   this folder, next to Clade.exe. Clade creates its folders here the first time it starts.
+ - Keep the whole folder together. You can move or copy the folder to another place, drive or PC;
+   copy the folder, not Clade.exe on its own.
+ - Close Clade before unplugging a drive that holds it.
+
+Tips
+ - Use an NTFS or exFAT drive. FAT32 cannot hold files larger than 4 GB.
+ - For the best compatibility with older Minecraft and Java versions, keep the folder in a reasonably
+   short path that uses only English letters, digits and plain punctuation (for example D:\Clade-Launcher).
+ - Microsoft may ask you to sign in again, on any computer.
+
+Preview build
+ - This is an early Preview and it is not code-signed, so Windows SmartScreen or your antivirus
+   software may warn about Clade.exe.
+
+Licences
+ - LICENSE (Apache License 2.0), THIRD-PARTY-NOTICES.txt and the licenses folder.
+
+Project: https://github.com/uoon34232/clade-launcher
