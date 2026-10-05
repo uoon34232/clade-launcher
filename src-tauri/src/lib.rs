@@ -129,6 +129,9 @@ pub fn run() {
     if let Err(e) = prepare_cmd::sweep_scratch(&root) {
         tracing::warn!(error = %e, "could not clean scratch space");
     }
+    // Console-output files of games that ended while Clade was not watching (a game that is still
+    // running keeps writing into its unlinked file until it ends).
+    game_session::sweep_output(&root);
     // Remove loader-install staging trees left behind by a crash.
     if let Err(e) = loader_install::sweep_stale(&root) {
         tracing::warn!(error = %e, "could not clean stale loader staging");

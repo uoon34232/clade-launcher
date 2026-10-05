@@ -83,30 +83,33 @@ export function ProfileSelector({
         side="top"
         align="center"
         sideOffset={14}
-        className="glass-menu max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] rounded-[1.25rem] p-1.5 duration-200"
+        className="glass-menu flex max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
       >
-        <DropdownMenuRadioGroup
-          value={current.id}
-          onValueChange={(id: string) => {
-            playSound("select");
-            onSelect(id);
-          }}
-        >
-          {profiles.map((p) => (
-            <DropdownMenuRadioItem
-              key={p.id}
-              value={p.id}
-              closeOnClick
-              className="text-cream/80 data-[checked]:bg-cream/[0.06] data-[checked]:text-cream focus:bg-cream/[0.1] focus:text-cream [&_[data-slot=dropdown-menu-radio-item-indicator]]:text-clay-soft min-h-11 rounded-[0.875rem] py-1.5 pr-9 pl-3 transition-colors duration-150"
-            >
-              <span className="flex min-w-0 flex-col leading-tight">
-                <span className="truncate text-[0.875rem] font-medium">{p.name}</span>
-                <span className="text-cream/55 truncate text-[0.75rem]">{profileDetail(p)}</span>
-              </span>
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5" />
+        {/* Only the list of profiles scrolls; "Create profile" and "Verify files" stay in view below it. */}
+        <div className="menu-scroll min-h-0 flex-1 overflow-y-auto">
+          <DropdownMenuRadioGroup
+            value={current.id}
+            onValueChange={(id: string) => {
+              playSound("select");
+              onSelect(id);
+            }}
+          >
+            {profiles.map((p) => (
+              <DropdownMenuRadioItem
+                key={p.id}
+                value={p.id}
+                closeOnClick
+                className="text-cream/80 data-[checked]:bg-cream/[0.06] data-[checked]:text-cream focus:bg-cream/[0.1] focus:text-cream [&_[data-slot=dropdown-menu-radio-item-indicator]]:text-clay-soft min-h-11 rounded-[0.875rem] py-1.5 pr-9 pl-3 transition-colors duration-150"
+              >
+                <span className="flex min-w-0 flex-col leading-tight">
+                  <span className="truncate text-[0.875rem] font-medium">{p.name}</span>
+                  <span className="text-cream/55 truncate text-[0.75rem]">{profileDetail(p)}</span>
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </div>
+        <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5 shrink-0" />
         <DropdownMenuItem
           className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] font-medium transition-colors duration-150"
           onClick={() => {

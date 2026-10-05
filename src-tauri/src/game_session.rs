@@ -248,6 +248,135 @@ async fn pump<R: AsyncRead + Unpin>(r: R, tx: mpsc::UnboundedSender<String>) {
     }
 }
 
+// ----------------------------------------------------------------------- the game's output file
+
+/// Where the running games' console output is collected: launcher-owned files, never pipes.
+///
+/// A pipe ties the game to its reader: when Clade is killed the read end closes, the game's next write
+/// fails, and the game stops by itself a little later. A file has no reader to lose, so the game keeps
+/// running (and keeps its output) whatever happens to Clade. While Clade is alive it follows the file
+/// ([`Watch::output`]) and turns it into the redacted session log.
+pub fn output_dir(root: &PortableRoot) -> PathBuf {
+    root.cache_dir().join("game-out")
+}
+
+/// How much game output may pile up in the output file while Clade is watching: once this much has been
+/// read, the file is emptied again (see [`tail_file`]). Together with the small slack of one poll the
+/// file therefore stays within roughly this size however much a game or a mod prints. (The session log
+/// that people read has its own, larger cap.)
+pub const OUTPUT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How far behind the end of the file the reader may be when it empties the file; at most this much
+/// unread output can be dropped by an emptying.
+const EMPTY_SLACK_BYTES: u64 = 64 * 1024;
+
+/// Empties a file in place. Safe while a game has it open for appending: its next write simply goes to
+/// the new end of the file.
+fn empty_file(path: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.set_len(0)
+}
+
+/// Creates (empty) the output file for one instance's game and returns it with its path. The file is
+/// handed to the game as both stdout and stderr.
+///
+/// It is opened for **appending**: every write of the game lands at the current end of the file,
+/// wherever its own file position was. That is what makes it possible for Clade to empty the file
+/// while the game keeps running (the bound above) without the game's next write leaving a gap.
+pub fn open_output(root: &PortableRoot, id: &InstanceId) -> std::io::Result<(File, PathBuf)> {
+    let dir = output_dir(root);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.out"));
+    // Start empty even if a previous (orphaned) game left output in the file.
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    let file = fs::OpenOptions::new().append(true).open(&path)?;
+    Ok((file, path))
+}
+
+/// Empties output files left by games that ended while Clade was not watching. They are emptied, not
+/// deleted: a game that is still running keeps appending to its file, and a deleted name could never be
+/// emptied again. A game that has ended removes its own file (see the launch code).
+pub fn sweep_output(root: &PortableRoot) {
+    if let Ok(entries) = fs::read_dir(output_dir(root)) {
+        for e in entries.flatten() {
+            let _ = empty_file(&e.path());
+        }
+    }
+}
+
+/// Longest line kept whole; anything longer without a newline is cut here.
+const MAX_PENDING_BYTES: usize = 64 * 1024;
+
+/// Turns the bytes in `pending` into whole lines (lossy UTF-8, `\n` or `\r\n` ended); a partial last
+/// line stays in `pending` unless it has grown too long.
+fn drain_lines(pending: &mut Vec<u8>, tx: &mpsc::UnboundedSender<String>) {
+    let mut start = 0;
+    while let Some(pos) = pending[start..].iter().position(|b| *b == b'\n') {
+        let mut line = &pending[start..start + pos];
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        let _ = tx.send(String::from_utf8_lossy(line).into_owned());
+        start += pos + 1;
+    }
+    pending.drain(..start);
+    if pending.len() > MAX_PENDING_BYTES {
+        let _ = tx.send(String::from_utf8_lossy(pending).into_owned());
+        pending.clear();
+    }
+}
+
+/// Follows the game's output file and sends its lines until `done` says the game is gone, then reads
+/// what is left (including a last line without a newline).
+async fn tail_file(
+    path: PathBuf,
+    tx: mpsc::UnboundedSender<String>,
+    mut done: tokio::sync::watch::Receiver<bool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut file) = tokio::fs::File::open(&path).await else {
+        return;
+    };
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    // Bytes read since the file was last emptied.
+    let mut read_total: u64 = 0;
+    loop {
+        let finished = *done.borrow();
+        let n = file.read(&mut buf).await.unwrap_or(0);
+        if n > 0 {
+            read_total += n as u64;
+            pending.extend_from_slice(&buf[..n]);
+            drain_lines(&mut pending, &tx);
+            // Bound the file: once enough has been read and we are (nearly) caught up, empty it and read
+            // from the start again. The game keeps appending to the same open handle.
+            if read_total >= OUTPUT_LIMIT_BYTES {
+                let len = file.metadata().await.map_or(u64::MAX, |m| m.len());
+                if len.saturating_sub(read_total) <= EMPTY_SLACK_BYTES
+                    && empty_file(&path).is_ok()
+                    && file.seek(std::io::SeekFrom::Start(0)).await.is_ok()
+                {
+                    read_total = 0;
+                }
+            }
+            continue;
+        }
+        if finished {
+            break;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(150)) => {}
+            _ = done.changed() => {}
+        }
+    }
+    if !pending.is_empty() {
+        let _ = tx.send(String::from_utf8_lossy(&pending).into_owned());
+    }
+}
+
 pub struct Watch<'a> {
     pub root: &'a PortableRoot,
     pub instance: &'a InstanceId,
@@ -255,6 +384,9 @@ pub struct Watch<'a> {
     pub secrets: &'a [String],
     /// The command line as already-redacted text, written at the top of the log.
     pub header: &'a str,
+    /// The file the game writes its console output to (see `open_output`); followed while Clade runs.
+    /// `None` for a child whose stdout/stderr are pipes.
+    pub output: Option<&'a Path>,
     /// The playtime session, begun right after the successful spawn.
     pub tracker: Option<SessionTracker>,
     pub heartbeat: Duration,
@@ -272,6 +404,14 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
     }
     if let Some(e) = child.stderr.take() {
         readers.push(tokio::spawn(pump(e, tx.clone())));
+    }
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    if let Some(path) = watch.output {
+        readers.push(tokio::spawn(tail_file(
+            path.to_path_buf(),
+            tx.clone(),
+            done_rx,
+        )));
     }
     drop(tx);
 
@@ -333,6 +473,7 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
     };
 
     // The process is gone: collect what it printed last.
+    let _ = done_tx.send(true);
     for r in readers {
         let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
     }

@@ -463,12 +463,34 @@ async fn start(
     .await?;
 
     // Direct process creation (no shell). The child is not tied to this process: if Clade ends,
-    // the game does not.
+    // the game does not. Its console output goes to a launcher-owned file, not to pipes: a pipe's
+    // reader dies with Clade and the game would then stop on its own a little later. If the file cannot
+    // be created, the old piped output is used (the game then lives only as long as Clade does).
     let mut process = tokio::process::Command::from(planned.command.to_process());
-    process
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    process.stdin(std::process::Stdio::null());
+    let output = match crate::game_session::open_output(&state.root, id) {
+        Ok((file, path)) => match file.try_clone() {
+            Ok(second) => {
+                process
+                    .stdout(std::process::Stdio::from(file))
+                    .stderr(std::process::Stdio::from(second));
+                Some(path)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not share the game output file, using pipes");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "could not create the game output file, using pipes");
+            None
+        }
+    };
+    if output.is_none() {
+        process
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
     let child = process
         .spawn()
         .map_err(|e| fail("spawn_failed", format!("Java could not be started: {e}")))?;
@@ -512,6 +534,7 @@ async fn start(
                 instance: &id,
                 secrets: &secrets,
                 header: &header,
+                output: output.as_deref(),
                 tracker,
                 heartbeat: HEARTBEAT,
                 grace: GRACE,
@@ -524,6 +547,9 @@ async fn start(
         )
         .await;
         let _ = std::fs::remove_dir_all(root.cache_dir().join("game-tmp").join(id.as_str()));
+        if let Some(path) = &output {
+            let _ = std::fs::remove_file(path);
+        }
         let ls = app.state::<LaunchState>();
         ls.release(&id);
         tracing::info!(code = ?outcome.exit.code, kind = ?outcome.exit.kind, "game process ended");
