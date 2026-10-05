@@ -383,8 +383,20 @@ pub async fn ensure_fresh<T: Transport>(
         }
         Err(e) => return Err(e),
     };
+    // Microsoft rotates refresh tokens, and the old one may stop working once it has been used. So
+    // the new one is saved to the vault right now, before the Xbox and Minecraft steps: if one of
+    // them fails (an outage, a rate limit), the account still holds a refresh token that works. Only
+    // the refresh token is written here; the short-lived Minecraft token and its expiry stay as they
+    // were until the whole chain has succeeded.
+    if let Some(new_refresh) = &tokens.refresh {
+        let mut guard = lock(vault);
+        let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+        let mut updated = secrets.clone();
+        updated.ms_refresh_token = Some(new_refresh.expose().to_owned());
+        v.set_account(id, updated).map_err(storage)?;
+    }
     let (session, profile) = complete_chain(t, &tokens.access).await?;
-    // Microsoft rotates refresh tokens: keep the new one (or the old if none came back).
+    // The refresh token to keep: the new one, or the old one if none came back.
     let refresh = tokens
         .refresh
         .unwrap_or_else(|| Secret::new(old_refresh.clone()));
@@ -508,6 +520,40 @@ pub async fn create_vault(
     Ok(())
 }
 
+/// Drops the vault entries of accounts that were removed while the vault was locked.
+///
+/// This deletes credentials, so it only runs against an account list that is known to be
+/// authoritative: `accounts.json` must exist and parse. A missing file (a copied `vault.bin`, a
+/// restored backup, a deleted list) or a damaged one proves nothing about which accounts are gone,
+/// so the vault is left exactly as it is. A file that parses and really lists no accounts is a real
+/// empty list. Returns how many entries were removed.
+pub(crate) fn purge_orphans(vault: &mut Vault, accounts_path: &Path) -> usize {
+    let file = match crate::accounts::AccountsFile::load_authoritative(accounts_path) {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            tracing::info!("accounts.json is missing; the vault was left untouched");
+            return 0;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "accounts.json could not be read; the vault was left untouched");
+            return 0;
+        }
+    };
+    let orphans: Vec<String> = vault
+        .account_ids()
+        .filter(|id| !file.accounts.iter().any(|a| a.id == *id))
+        .map(str::to_owned)
+        .collect();
+    let mut removed = 0;
+    for id in orphans {
+        match vault.remove_account(&id) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error = %e, "could not remove an orphaned account secret"),
+        }
+    }
+    removed
+}
+
 #[tauri::command]
 pub async fn unlock_vault(
     auth: State<'_, AuthState>,
@@ -520,17 +566,7 @@ pub async fn unlock_vault(
         .await
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
         .map_err(|e| vault_error(&e))?;
-    // Drop secrets whose account was removed while the vault was locked.
-    if let Ok(file) = crate::accounts::AccountsFile::load(accounts.path()) {
-        let orphans: Vec<String> = vault
-            .account_ids()
-            .filter(|id| !file.accounts.iter().any(|a| a.id == *id))
-            .map(str::to_owned)
-            .collect();
-        for id in orphans {
-            let _ = vault.remove_account(&id);
-        }
-    }
+    purge_orphans(&mut vault, accounts.path());
     *lock(&auth.vault) = Some(vault);
     Ok(())
 }
@@ -747,6 +783,76 @@ mod tests {
     }
 
     // ---- callback parsing
+
+    fn vault_with(ids: &[&str]) -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create_with(&dir.path().join("vault.bin"), "correct horse battery", FAST)
+                .unwrap();
+        for id in ids {
+            v.set_account(
+                id,
+                secrets_for(&Secret::new(format!("R-{id}")), &mc_session(), 100),
+            )
+            .unwrap();
+        }
+        (dir, v)
+    }
+
+    fn mc_session() -> McSession {
+        McSession {
+            access_token: Secret::new("MC".into()),
+            expires_in: 3600,
+        }
+    }
+
+    fn ids(v: &Vault) -> Vec<String> {
+        v.account_ids().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_missing_or_damaged_account_list_can_never_erase_credentials() {
+        let (dir, mut v) = vault_with(&["acc-a", "acc-b"]);
+        let list = dir.path().join("accounts.json");
+        // no accounts.json at all
+        assert_eq!(purge_orphans(&mut v, &list), 0);
+        assert_eq!(ids(&v), ["acc-a", "acc-b"]);
+        // a damaged one (empty, truncated, garbage)
+        for bytes in [&b""[..], b"{\"schema\":1,\"accounts\":[", b"nope"] {
+            std::fs::write(&list, bytes).unwrap();
+            assert_eq!(purge_orphans(&mut v, &list), 0);
+            assert_eq!(ids(&v), ["acc-a", "acc-b"]);
+        }
+        // and the vault on disk still has both
+        assert_eq!(
+            Vault::unlock(&dir.path().join("vault.bin"), "correct horse battery")
+                .map(|v| ids(&v))
+                .unwrap(),
+            ["acc-a", "acc-b"]
+        );
+    }
+
+    #[test]
+    fn an_authoritative_list_still_cleans_up_orphans() {
+        let (dir, mut v) = vault_with(&["acc-a", "acc-b"]);
+        let list = dir.path().join("accounts.json");
+        let mut f = AccountsFile::default();
+        f.accounts.push(AccountMeta {
+            id: "acc-a".into(),
+            username: "A".into(),
+            minecraft_uuid: "00000000-0000-4000-8000-00000000a001".into(),
+            added_at: 1,
+            last_used_at: None,
+            status: AccountStatus::Ready,
+        });
+        f.save(&list).unwrap();
+        assert_eq!(purge_orphans(&mut v, &list), 1);
+        assert_eq!(ids(&v), ["acc-a"]);
+        // a list that really is empty (it exists and parses) keeps its meaning: nothing is owned
+        AccountsFile::default().save(&list).unwrap();
+        assert_eq!(purge_orphans(&mut v, &list), 1);
+        assert!(ids(&v).is_empty());
+    }
 
     #[test]
     fn only_the_exact_expected_callback_is_accepted() {
@@ -1146,6 +1252,73 @@ mod tests {
             AccountsFile::load(e.accounts.path()).unwrap().accounts[0].status,
             AccountStatus::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_survives_a_later_chain_failure() {
+        let e = env();
+        let id = seeded(&e, 50); // the cached Minecraft token is expired at `now`
+        let stored = |e: &Env| {
+            e.vault
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .account(&id)
+                .and_then(|a| a.ms_refresh_token.clone())
+        };
+        let old = stored(&e);
+        assert!(old.is_some());
+        for (failing_step, status) in [(XBL, 500u16), (XSTS, 401), (LOGIN, 503)] {
+            let t = FakeTransport::new();
+            t.reply(
+                TOKEN,
+                200,
+                r#"{"access_token":"MS-ACCESS","refresh_token":"ROTATED-REFRESH","expires_in":3600}"#,
+            );
+            // the steps before the failing one succeed
+            if failing_step != XBL {
+                t.reply(
+                    XBL,
+                    200,
+                    r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+                );
+            }
+            if failing_step == LOGIN {
+                t.reply(
+                    XSTS,
+                    200,
+                    r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+                );
+            }
+            t.reply(failing_step, status, "{}");
+            assert!(ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000)
+                .await
+                .is_err());
+            assert_eq!(
+                stored(&e).as_deref(),
+                Some("ROTATED-REFRESH"),
+                "the rotated token was kept after {failing_step} failed"
+            );
+            // put the old one back for the next round
+            e.vault
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .set_account(
+                    &id,
+                    AccountSecrets {
+                        ms_refresh_token: old.clone(),
+                        minecraft_access_token: Some("expired".into()),
+                        minecraft_token_expires_at: Some(50),
+                    },
+                )
+                .unwrap();
+        }
+        // and the tokens never reach the account list
+        let list = std::fs::read_to_string(e.accounts.path()).unwrap();
+        assert!(!list.contains("ROTATED") && !list.to_lowercase().contains("token"));
     }
 
     #[tokio::test]

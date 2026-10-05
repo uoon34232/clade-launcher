@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::instances::InstanceId;
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, quarantine_corrupt};
 use crate::portable::PortableRoot;
 
 const SCHEMA: u32 = 1;
@@ -113,6 +113,30 @@ pub struct BankedSession {
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> io::Result<T> {
     match fs::read(path) {
         Ok(b) => serde_json::from_slice(&b).map_err(io::Error::other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Like [`read_json`], but a total file whose *contents* cannot be read (empty, truncated, garbage)
+/// does not stop banking: the damaged file is moved aside (`<name>.corrupt`, never overwriting an
+/// earlier backup, never deleted), a fresh default total starts, and the recovery is logged. A real
+/// I/O failure is still an error.
+fn read_total_or_quarantine<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> io::Result<T> {
+    match fs::read(path) {
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let moved = quarantine_corrupt(path)?;
+                tracing::warn!(
+                    line = e.line(),
+                    column = e.column(),
+                    backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
+                    "a playtime file was damaged; it was set aside and a fresh total started"
+                );
+                Ok(T::default())
+            }
+        },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
     }
@@ -199,7 +223,7 @@ impl<'a> PlaytimeStore<'a> {
         // Per instance (skipped if the instance was deleted meanwhile; lifetime still counts it).
         if self.instance_dir(&s.instance_id).is_dir() {
             let path = self.instance_file(&s.instance_id);
-            let mut t: InstancePlaytime = read_json(&path)?;
+            let mut t: InstancePlaytime = read_total_or_quarantine(&path)?;
             if !t.applied.contains(&s.session_id) {
                 t.total_seconds += seconds;
                 t.sessions += 1;
@@ -210,7 +234,7 @@ impl<'a> PlaytimeStore<'a> {
         }
 
         let path = self.lifetime_file();
-        let mut l: LifetimePlaytime = read_json(&path)?;
+        let mut l: LifetimePlaytime = read_total_or_quarantine(&path)?;
         if !l.applied.contains(&s.session_id) {
             l.total_seconds += seconds;
             l.sessions += 1;
@@ -243,13 +267,27 @@ impl<'a> PlaytimeStore<'a> {
                 .ok()
                 .and_then(|b| serde_json::from_slice::<ActiveSession>(&b).ok())
             {
-                Some(s) => {
-                    banked.push(self.bank(&s)?);
-                    fs::remove_file(&path)?;
-                }
-                None => {
-                    let _ = fs::rename(&path, path.with_extension("corrupt"));
-                }
+                Some(s) => match self.bank(&s) {
+                    Ok(b) => {
+                        banked.push(b);
+                        if let Err(e) = fs::remove_file(&path) {
+                            tracing::warn!(error = %e, "could not remove a banked playtime journal entry");
+                        }
+                    }
+                    // One session that cannot be banked now (a real I/O problem) must not stop the
+                    // others; its journal entry stays and is tried again at the next start.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not bank a playtime session; it stays in the journal")
+                    }
+                },
+                None => match quarantine_corrupt(&path) {
+                    Ok(_) => {
+                        tracing::warn!("a playtime journal entry was damaged and was set aside")
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not set aside a damaged journal entry")
+                    }
+                },
             }
         }
         Ok(banked)
@@ -500,7 +538,7 @@ mod tests {
         assert!(root
             .data_dir()
             .join("playtime-active")
-            .join("junk.corrupt")
+            .join("junk.json.corrupt")
             .exists());
     }
 
@@ -518,5 +556,63 @@ mod tests {
             let text = fs::read_to_string(f).unwrap();
             assert!(!text.contains(":\\") && !text.contains(":/") && !text.contains("token"));
         }
+    }
+
+    #[test]
+    fn one_damaged_total_neither_blocks_banking_nor_recovery_of_the_others() {
+        let (_d, root, a) = setup();
+        let b = InstanceStore::new(&root)
+            .create(NewInstance::vanilla("Other", "1.21.4").unwrap(), 2)
+            .unwrap()
+            .id;
+        let store = PlaytimeStore::new(&root);
+        // instance A's total is damaged; instance B and the lifetime total are fine
+        let a_file = root.instances_dir().join(a.as_str()).join("playtime.json");
+        fs::write(&a_file, b"{ truncated").unwrap();
+        let t0 = Instant::now();
+        for (inst, pid) in [(&a, 1u32), (&b, 2u32)] {
+            let mut s = store.begin_session(inst, pid, 0, t0).unwrap();
+            s.tick(0, t0 + secs(60)).unwrap();
+            drop(s); // crashed: only the journal remains
+        }
+        let recovered = store.recover().unwrap();
+        assert_eq!(recovered.len(), 2, "both sessions were banked");
+        // A: the damaged file was set aside untouched and a fresh total started
+        assert_eq!(
+            fs::read(a_file.with_file_name("playtime.json.corrupt")).unwrap(),
+            b"{ truncated"
+        );
+        assert_eq!(store.instance_total(&a).unwrap().total_seconds, 60);
+        // B and the lifetime total are right
+        assert_eq!(store.instance_total(&b).unwrap().total_seconds, 60);
+        assert_eq!(store.lifetime_total().unwrap().total_seconds, 120);
+        // the journal is empty: nothing will be banked twice
+        assert_eq!(
+            fs::read_dir(root.data_dir().join("playtime-active"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_damaged_lifetime_total_is_set_aside_too_and_a_second_damage_keeps_both() {
+        let (_d, root, id) = setup();
+        let store = PlaytimeStore::new(&root);
+        let lifetime = root.data_dir().join("playtime.json");
+        let t0 = Instant::now();
+        for (n, junk) in [&b"first junk"[..], b"second junk"].into_iter().enumerate() {
+            fs::write(&lifetime, junk).unwrap();
+            let mut s = store.begin_session(&id, 1, 0, t0).unwrap();
+            s.tick(0, t0 + secs(30)).unwrap();
+            s.finish(&store, 0, t0 + secs(30)).unwrap();
+            assert!(lifetime.is_file(), "round {n}: a fresh total was written");
+        }
+        let kept: Vec<_> = fs::read_dir(root.data_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("playtime.json.corrupt"))
+            .collect();
+        assert_eq!(kept.len(), 2, "both damaged copies were kept: {kept:?}");
     }
 }

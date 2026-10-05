@@ -40,6 +40,13 @@ impl AccountsState {
         &self.path
     }
 
+    /// Whether nobody holds the gate right now (tests use it to prove the vault is never touched
+    /// while the gate is held).
+    #[cfg(test)]
+    fn is_free(&self) -> bool {
+        self.gate.try_lock().is_ok()
+    }
+
     /// Read-modify-write of `accounts.json` under the lock (metadata only, atomic save).
     pub fn update<R>(&self, f: impl FnOnce(&mut AccountsFile) -> R) -> Result<R, AuthError> {
         let _g = self.lock();
@@ -181,9 +188,22 @@ pub fn remove_account(
     auth: State<'_, AuthState>,
     id: String,
 ) -> Result<AccountsDto, CodedError> {
-    let _g = state.lock();
-    let dto = remove(&state.path, &id).map_err(|e| e.coded())?;
-    auth.forget(&id); // sign out: its secrets leave the vault too (when it is unlocked)
+    remove_and_forget(&state, &id, |id| auth.forget(id)).map_err(|e| e.coded())
+}
+
+/// Removes the account's metadata, then its vault secrets, and never holds the accounts gate while
+/// touching the vault. Sign-in persistence takes the vault first and the gate second, so the other
+/// order here would let the two deadlock. One order only: vault, then gate.
+pub fn remove_and_forget(
+    state: &AccountsState,
+    id: &str,
+    forget: impl FnOnce(&str),
+) -> Result<AccountsDto, AccountError> {
+    let dto = {
+        let _g = state.lock();
+        remove(&state.path, id)?
+    };
+    forget(id); // sign out: its secrets leave the vault too (when it is unlocked)
     Ok(dto)
 }
 
@@ -237,6 +257,28 @@ mod tests {
         select(&p, "b").unwrap();
         remove(&p, "a").unwrap();
         assert_eq!(std::fs::read(inst.join("instance.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn the_vault_is_never_touched_while_the_accounts_gate_is_held() {
+        let (_d, p) = seeded();
+        let state = AccountsState::new(p);
+        let mut forgotten = None;
+        let dto = remove_and_forget(&state, "a", |id| {
+            // the vault step runs here: the gate must already be free, so the order stays vault, then gate
+            assert!(
+                state.is_free(),
+                "the gate was still held during the vault step"
+            );
+            forgotten = Some(id.to_owned());
+        })
+        .unwrap();
+        assert_eq!(forgotten.as_deref(), Some("a"));
+        assert_eq!(dto.accounts.len(), 1);
+        // an unknown account never reaches the vault step
+        let mut called = false;
+        assert!(remove_and_forget(&state, "nope", |_| called = true).is_err());
+        assert!(!called);
     }
 
     #[test]

@@ -45,3 +45,64 @@ fn the_capability_denies_maximize_and_fullscreen_commands() {
         assert!(permissions.contains(&granted), "{granted} missing");
     }
 }
+
+#[test]
+fn the_webview_has_a_strict_content_security_policy() {
+    let conf = read("tauri.conf.json");
+    let csp = conf["app"]["security"]["csp"]
+        .as_str()
+        .expect("a CSP string is configured");
+    let directive = |name: &str| -> Vec<&str> {
+        csp.split(';')
+            .map(str::trim)
+            .find_map(|d| d.strip_prefix(name).filter(|r| r.starts_with(' ')))
+            .unwrap_or_else(|| panic!("CSP has no {name} directive: {csp}"))
+            .split_whitespace()
+            .collect()
+    };
+    assert_eq!(directive("default-src"), ["'self'"]);
+    assert_eq!(directive("script-src"), ["'self'"]);
+    assert_eq!(directive("img-src"), ["'self'", "data:"]);
+    assert_eq!(directive("font-src"), ["'self'"]);
+    assert_eq!(directive("connect-src"), ["ipc:", "http://ipc.localhost"]);
+    // inline styles are needed by the interface; inline or eval-ed *scripts* never are
+    assert!(directive("style-src").contains(&"'unsafe-inline'"));
+    for forbidden in [
+        "unsafe-eval",
+        "wasm-unsafe-eval",
+        "*",
+        "https:",
+        "http:",
+        "ws:",
+        "blob:",
+    ] {
+        assert!(
+            !csp.split_whitespace()
+                .any(|t| t.trim_matches('\'') == forbidden),
+            "the CSP must not contain {forbidden}: {csp}"
+        );
+    }
+    assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+}
+
+#[test]
+fn the_frontend_has_no_generic_url_or_path_opening_capability() {
+    // Opening folders, logs and the sign-in page is done by Rust itself with fixed locations; the
+    // page must not be able to ask the opener plugin to open anything.
+    let cap = read("capabilities/default.json");
+    let permissions = cap["permissions"].as_array().expect("permissions");
+    assert!(
+        permissions
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|p| !p.starts_with("opener:")),
+        "no opener permission may be granted to the frontend"
+    );
+    let package = read("../package.json");
+    for section in ["dependencies", "devDependencies"] {
+        assert!(
+            package[section].get("@tauri-apps/plugin-opener").is_none(),
+            "the opener's JavaScript API is not used by the frontend"
+        );
+    }
+}

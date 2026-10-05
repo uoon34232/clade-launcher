@@ -20,6 +20,8 @@ interface Props {
   onCreate: () => void;
   /** Re-checks every file of the selected profile (a full hash verification) and repairs what differs. */
   onVerify: () => void;
+  /** The selected profile's game is starting or running: its files must not be touched now. */
+  verifyDisabled?: boolean;
 }
 
 const TRIGGER =
@@ -30,7 +32,14 @@ const TRIGGER =
  * existing profiles, and ends with "+ Create profile". With no profiles at all it is simply a
  * button that starts creating the first one.
  */
-export function ProfileSelector({ profiles, selectedId, onSelect, onCreate, onVerify }: Props) {
+export function ProfileSelector({
+  profiles,
+  selectedId,
+  onSelect,
+  onCreate,
+  onVerify,
+  verifyDisabled = false,
+}: Props) {
   const t = useT();
   const current = profiles.find((p) => p.id === selectedId) ?? profiles[0];
 
@@ -109,7 +118,8 @@ export function ProfileSelector({ profiles, selectedId, onSelect, onCreate, onVe
           {t("profile.create")}
         </DropdownMenuItem>
         <DropdownMenuItem
-          className="text-cream/55 focus:bg-cream/[0.1] focus:text-cream min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
+          disabled={verifyDisabled}
+          className="text-cream/55 focus:bg-cream/[0.1] focus:text-cream min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
             window.setTimeout(onVerify, 0);

@@ -169,10 +169,19 @@ pub fn part_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Writes the stream into the `.part` file, resuming or restarting as the server answered.
+/// What the part writer says when the server sends more than the file can be. Compared by the
+/// downloader, never shown.
+const OVERSIZE: &str = "the server sent more data than the file's declared size";
+
+/// Writes the stream into the `.part` file, resuming or restarting as the server answered. When the
+/// file's size is known it is a hard ceiling for the whole part (bytes already kept from an earlier
+/// attempt count towards it): nothing past it is ever written.
 struct PartWriter<'a> {
     part: &'a Path,
     from: u64,
+    limit: Option<u64>,
+    /// Bytes the part holds (kept from before plus written now).
+    len: u64,
     file: Option<File>,
     progress: &'a Progress,
     credited: &'a mut u64,
@@ -181,6 +190,14 @@ struct PartWriter<'a> {
 
 impl StreamSink for PartWriter<'_> {
     fn begin(&mut self, head: &StreamHead) -> io::Result<()> {
+        // Refuse before touching the file when the server announces too much.
+        let start = if head.status == 206 { self.from } else { 0 };
+        if let (Some(limit), Some(announced)) = (self.limit, head.content_length) {
+            if start.saturating_add(announced) > limit {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, OVERSIZE));
+            }
+        }
+        self.len = start;
         if head.status == 206 {
             let mut f = OpenOptions::new().write(true).open(self.part)?;
             f.seek(SeekFrom::Start(self.from))?;
@@ -199,11 +216,17 @@ impl StreamSink for PartWriter<'_> {
         if self.cancel.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
+        if let Some(limit) = self.limit {
+            if self.len.saturating_add(data.len() as u64) > limit {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, OVERSIZE));
+            }
+        }
         let f = self
             .file
             .as_mut()
             .ok_or_else(|| io::Error::other("data before headers"))?;
         f.write_all(data)?;
+        self.len += data.len() as u64;
         self.progress.add_done(data.len() as u64);
         *self.credited += data.len() as u64;
         Ok(())
@@ -295,6 +318,8 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                 let mut sink = PartWriter {
                     part: &part,
                     from,
+                    limit: job.size,
+                    len: from,
                     file: None,
                     progress: &self.progress,
                     credited: &mut credited,
@@ -307,6 +332,17 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                 drop(sink);
                 match result {
                     Ok(()) => {}
+                    Err(FetchError::Local(m)) if m.contains(OVERSIZE) => {
+                        // More bytes than the file can have: whatever was written is not this file.
+                        let _ = fs::remove_file(&part);
+                        self.progress.set_credit(&mut credited, 0);
+                        corrupt += 1;
+                        if corrupt > MAX_CORRUPT {
+                            let name = job.dest.file_name().unwrap_or_default().to_string_lossy();
+                            return Err(DownloadError::Verification(name.into_owned()));
+                        }
+                        continue;
+                    }
                     Err(FetchError::Local(m)) => {
                         return Err(if self.cancel.is_cancelled() {
                             DownloadError::Cancelled
@@ -468,6 +504,98 @@ mod tests {
         assert_eq!(calls[0].1, 0);
         assert!(calls[1].1 >= 300, "resumed, not restarted: {calls:?}");
         assert_eq!(e.progress.snapshot().bytes_done, 1000, "no double counting");
+    }
+
+    /// How large the `.part` is on disk after an attempt.
+    fn part_len(job: &FileJob) -> u64 {
+        fs::metadata(part_path(&job.dest))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn an_exact_size_response_is_accepted() {
+        let e = env();
+        let data = body(1000);
+        e.net.add(URL, &data);
+        e.net.hide_length(URL);
+        let job = e.job("b.jar", &data);
+        assert_eq!(e.dl().fetch(&job).await.unwrap(), Outcome::Downloaded);
+        assert_eq!(fs::read(&job.dest).unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn an_undersized_response_is_never_promoted() {
+        let e = env();
+        let data = body(1000);
+        e.net.add(URL, &data[..700]);
+        let job = e.job("b.jar", &data);
+        assert!(e.dl().fetch(&job).await.is_err());
+        assert!(!job.dest.exists());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_response_never_grows_the_part_past_the_declared_size() {
+        // announced up front (Content-Length): refused before a byte is written
+        let e = env();
+        let data = body(1000);
+        e.net.add(URL, vec![7u8; 100_000]);
+        let job = e.job("b.jar", &data);
+        assert!(matches!(
+            e.dl().fetch(&job).await,
+            Err(DownloadError::Verification(_))
+        ));
+        assert!(!job.dest.exists());
+        assert_eq!(part_len(&job), 0, "nothing was written");
+
+        // not announced (chunked): stopped as soon as it passes the size
+        let e = env();
+        e.net.add(URL, vec![7u8; 100_000]);
+        e.net.hide_length(URL);
+        let job = e.job("c.jar", &data);
+        assert!(matches!(
+            e.dl().fetch(&job).await,
+            Err(DownloadError::Verification(_))
+        ));
+        assert!(!job.dest.exists());
+        assert!(part_len(&job) <= 1000, "the part stayed within the size");
+        assert_eq!(
+            e.net.total_calls(),
+            3,
+            "one attempt plus the two corrupt-result retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_transfer_may_reach_exactly_the_size_but_not_pass_it() {
+        // resumed from 500 bytes, 500 more arrive: exactly 1000 in total, accepted
+        let e = env();
+        let data = body(1000);
+        e.net.add(URL, &data);
+        e.net.hide_length(URL);
+        let job = e.job("b.jar", &data);
+        fs::write(part_path(&job.dest), &data[..500]).unwrap();
+        assert_eq!(e.dl().fetch(&job).await.unwrap(), Outcome::Downloaded);
+        assert_eq!(fs::read(&job.dest).unwrap(), data);
+
+        // resumed from 500 bytes, but more than 500 would follow: the limit is the total size
+        let mut longer = data.clone();
+        longer.extend_from_slice(&body(400)); // 1400 bytes behind the same URL
+        let e = env();
+        e.net.add(URL, &longer);
+        e.net.hide_length(URL);
+        let job = e.job("c.jar", &data);
+        fs::write(part_path(&job.dest), &data[..500]).unwrap();
+        assert!(e.dl().fetch(&job).await.is_err());
+        assert!(!job.dest.exists());
+        assert!(part_len(&job) <= 1000);
+        // with the length announced, the refusal comes before anything is written
+        let e = env();
+        e.net.add(URL, &longer);
+        let job = e.job("d.jar", &data);
+        fs::write(part_path(&job.dest), &data[..500]).unwrap();
+        assert!(e.dl().fetch(&job).await.is_err());
+        assert!(!job.dest.exists());
     }
 
     #[tokio::test]

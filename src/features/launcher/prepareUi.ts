@@ -18,6 +18,7 @@ const STAGE_KEYS: Readonly<Record<PrepareStage, MessageKey>> = {
 
 /** Stages that say "Verifying ..." instead of "Downloading ..." during a full verification run. */
 const VERIFY_KEYS: Partial<Readonly<Record<PrepareStage, MessageKey>>> = {
+  java: "prepare.stage.java.verify",
   minecraft: "prepare.stage.minecraft.verify",
   libraries: "prepare.stage.libraries.verify",
   assets: "prepare.stage.assets.verify",

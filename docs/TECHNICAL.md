@@ -177,11 +177,13 @@ Order of work:
 
 **What is needed** is decided only by Mojang's metadata: libraries follow Mojang `rules` for Windows x64, with every launcher feature switched off, and anything not understood counts as "does not apply" rather than being guessed. Old and modern library forms, native libraries, and the legacy, virtual and `map_to_resources` asset layouts are all supported.
 
-**Java.** Mojang's runtime index (`windows-x64`) lists a component manifest, which is checked against its SHA-1. Every file is downloaded and verified into a staging folder, then the folder is renamed into `runtimes/java/` in one step. A runtime is reused while `bin/java.exe` still matches its recorded SHA-256. A version without a stated Java requirement uses the legacy runtime.
+**Java.** Mojang's runtime index (`windows-x64`) lists a component manifest, which is checked against its SHA-1. Every file is downloaded and verified into a staging folder, then the folder is renamed into `runtimes/java/` in one step. A runtime is reused while `bin/java.exe` still matches its recorded SHA-256; that is the only check on an ordinary launch, because hashing a whole runtime every time would be slow. The install also records every file of the runtime with the SHA-1 and size from Mojang's manifest (`runtime-files.json`). The explicit **Verify files** action uses that list to check every file of the profile's runtime, offline, and fetches again the ones that are missing or damaged. A runtime installed before the list existed is checked against Mojang's current manifest when it describes exactly the same version; otherwise only `java.exe` is covered, and nothing is invented for files no manifest lists. A version without a stated Java requirement uses the legacy runtime.
 
-**Natives** are unpacked by the safe archive extractor into scratch space, filtered, and swapped into `instances/<id>/natives/` in one rename.
+**Natives** are unpacked by the safe archive extractor into scratch space, filtered, and then put in place of `instances/<id>/natives/` (the old folder is removed, then the new one is renamed in). Because that replaces files a running game has loaded, a profile is never prepared or verified while its game runs (see below).
 
 **Progress** is reported as stages with real file and byte counts, or as indeterminate while nothing can be measured (for example while a Forge installer runs).
+
+**One operation per profile.** Preparing or verifying a profile and launching it exclude each other. A shared registry (`profile_lock`) claims the profile atomically (one lock, one check-and-insert) for the whole preparation, or from the first Play click until the game has ended. A profile whose game is starting or running cannot be prepared or verified (`already_running`), and a profile that is being prepared cannot be launched (`already_preparing`). The checks are in the Rust commands, not only in the UI; the dock additionally disables "Verify files" while the selected profile's game runs. Other profiles are unaffected: one preparation still runs at a time overall, but a running game never blocks preparing another profile.
 
 ## 8. Loaders: Fabric, Forge, NeoForge, Quilt
 
@@ -199,7 +201,7 @@ Clade may download and install **only the loader the user selected, from that lo
 
 - **HTTPS only**, through the allow-list in `download_policy`: Mojang, Microsoft sign-in, and loader hosts. Content platforms are never on it, and tests assert that.
 - Every job carries a mandatory SHA-1 or SHA-256 and usually a size. Existing verified files are reused with no network.
-- Bytes stream into a `.part` file and resume with `Range` where the server supports it. A part is never trusted until it verifies in full. Finalisation is an atomic rename.
+- Bytes stream into a `.part` file and resume with `Range` where the server supports it. A part is never trusted until it verifies in full. When the size is known it is a hard ceiling for the whole part (bytes kept from an earlier attempt count): a server that announces more, or keeps sending past it, is stopped at once and the part is discarded. Finalisation is an atomic rename.
 - Transient failures are retried with backoff; `404` and similar fail at once; a good file is never replaced by an unverified one. Concurrency is bounded (default 8).
 - Archives (natives, Java, installers) go through `safe_archive`, which guards against path traversal, absolute and drive paths, links, case collisions and decompression bombs.
 - **Offline check.** For a ready profile, Clade checks only that each required file exists with its exact size, with no hashing and no network, so a prepared profile is confirmed instantly while offline. Same-size corruption needs the full **Verify files** action, which re-hashes everything.
@@ -219,7 +221,7 @@ Sign-in follows the flow documented by Microsoft and the community Minecraft doc
 
 **Secrets handling.** Tokens are held in a zeroizing `Secret` type with a redacted `Debug`. Errors and logs carry stable codes, never response bodies, tokens or headers.
 
-**Token lifecycle.** A cached Minecraft token is used while it has more than five minutes left. Otherwise the Microsoft token is refreshed and the chain repeated, and the rotated refresh token is stored. Revoked or expired credentials mark the account as *needs sign-in again* and keep the account and its data; network failures change nothing. Accounts are never deleted because credentials expired. Signing in again must return the same Minecraft UUID or it is refused.
+**Token lifecycle.** A cached Minecraft token is used while it has more than five minutes left. Otherwise the Microsoft token is refreshed and the chain repeated, and the rotated refresh token is written to the vault as soon as Microsoft returns it, before the Xbox and Minecraft steps, so a later failure there cannot lose it (the short-lived Minecraft token is only stored once the whole chain has succeeded). Revoked or expired credentials mark the account as *needs sign-in again* and keep the account and its data; network failures change nothing. Accounts are never deleted because credentials expired. Signing in again must return the same Minecraft UUID or it is refused.
 
 **Error codes.** The UI distinguishes `cancelled`, `timed_out`, `browser_unavailable`, `offline`, `oauth`, `needs_sign_in`, `no_xbox_account`, `xbox_region`, `adult_verification`, `child_account`, `xbox_banned`, `xsts`, `approval_required`, `no_java_profile`, `bad_response`, `vault_locked`, `storage` and `wrong_account`.
 
@@ -235,6 +237,8 @@ Refresh tokens and the Minecraft access token are stored only in `data/vault.bin
 - Writes are atomic and keep one `.bak` generation.
 - First sign-in asks for a new passphrase (eight characters or more, repeated, with a clear "cannot be recovered" warning). Later sessions unlock when a sign-in or refresh is needed. The vault is unlocked **before** the browser opens, so a finished sign-in can always be saved. The passphrase is sent to Rust once and never kept in the frontend.
 - `accounts.json` holds metadata only (internal id, Minecraft UUID, profile name, status, timestamps), never tokens. It stays readable while the vault is locked.
+- Removing an account while the vault is locked leaves its secrets until the next unlock, which then removes the entries that belong to no account. That cleanup deletes credentials, so it only runs against an account list that is known to be authoritative: `accounts.json` must exist and parse. A missing file (a copied `vault.bin`, a restored backup) or a damaged one leaves the vault exactly as it is; a file that parses and really lists no accounts is a genuine empty list.
+- Locks are always taken in one order: the vault first, then the accounts file gate. Removing an account never holds the gate while it touches the vault.
 
 Limit: a stolen copy of the folder allows unlimited offline guessing. Argon2id slows that down but cannot protect a weak passphrase.
 
@@ -268,6 +272,8 @@ There is **no offline, guest or cracked mode**, and none must be added.
 
 **Closing Clade during a game** hides the window instead of closing it (there is no tray icon or service). The game and its playtime tracking continue, and Clade exits by itself when the game ends. Starting Clade again wakes the hidden window. If Clade itself is killed, the game keeps running and the next start banks the journalled playtime.
 
+**A failure is always shown.** The "When Minecraft closes" setting only applies to a normal exit. If the game could not be started or ends abnormally, Clade's window always comes back (shown, restored if minimized, focused) so the existing launch-failure or "Minecraft stopped" dialog can be read, even with *Hide Clade* on start and *Stay hidden* on close; a preference never hides an error. The one exception is unchanged: if the person closed the window during the game, Clade finishes quitting when the game ends.
+
 **Logs and exit summaries.** Each session writes `logs/games/<profile>/<time>.log` (redacted header, all output, a footer with exit code and duration; size-capped, newest ten kept). The exit is classified from the last lines into a short reason code (wrong Java version, out of memory, native library failure, mod loader error and so on). The backend sends only the code, and the UI words it in the selected language.
 
 ## 14. Playtime tracking
@@ -276,7 +282,7 @@ Playtime counts only the lifetime of a launched game process, never launcher idl
 
 - Stored per profile in `instances/<id>/playtime.json` (so it travels with a copied profile), as a lifetime total in `data/playtime.json`, and as a crash journal in `data/playtime-active/`.
 - Durations use a monotonic clock, so changing the system clock cannot change playtime. A 60-second heartbeat ticks the session; a tick arriving after more than 180 seconds (the PC slept) counts one interval, not the gap.
-- Recovery runs at every start: any session left in the journal is banked up to its last heartbeat (at most about a minute is lost), and unreadable entries are set aside. Banking is idempotent per session.
+- Recovery runs at every start: any session left in the journal is banked up to its last heartbeat (at most about a minute is lost), and unreadable entries are set aside (`.corrupt`, never overwriting an earlier backup, never deleted). A damaged per-profile or lifetime total is set aside the same way and a fresh total starts, and one session that cannot be banked does not stop the others. Banking is idempotent per session.
 - The files hold only numbers, ids and timestamps: no paths and no secrets.
 
 ## 15. Localization
@@ -303,7 +309,9 @@ These hold for all new code. Reporting vulnerabilities is covered in [SECURITY.m
 - Archive extraction guards against traversal, absolute paths, links and decompression bombs.
 - The game and loader installers are started with `Command::new(java).args([...])`, never through a shell, with a cleared environment.
 - User-supplied JVM arguments and all downloaded metadata are untrusted: strictly parsed, bounded in size and validated.
-- Tauri capabilities are least-privilege, with no wildcard filesystem or shell scopes and no remote content in the WebView.
+- Tauri capabilities are least-privilege, with no wildcard filesystem or shell scopes and no remote content in the WebView. The frontend is granted no opener permission at all: opening the Clade folder, the logs and the sign-in page is done by Rust with fixed locations (the opener plugin is registered only so Rust can use it), and `tests/window_rules.rs` fails if an opener permission or the opener's JavaScript package returns.
+- The WebView runs under a strict Content Security Policy (`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost`): no remote origins, no `unsafe-eval`, no inline or remote scripts. Inline styles are allowed because the interface sets some. A test pins the policy.
+- At startup Clade removes inherited `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` and `WEBVIEW2_USER_DATA_FOLDER`, so the environment cannot move the web engine or its profile out of the folder. Release builds also remove `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`; a development build keeps that one so DevTools can be attached.
 - Scratch files go to `cache/`, never the system TEMP; a child process never inherits the user's environment.
 - Self-update, when it arrives, will be a custom signed-archive updater that verifies a detached signature with a key compiled into the binary. `tauri-plugin-updater` is intentionally not used because on Windows it launches installers.
 
@@ -335,6 +343,8 @@ The application icon is `src-tauri/icons/icon.ico`. `build.rs` tells Cargo to wa
 - Windows may warn about an unsigned `Clade.exe` (SmartScreen, Smart App Control), and antivirus software may block it. Code signing is not implemented.
 - The filesystem must be NTFS or exFAT; FAT32 cannot hold files over 4 GB and has no atomic-rename guarantee.
 - The launcher is not fully hermetic: Java may touch the registry for its preferences, and mods can write wherever they choose.
+- A profile whose `instance.json` is damaged is left untouched and does not appear in the profile list; healthy profiles are unaffected. The reason is written to the log and to the diagnostics summary, but the interface has no warning surface for it yet.
+- "Verify files" can only check a Java runtime against a list that Mojang's manifest provides: the list recorded at install time, or the current manifest when it describes the same version. An older runtime whose version Mojang no longer lists is covered only by its `java.exe` hash.
 - Self-update and skin/cape management are not implemented yet.
 
 ## 20. Settings, first-run introduction and diagnostics
@@ -343,7 +353,7 @@ Settings are deliberately short: Interface (language, sound effects, volume, red
 
 ### The settings file
 
-Everything is stored by the Rust settings service in `data/settings.json` and nowhere else (no WebView storage). Every field has a safe default, old files load unchanged, damaged values are repaired rather than fatal, and the file is written atomically with a stable field order.
+Everything is stored by the Rust settings service in `data/settings.json` and nowhere else (no WebView storage). Every field has a safe default, old files load unchanged, damaged values are repaired rather than fatal, and the file is written atomically with a stable field order. Values are repaired one at a time: in a file that is valid JSON, an unsupported or unreadable value (an unknown mode, an out-of-range number, text where a number belongs, a path where a profile id belongs, a whole section of the wrong shape) is reset to its default and every other setting is kept; the file itself stays in place and the log names only the settings that were reset. A file that is not a settings document at all (empty, truncated, malformed JSON, or not a JSON object) never stops Clade from starting either: it is moved aside as `settings.json.corrupt` (or `.corrupt-<time>` if that exists, so an earlier backup is never overwritten), the defaults are used, and one English line in the log says so without quoting the file. A missing file simply means defaults. A file written by a newer Clade, and real filesystem failures (permissions, a locked file, failing to move the damaged file aside) are still reported as startup errors.
 
 ```json
 {

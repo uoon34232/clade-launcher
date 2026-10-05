@@ -2,7 +2,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// Writes `bytes` to `path` so readers only ever see the old or the new content, never a
 /// torn file. Matters on USB sticks that can be pulled mid-write.
@@ -155,6 +155,32 @@ pub fn install_verified(
     Ok(())
 }
 
+/// Moves a damaged file out of the way without ever overwriting an earlier backup: the first
+/// choice is `<name>.corrupt`, then `<name>.corrupt-<unix time>`, then the same with a counter.
+/// Returns where the file went. Nothing is deleted.
+pub fn quarantine_corrupt(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("path has no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut candidates = vec![format!("{name}.corrupt"), format!("{name}.corrupt-{stamp}")];
+    candidates.extend((1..1000).map(|n| format!("{name}.corrupt-{stamp}-{n}")));
+    for candidate in candidates {
+        let target = dir.join(candidate);
+        if target.exists() {
+            continue; // never replace an earlier backup
+        }
+        fs::rename(path, &target)?;
+        return Ok(target);
+    }
+    Err(io::Error::other("too many corrupt backups"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +200,24 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn quarantine_keeps_every_damaged_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        let mut seen = Vec::new();
+        for n in 0..3 {
+            fs::write(&p, format!("bad {n}")).unwrap();
+            let moved = quarantine_corrupt(&p).unwrap();
+            assert!(!p.exists());
+            assert_eq!(fs::read_to_string(&moved).unwrap(), format!("bad {n}"));
+            seen.push(moved);
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "no backup overwrote another");
+        assert!(d.path().join("settings.json.corrupt").is_file());
     }
 
     #[test]

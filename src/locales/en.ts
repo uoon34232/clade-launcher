@@ -123,6 +123,7 @@ export const en = {
   // ---- preparing a profile
   "prepare.stage.planning": "Preparing Minecraft",
   "prepare.stage.java": "Preparing Java",
+  "prepare.stage.java.verify": "Verifying Java",
   "prepare.stage.minecraft": "Downloading Minecraft",
   "prepare.stage.minecraft.verify": "Verifying Minecraft",
   "prepare.stage.libraries": "Downloading libraries",
@@ -304,6 +305,7 @@ export const en = {
   "error.launch.not_ready": "This profile has to be set up before it can start.",
   "error.launch.unsupported": "This profile can't be started.",
   "error.launch.already_running": "This profile is already starting or running.",
+  "error.launch.already_preparing": "This profile is being set up. Wait for it to finish.",
   "error.launch.spawn_failed": "Java could not be started.",
 
   "error.prepare.unknown": "Setup failed.",
@@ -321,6 +323,8 @@ export const en = {
   "error.prepare.disk_space":
     "There isn't enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
   "error.prepare.busy": "Another profile is being set up. Wait for it to finish.",
+  "error.prepare.already_running":
+    "This profile is starting or running. Close the game before setting it up or verifying it.",
 
   "error.signIn.unknown": "Sign-in failed.",
   "error.signIn.timed_out": "Sign-in took too long and was stopped. Try again when you are ready.",

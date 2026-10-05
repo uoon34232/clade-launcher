@@ -457,6 +457,7 @@ pub mod testing_stream {
         ranges: bool,
         break_after: Option<usize>,
         status: Option<u16>,
+        hide_length: bool,
     }
 
     #[derive(Default)]
@@ -477,8 +478,13 @@ pub mod testing_stream {
                     ranges: true,
                     break_after: None,
                     status: None,
+                    hide_length: false,
                 },
             );
+        }
+        /// The server does not announce a Content-Length (a chunked answer).
+        pub fn hide_length(&self, url: &str) {
+            self.files.lock().unwrap().get_mut(url).unwrap().hide_length = true;
         }
         /// The next stream of this URL breaks after `n` body bytes (once).
         pub fn break_once_after(&self, url: &str, n: usize) {
@@ -517,7 +523,7 @@ pub mod testing_stream {
         ) -> impl Future<Output = Result<(), FetchError>> + Send + 'a {
             async move {
                 self.calls.lock().unwrap().push((url.to_string(), from));
-                let (body, status, break_after) = {
+                let (body, status, break_after, hide_length) = {
                     let mut files = self.files.lock().unwrap();
                     let Some(f) = files.get_mut(url.as_str()) else {
                         return Err(FetchError::Network("no route (test)".into()));
@@ -533,11 +539,16 @@ pub mod testing_stream {
                     } else {
                         (0, 200)
                     };
-                    (f.body[start..].to_vec(), status, f.break_after.take())
+                    (
+                        f.body[start..].to_vec(),
+                        status,
+                        f.break_after.take(),
+                        f.hide_length,
+                    )
                 };
                 sink.begin(&StreamHead {
                     status,
-                    content_length: Some(body.len() as u64),
+                    content_length: (!hide_length).then_some(body.len() as u64),
                 })
                 .map_err(|e| FetchError::Local(e.to_string()))?;
                 let mut sent = 0usize;

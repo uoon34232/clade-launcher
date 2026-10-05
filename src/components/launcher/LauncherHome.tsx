@@ -209,6 +209,7 @@ export function LauncherHome({
           onVerifyProfile={() =>
             selectedProfile && setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
           }
+          verifyDisabled={run !== undefined}
           onPlay={play}
           playState={playState}
           onOpenSettings={() => setSurface({ kind: "settings" })}
