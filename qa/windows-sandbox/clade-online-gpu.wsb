@@ -1,0 +1,24 @@
+<Configuration>
+  <vGPU>Enable</vGPU>
+  <Networking>Enable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>%CLADE_QA_STAGING%</HostFolder>
+      <SandboxFolder>C:\CladeQA\in</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>%CLADE_QA_RESULTS%</HostFolder>
+      <SandboxFolder>C:\CladeQA\results</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File C:\CladeQA\in\qa\sandbox-run.ps1</Command>
+  </LogonCommand>
+</Configuration>
