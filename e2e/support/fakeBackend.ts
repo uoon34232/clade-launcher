@@ -105,6 +105,17 @@ function install(cfg: BackendConfig): void {
       return fail(planned.code, `${cmd} was made to fail by the test`, { params: planned.params });
     }
     const announce = () => emit("ui-settings-changed", clone(state.ui));
+    // The same decision the real backend makes (src-tauri/src/glass.rs): High Contrast is always opaque,
+    // "on" and "off" are explicit, "system" follows the Windows preference.
+    const glassStatus = () => {
+      const { transparencyEffects, highContrast } = cfg.windows;
+      const active =
+        !highContrast &&
+        (state.ui.transparency === "on" ||
+          (state.ui.transparency === "system" && transparencyEffects));
+      return { active, live: active && transparencyEffects };
+    };
+    const announceGlass = () => emit("glass-status-changed", glassStatus());
     switch (cmd) {
       // ---- launcher settings
       case "get_ui_settings":
@@ -125,6 +136,13 @@ function install(cfg: BackendConfig): void {
         state.ui.reducedMotion = args.mode as "system" | "on" | "off";
         announce();
         return null;
+      case "set_transparency":
+        state.ui.transparency = args.mode as "system" | "on" | "off";
+        announce();
+        announceGlass();
+        return null;
+      case "get_glass_status":
+        return glassStatus();
       case "set_memory": {
         const mb = args.mb as number | null;
         const { min, max } = state.ui.memory;
@@ -151,10 +169,12 @@ function install(cfg: BackendConfig): void {
         state.ui.soundVolume = 0.5;
         state.ui.language = null;
         state.ui.reducedMotion = "system";
+        state.ui.transparency = "system";
         state.ui.memoryMb = null;
         state.ui.onLaunch = "keep_open";
         state.ui.onExit = "show";
         announce();
+        announceGlass();
         return null;
 
       // ---- support actions (nothing is opened or written here)

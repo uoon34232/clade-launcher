@@ -55,5 +55,7 @@ strip = true
 tauri-plugin-single-instance = "2.5.2"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Globalization"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_UI_Accessibility"] }
+# Read-only OS preference (Transparency effects) through its documented WinRT API; already part of the build through Tauri.
+windows = { version = "0.62", features = ["Foundation", "UI_ViewManagement", "Win32_System_WinRT"] }
 wry = "0.57"

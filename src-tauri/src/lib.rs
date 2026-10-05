@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod download;
 pub mod download_policy;
 pub mod game_session;
+pub mod glass;
 pub mod instances;
 pub mod java_install;
 pub mod launch_args;
@@ -221,6 +222,8 @@ pub fn run() {
                     .app_handle()
                     .state::<launch_cmd::LaunchState>()
                     .set_exit_when_idle(false);
+                // The Windows transparency or High Contrast preference may have changed meanwhile.
+                glass::refresh(window.app_handle());
             }
             // Clade is a windowed launcher: if the window ever ends up maximized or fullscreen
             // (a shortcut, a snap gesture), put it back to a normal window.
@@ -244,6 +247,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(settings_state)
+        .manage(glass::GlassState::new())
         .manage(profiles_state)
         .manage(accounts_state)
         .manage(auth_state)
@@ -256,6 +260,8 @@ pub fn run() {
             ui_settings::set_last_phrase,
             ui_settings::set_language,
             ui_settings::set_reduced_motion,
+            ui_settings::set_transparency,
+            glass::get_glass_status,
             ui_settings::set_memory,
             ui_settings::set_behavior,
             ui_settings::complete_onboarding,
@@ -317,6 +323,9 @@ pub fn run() {
                     .position(p.x / scale, p.y / scale);
             }
             builder.build()?;
+            // Cosmetic only: a failure here is logged and Clade simply stays opaque.
+            glass::refresh(app.handle());
+            glass::watch_system_preference(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!());

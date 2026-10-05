@@ -12,6 +12,9 @@
   --color-ivory: #f3ede3;
   --color-cream: #f6f0e6;
   --color-sand: #e4d5be;
+  /* Secondary action buttons: what sand at 60% looks like on the opaque card, as a solid colour, so an
+     action never takes on whatever is behind a translucent surface. */
+  --color-sand-soft: #ebe0ce;
   --color-graphite: #2b2622;
   --color-clay: #b5604a;
   --color-clay-deep: #9c5039;
@@ -175,6 +178,15 @@
 }
 .dock-item--primary:active {
   scale: 0.97;
+}
+/* A dock control that has its menu open stays at its natural size. The menu is positioned against the
+   trigger's on-screen rectangle, which includes the hover scale; when the pointer left the trigger for
+   the menu the scale ended, the rectangle changed by a pixel or two and the menu shifted with it. */
+.dock-item[data-popup-open],
+.dock-item[data-popup-open]:hover,
+.dock-item[data-popup-open]:active {
+  scale: 1;
+  transition-property: background-color, color, box-shadow, translate;
 }
 
 /* Quiet scrollbars on the dark popups (profile menu, version lists) instead of the bright system one. */
@@ -472,5 +484,102 @@ html[data-motion="reduce"] .wordmark .wm-fade {
 @media (prefers-reduced-motion: reduce) {
   html[data-motion="system"] .wordmark .wm-fade {
     transition: opacity 160ms ease-in-out !important;
+  }
+}
+
+/* ------------------------------------------------------------------------------------------------
+   Window material ("glass"). One set of surface tokens; the classic opaque look is the default and
+   `data-glass="on"` (set from the backend's resolved state, see lib/glass.ts) swaps the values, so
+   components keep a single structure (`glass-dock`, `glass-modal`, `glass-menu`, `page-base`).
+   Off means off: nothing below applies without the attribute, there is no backdrop-filter, and every
+   fill is opaque. Transparency never depends on reduced motion: no rule here animates anything, so
+   the material is static whether or not motion is reduced.
+   ------------------------------------------------------------------------------------------------ */
+:root {
+  /* the page behind everything */
+  --page-base: #f3ede3;
+  /* bottom dock: graphite, with light controls */
+  --glass-dock-bg: rgb(43 38 34 / 0.95);
+  --glass-dock-filter: none;
+  --glass-dock-edge: inset 0 1px 0 rgb(255 255 255 / 0.07);
+  --glass-dock-shadow: 0 30px 70px -24px rgb(43 38 34 / 0.6), 0 3px 10px -2px rgb(43 38 34 / 0.25);
+  /* modals: Settings, accounts, profiles, confirmations (denser than the page, for reading) */
+  --glass-modal-bg: #f6f0e6;
+  --glass-modal-filter: none;
+  --glass-modal-edge: 0 0 0 1px rgb(43 38 34 / 0.1);
+  --glass-modal-shadow: 0 40px 90px -30px rgb(43 38 34 / 0.55);
+  /* the account menu: the dock's graphite, as a popover (portaled, but still inside <html>, so it
+     inherits these tokens like everything else) */
+  --glass-menu-bg: #2f2a26;
+  --glass-menu-edge: 0 0 0 1px rgb(246 240 230 / 0.06);
+  --glass-menu-shadow: 0 24px 60px -18px rgb(43 38 34 / 0.55);
+  /* tiny light response on hover */
+  --glass-spec: none;
+}
+/* No CSS backdrop-filter in the glass look: the blur comes from the window material itself, which the
+   compositor draws for free. Measured in the real window, a blur(14px) behind the dock added about 12
+   points of CPU while the animated background runs, and one behind a modal about 8, for no visible gain
+   (the colour fields behind are already soft). The tokens stay so a heavier look can be tried again. */
+html[data-glass="on"] {
+  --page-base: rgb(243 237 227 / 0.8);
+  --glass-dock-bg: rgb(43 38 34 / 0.76);
+  --glass-dock-filter: none;
+  --glass-dock-edge: inset 0 1px 0 rgb(255 255 255 / 0.2), inset 0 0 0 1px rgb(255 255 255 / 0.09);
+  --glass-dock-shadow: 0 26px 60px -26px rgb(43 38 34 / 0.55), 0 2px 8px -2px rgb(43 38 34 / 0.2);
+  --glass-modal-bg: rgb(246 240 230 / 0.92);
+  --glass-modal-filter: none;
+  --glass-modal-edge:
+    inset 0 1px 0 rgb(255 255 255 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.5),
+    0 0 0 2px rgb(43 38 34 / 0.06);
+  --glass-modal-shadow: 0 34px 80px -32px rgb(43 38 34 / 0.5);
+  --glass-menu-bg: rgb(43 38 34 / 0.81);
+  --glass-menu-edge:
+    inset 0 1px 0 rgb(255 255 255 / 0.12), 0 0 0 1px rgb(255 255 255 / 0.07);
+  --glass-menu-shadow: 0 22px 54px -20px rgb(43 38 34 / 0.55);
+  --glass-spec: linear-gradient(to bottom, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0) 62%);
+}
+/* Windows is showing its solid fallback instead of the live material (its own "Transparency effects"
+   switch is off, but glass was requested): the page cannot rely on what is behind it, so every surface
+   is denser. */
+html[data-glass="on"][data-glass-live="false"] {
+  --page-base: rgb(243 237 227 / 0.94);
+  --glass-dock-bg: rgb(43 38 34 / 0.93);
+  --glass-modal-bg: rgb(246 240 230 / 0.96);
+  --glass-menu-bg: rgb(43 38 34 / 0.97);
+}
+html[data-glass="on"],
+html[data-glass="on"] body {
+  background: transparent;
+}
+
+.page-base {
+  background: var(--page-base);
+}
+.glass-dock {
+  background: var(--glass-dock-bg);
+  -webkit-backdrop-filter: var(--glass-dock-filter);
+  backdrop-filter: var(--glass-dock-filter);
+  box-shadow: var(--glass-dock-edge), var(--glass-dock-shadow);
+}
+.glass-modal {
+  background: var(--glass-modal-bg);
+  -webkit-backdrop-filter: var(--glass-modal-filter);
+  backdrop-filter: var(--glass-modal-filter);
+  box-shadow: var(--glass-modal-edge), var(--glass-modal-shadow);
+}
+.glass-menu {
+  background: var(--glass-menu-bg);
+  box-shadow: var(--glass-menu-edge), var(--glass-menu-shadow);
+}
+/* a soft specular catch on hover: a static gradient, no glow, nothing moves */
+html[data-glass="on"] .dock-item:hover:not(:disabled) {
+  background-image: var(--glass-spec);
+}
+/* Windows High Contrast: always the plain, opaque, system-coloured look */
+@media (forced-colors: active) {
+  .glass-dock,
+  .glass-modal {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }

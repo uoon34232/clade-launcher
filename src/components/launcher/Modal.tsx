@@ -57,8 +57,8 @@ export function Modal({
         showCloseButton={false}
         initialFocus={initialFocus}
         className={cn(
-          "bg-card text-graphite ring-graphite/10 data-open:slide-in-from-bottom-2 data-closed:slide-out-to-bottom-2 max-h-[calc(100vh-2rem)] max-w-[calc(100%-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-[1.75rem] shadow-[0_40px_90px_-30px_rgb(43_38_34/0.55)] ring-1 duration-200",
-          size === "xl" ? "p-6" : "p-7",
+          "glass-modal text-graphite data-open:slide-in-from-bottom-2 data-closed:slide-out-to-bottom-2 max-h-[calc(100vh-2rem)] max-w-[calc(100%-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-[1.75rem] duration-200",
+          size === "xl" ? "px-6 py-5" : "p-7",
           WIDTH[size],
         )}
       >
@@ -94,10 +94,13 @@ export function ModalFooter({ children }: { children: ReactNode }) {
 export function ModalSection({
   title,
   compact = false,
+  className,
   children,
 }: {
   title: string;
   compact?: boolean;
+  /** Local spacing tweaks only (for example a tighter gap where a screen must fit the smallest window). */
+  className?: string;
   children: ReactNode;
 }) {
   return (
@@ -105,6 +108,7 @@ export function ModalSection({
       className={cn(
         "border-graphite/10 flex flex-col border-t first:border-t-0 first:pt-0",
         compact ? "gap-2.5 py-2.5" : "gap-3 py-5",
+        className,
       )}
     >
       <h3 className="text-ink-muted text-[0.8125rem] font-medium">{title}</h3>

@@ -56,7 +56,7 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
         side="top"
         align="start"
         sideOffset={14}
-        className="ring-cream/[0.06] max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),16rem)] rounded-[1.25rem] p-1.5 shadow-[0_24px_60px_-18px_rgb(43_38_34/0.55)] duration-200"
+        className="glass-menu max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),16rem)] rounded-[1.25rem] p-1.5 duration-200"
       >
         {active && (
           <>
