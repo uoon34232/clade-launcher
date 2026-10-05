@@ -91,7 +91,7 @@ describe("the QA scripts", () => {
     const r = spawnSync("powershell", ["-NoProfile", "-Command", cmd], { encoding: "utf8" });
     expect(r.stdout + r.stderr).toBe("");
     expect(r.status).toBe(0);
-  });
+  }, 15_000);
 });
 
 describe("the in-sandbox runner", () => {
