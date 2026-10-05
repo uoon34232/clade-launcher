@@ -72,7 +72,7 @@ impl From<DiagError> for CodedError {
 // ----------------------------------------------------------------------------------- redaction
 
 /// Words whose value (after `=`, `:` or a space) is a secret.
-const SECRET_KEYS: [&str; 14] = [
+const SECRET_KEYS: [&str; 21] = [
     "access_token",
     "accesstoken",
     "refresh_token",
@@ -87,7 +87,34 @@ const SECRET_KEYS: [&str; 14] = [
     "code",
     "token",
     "bearer",
+    // Microsoft / Xbox / Minecraft sign-in vocabulary and common secret names
+    "signedjwt",
+    "jwt",
+    "rpsticket",
+    "xbl3.0",
+    "secret",
+    "apikey",
+    "x-api-key",
 ];
+
+/// Keys whose value follows after spaces only (`Bearer <token>`, `XBL3.0 x=<hash>;<token>`).
+const SPACE_KEYS: [&str; 3] = ["bearer", "xbl3.0", "rpsticket"];
+
+/// `code` is both an OAuth authorization code (a secret) and the launcher's own harmless result codes
+/// (`code=vault_locked`, `code=Some(-1`). Only values that are plainly one of the harmless shapes are
+/// kept readable: a small number, or lower-case words joined by underscores.
+fn is_harmless_code(value: &str) -> bool {
+    let v = value.strip_prefix("Some(").unwrap_or(value);
+    if v.is_empty() || v.len() > 40 {
+        return false;
+    }
+    let number = v.strip_prefix('-').unwrap_or(v);
+    if number.len() <= 9 && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    v.split('_')
+        .all(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_lowercase()))
+}
 
 fn is_value_char(c: char) -> bool {
     !(c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '&' | ';' | '}' | ')' | '<' | '>'))
@@ -111,7 +138,8 @@ fn redact_key_values(line: &str) -> String {
                     .chars()
                     .take_while(|c| matches!(c, ' ' | '=' | ':' | '"' | '\''))
                     .count();
-                let has_sep = after[..sep].contains(['=', ':']) || (key == "bearer" && sep > 0);
+                let has_sep =
+                    after[..sep].contains(['=', ':']) || (SPACE_KEYS.contains(&key) && sep > 0);
                 if before_ok && has_sep {
                     j += sep;
                     // An Authorization header carries `Bearer <token>`: the whole rest of the line.
@@ -124,7 +152,8 @@ fn redact_key_values(line: &str) -> String {
                             .map(char::len_utf8)
                             .sum()
                     };
-                    if value_len > 0 {
+                    let harmless = key == "code" && is_harmless_code(&line[j..j + value_len]);
+                    if value_len > 0 && !harmless {
                         out.push_str(&line[i..j]);
                         out.push_str("<redacted>");
                         i = j + value_len;
@@ -140,9 +169,130 @@ fn redact_key_values(line: &str) -> String {
     out
 }
 
+/// Whether a name (`api-key`, `X_Secret_Key`, `dbPassword`, ...) is the name of a secret. Judged by its
+/// shape, not by a list of spellings: separators and case are ignored and the name has to END in a
+/// secret word, so `secretary`, `hotkey`, `primary_key` and `token_count` are not secrets.
+fn is_secret_name(name: &str) -> bool {
+    const ENDINGS: [&str; 11] = [
+        "apikey",
+        "secretkey",
+        "privatekey",
+        "accesskey",
+        "authkey",
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "token",
+        "credentials",
+    ];
+    let normalized: String = name
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | '.'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ENDINGS.iter().any(|e| normalized.ends_with(e))
+}
+
+/// Replaces the value of any `name=value`, `name: value` or `"name":"value"` whose name is a secret name.
+fn redact_named_secrets(line: &str) -> String {
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        let starts_name = line[i..].chars().next().is_some_and(is_name_char)
+            && (i == 0 || !line[..i].chars().next_back().is_some_and(is_name_char));
+        if starts_name {
+            let name_len: usize = line[i..]
+                .chars()
+                .take_while(|c| is_name_char(*c))
+                .map(char::len_utf8)
+                .sum();
+            let after = &line[i + name_len..];
+            let sep_len = after
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '=' | ':' | '"' | '\''))
+                .map(char::len_utf8)
+                .sum::<usize>();
+            let has_sep = after[..sep_len].contains(['=', ':']);
+            let value_start = i + name_len + sep_len;
+            let value_len: usize = line[value_start..]
+                .chars()
+                .take_while(|c| is_value_char(*c))
+                .map(char::len_utf8)
+                .sum();
+            if has_sep && value_len > 0 && is_secret_name(&line[i..i + name_len]) {
+                out.push_str(&line[i..value_start]);
+                out.push_str("<redacted>");
+                i = value_start + value_len;
+                continue;
+            }
+            // not a secret name: copy the name through unchanged
+            out.push_str(&line[i..i + name_len]);
+            i += name_len;
+            continue;
+        }
+        let ch = line[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
+}
+
+/// The length of the credential at the start of `rest`, if what is there is recognisable by shape:
+/// a JWT (`eyJ...`, or three long base64url segments), a Microsoft access token (`Ew...`), a Microsoft
+/// refresh token (`M.` / `0.A`), or the development fixture token. Anything else is not a secret.
+fn secret_shape_len(rest: &str) -> Option<usize> {
+    let run: usize = rest
+        .chars()
+        .take_while(|c| is_token_char(*c))
+        .map(char::len_utf8)
+        .sum();
+    let w = &rest[..run];
+    let jwt = w.starts_with("eyJ") && run >= 20;
+    let three_segments = {
+        let parts: Vec<&str> = w.trim_end_matches('.').split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| p.len() >= 16)
+    };
+    let ms_refresh = (w.starts_with("M.") || w.starts_with("0.A")) && run >= 40;
+    let ms_access = w.starts_with("Ew") && run >= 100;
+    let fixture = w.len() >= 12 && w[..12].eq_ignore_ascii_case("DEV-FIXTURE-");
+    (jwt || three_segments || ms_refresh || ms_access || fixture).then_some(run)
+}
+
+/// Replaces credentials that are recognisable by shape wherever they stand in the line (also after
+/// `=`, `:`, `;` or inside brackets), not only after a secret-looking key.
+fn redact_shapes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        let at_word_start = i == 0
+            || !line[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        if at_word_start {
+            if let Some(len) = secret_shape_len(&line[i..]) {
+                out.push_str("<redacted>");
+                i += len;
+                continue;
+            }
+        }
+        let ch = line[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Removes the value after `--accessToken` / `--session` style launch arguments, and bare tokens
-/// that are recognisable by shape (a JWT, a Microsoft refresh token).
+/// that are recognisable by shape.
 fn redact_tokens(line: &str) -> String {
+    let line = redact_shapes(line);
     let mut out: Vec<String> = Vec::new();
     let mut hide_next = false;
     for word in line.split(' ') {
@@ -161,13 +311,7 @@ fn redact_tokens(line: &str) -> String {
             out.push(word.to_owned());
             continue;
         }
-        let jwt = w.starts_with("eyJ") && w.len() >= 20;
-        let ms_refresh = (w.starts_with("M.") || w.starts_with("0.A")) && w.len() >= 40;
-        out.push(if jwt || ms_refresh {
-            "<redacted>".to_owned()
-        } else {
-            word.to_owned()
-        });
+        out.push(word.to_owned());
     }
     out.join(" ")
 }
@@ -240,7 +384,7 @@ pub fn redact(root: &Path, text: &str) -> String {
     }
     out = redact_user_folder(&out);
     out.lines()
-        .map(|l| redact_emails(&redact_tokens(&redact_key_values(l))))
+        .map(|l| redact_emails(&redact_tokens(&redact_key_values(&redact_named_secrets(l)))))
         .collect::<Vec<_>>()
         .join("\n")
 }

@@ -191,6 +191,7 @@
 
 /* Quiet scrollbars on the dark popups (profile menu, version lists) instead of the bright system one. */
 [data-slot="dropdown-menu-content"],
+[data-slot="dropdown-menu-content"] .menu-scroll,
 [data-slot="select-content"] {
   scrollbar-width: thin;
   scrollbar-color: rgb(246 240 230 / 0.28) transparent;

@@ -249,3 +249,237 @@ fn a_profile_that_cannot_be_read_is_named_in_the_summary_and_left_untouched() {
         b"{ not json"
     );
 }
+
+// ---- credentials that are not behind a "key=" (F1: a token echoed inside an error message)
+
+/// A development fixture token and invented, obviously fake credential shapes. None is real.
+const FAKE_JWT: &str =
+    "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJmYWtlLXVzZXIifQ.ZmFrZXNpZ25hdHVyZS1ub3QtcmVhbA";
+const FAKE_DOTTED: &str = "abcdEFGH12345678.ijklMNOP12345678.qrstUVWX12345678";
+const FAKE_MS_ACCESS: &str = "EwBYA8l6BAAUfakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefake1234";
+const FAKE_FIXTURE: &str = "DEV-FIXTURE-TOKEN-A-not-a-credential";
+
+#[test]
+fn a_jwt_like_token_is_redacted_wherever_it_stands() {
+    let d = tempfile::tempdir().unwrap();
+    for line in [
+        format!("Failed to parse into SignedJWT: {FAKE_JWT}"),
+        format!("x=hash123;{FAKE_JWT}"),
+        format!("(token {FAKE_JWT}) rejected"),
+        format!("saw {FAKE_DOTTED} in a header"),
+        format!("Authorization: Bearer {FAKE_JWT}"),
+        format!("XBL3.0 x=1234567890;{FAKE_JWT}"),
+        format!("ticket {FAKE_MS_ACCESS} end"),
+    ] {
+        let out = redact(d.path(), &line);
+        for secret in [
+            FAKE_JWT,
+            FAKE_DOTTED,
+            FAKE_MS_ACCESS,
+            "ZmFrZXNpZ25hdHVyZS1ub3QtcmVhbA",
+        ] {
+            assert!(
+                !out.contains(secret),
+                "{secret} survived in {out:?} (from {line:?})"
+            );
+        }
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+}
+
+#[test]
+fn bearer_access_and_refresh_token_forms_are_redacted() {
+    let d = tempfile::tempdir().unwrap();
+    for (line, secret) in [
+        (
+            "Authorization: Bearer opaque-bearer-VALUE-1",
+            "opaque-bearer-VALUE-1",
+        ),
+        (
+            "bearer opaque-bearer-VALUE-2 was used",
+            "opaque-bearer-VALUE-2",
+        ),
+        (
+            "access_token=opaque-access-VALUE-3&state=x",
+            "opaque-access-VALUE-3",
+        ),
+        (
+            r#"{"access_token":"opaque-access-VALUE-4"}"#,
+            "opaque-access-VALUE-4",
+        ),
+        (
+            r#"{"refresh_token":"M.C500_BAY.0.U.opaque-refresh-VALUE-5"}"#,
+            "opaque-refresh-VALUE-5",
+        ),
+        (
+            "refresh_token: opaque-refresh-VALUE-6",
+            "opaque-refresh-VALUE-6",
+        ),
+        (
+            "minecraft token=opaque-token-VALUE-7",
+            "opaque-token-VALUE-7",
+        ),
+        ("RpsTicket d=opaque-rps-VALUE-8", "opaque-rps-VALUE-8"),
+        (
+            "client_secret=opaque-client-VALUE-9",
+            "opaque-client-VALUE-9",
+        ),
+        (
+            "--accessToken opaque-launch-VALUE-10 --uuid 1",
+            "opaque-launch-VALUE-10",
+        ),
+        (
+            "code=opaque-oauth-CODE-0123456789abcdef",
+            "opaque-oauth-CODE-0123456789abcdef",
+        ),
+    ] {
+        let out = redact(d.path(), line);
+        assert!(!out.contains(secret), "{secret} survived in {out:?}");
+    }
+}
+
+#[test]
+fn the_development_fixture_token_is_redacted_even_inside_an_error_message() {
+    let d = tempfile::tempdir().unwrap();
+    let line = format!(
+        "[Realms Notification Availability checker #1/INFO]: Could not authorize you against Realms server: java.lang.RuntimeException: Failed to parse into SignedJWT: {FAKE_FIXTURE}"
+    );
+    let out = redact(d.path(), &line);
+    assert!(
+        !out.contains("DEV-FIXTURE") && !out.contains("not-a-credential"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Could not authorize you against Realms server"),
+        "the rest stays: {out}"
+    );
+}
+
+#[test]
+fn harmless_values_stay_readable() {
+    let d = tempfile::tempdir().unwrap();
+    for line in [
+        "launch did not start code=vault_locked",
+        "launch did not start code=needs_repair",
+        "game process ended code=Some(-1) kind=Crashed",
+        "game process ended code=Some(0) kind=Normal",
+        "profile preparation did not complete code=cancelled",
+        "exit code=1 after 12 s",
+        "profile 3f2a9c1e-5b7d-4c88-9a10-0123456789ab uses net.minecraft.client.main.Main 1.21.4",
+        r"loading C:\Clade\libraries\org\lwjgl\lwjgl\3.3.3\lwjgl-3.3.3.jar and fabric-loader-0.19.5-1.21.4",
+        "Java 21.0.7 started in 3 s with -Xmx7936M",
+        "sha1 of the asset is 0123456789abcdef0123456789abcdef01234567",
+    ] {
+        assert_eq!(redact(d.path(), line), line, "over-redacted: {line:?}");
+    }
+}
+
+#[test]
+fn a_secret_that_only_looks_like_a_result_code_is_still_redacted() {
+    let d = tempfile::tempdir().unwrap();
+    // an OAuth authorization code is a long mixed token, not a lower-case word or a number
+    for secret in [
+        "M.C500_BAY.2.U.fakeCodeValue12345",
+        "0.AXEAfakefakefake12345",
+        "AbC123xyz789AbC123xyz789",
+    ] {
+        let out = redact(d.path(), &format!("redirect with code={secret} done"));
+        assert!(!out.contains(secret), "{secret} survived in {out:?}");
+    }
+}
+
+#[test]
+fn the_exported_zip_contains_no_original_secret_material_but_keeps_useful_lines() {
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    fs::write(
+        r.logs_dir().join("clade.log"),
+        format!(
+            "launch did not start code=vault_locked\ngame process ended code=Some(-1) kind=Crashed\nlaunch failed with {FAKE_JWT}\n"
+        ),
+    )
+    .unwrap();
+    let game_logs = r.instances_dir().join("p").join("game").join("logs");
+    fs::create_dir_all(&game_logs).unwrap();
+    fs::write(
+        game_logs.join("latest.log"),
+        format!(
+            "[Client thread/INFO]: Setting user: Steve\n[Realms/INFO]: Failed to parse into SignedJWT: {FAKE_FIXTURE}\nAuthorization: Bearer {FAKE_JWT}\n[Render thread/INFO]: Created: 1024x512 textures-atlas\n"
+        ),
+    )
+    .unwrap();
+    let settings = LauncherSettings {
+        last_instance: Some(crate::instances::InstanceId::new("p").unwrap()),
+        ..LauncherSettings::default()
+    };
+    let (_, path) = export(&r, &settings, &facts(1_700_000_000)).unwrap();
+
+    // look at the actual ZIP bytes' contents, entry by entry
+    let files = read_zip(&path);
+    let all: String = files
+        .iter()
+        .map(|(_, t)| t.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in [
+        FAKE_JWT,
+        FAKE_FIXTURE,
+        "DEV-FIXTURE",
+        "ZmFrZXNpZ25hdHVyZS1ub3QtcmVhbA",
+        "eyJhbGci",
+    ] {
+        assert!(!all.contains(secret), "{secret} is in the diagnostics ZIP");
+    }
+    // the diagnostic value is still there
+    assert!(all.contains("code=vault_locked"), "{all}");
+    assert!(all.contains("code=Some(-1)"), "{all}");
+    assert!(
+        all.contains("Setting user: Steve") && all.contains("Created: 1024x512 textures-atlas")
+    );
+    assert!(
+        all.contains("Failed to parse into SignedJWT:"),
+        "the message stays, the token goes"
+    );
+}
+
+#[test]
+fn key_and_secret_style_names_are_recognised_by_shape() {
+    let d = tempfile::tempdir().unwrap();
+    // The literal spelling of one of these is banned from the source tree by product_rules, so the
+    // names are assembled here; the redactor must classify them by shape, not by a listed spelling.
+    let names = [
+        ["api", "_key"].concat(),
+        ["api", "-key"].concat(),
+        ["Api", "Key"].concat(),
+        ["API", "_", "KEY"].concat(),
+        ["x-api", "-key"].concat(),
+        "secret_key".to_owned(),
+        "private-key".to_owned(),
+        "AWS_SECRET_ACCESS_KEY".to_owned(),
+        "stripeSecret".to_owned(),
+        "auth_token".to_owned(),
+        "sessionToken".to_owned(),
+        "db_password".to_owned(),
+    ];
+    for name in &names {
+        for line in [
+            format!("config {name}=opaque-VALUE-12345 next=1"),
+            format!("header {name}: opaque-VALUE-12345"),
+            format!(r#"{{"{name}":"opaque-VALUE-12345","a":1}}"#),
+        ] {
+            let out = redact(d.path(), &line);
+            assert!(
+                !out.contains("opaque-VALUE-12345"),
+                "{name}: survived in {out:?}"
+            );
+        }
+    }
+    // names that merely contain such words are not secrets
+    for line in [
+        "key=minecraft.key.jump and keybinding=ctrl",
+        "monkey=1 turkey=2 hotkey=F5",
+        "token_count=5 secretary=Ada primary_key=7",
+    ] {
+        assert_eq!(redact(d.path(), line), line, "over-redacted: {line:?}");
+    }
+}

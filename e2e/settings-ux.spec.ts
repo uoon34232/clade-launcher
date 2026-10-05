@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { DEFAULT_CONFIG } from "./support/fixtures";
+import { DEFAULT_CONFIG, SURVIVAL } from "./support/fixtures";
 import { expect, test } from "./support/test";
 import { accountTrigger, settingsButton, text, textRu } from "./support/ui";
 
@@ -663,4 +663,52 @@ test.describe("dock menus keep their rectangle", () => {
         expect(near(edge[k], opened[k]), name + " " + k + " at the edge").toBe(true);
     });
   }
+});
+
+test.describe("the profile menu with many profiles", () => {
+  const many = Array.from({ length: 8 }, (_, i) => ({
+    ...SURVIVAL,
+    id: "world-" + String(i),
+    name: "World " + String(i),
+  }));
+  test.use({ backendConfig: { profiles: many, selected: "world-0" } });
+
+  test("scrolls only the list, and keeps Create profile and Verify files fully visible", async ({
+    page,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+    await page.waitForTimeout(1800); // the dock rises into place first
+    await page.getByRole("navigation", { name: "Clade" }).getByRole("button").nth(1).click();
+    const menu = page.locator('[data-slot="dropdown-menu-content"]');
+    await expect(menu).toBeVisible();
+    await page.waitForTimeout(400);
+    const m = await menu.boundingBox();
+    if (!m) throw new Error("no menu");
+    expect(m.y).toBeGreaterThanOrEqual(0);
+    expect(m.y + m.height).toBeLessThanOrEqual(600);
+
+    // the list is what scrolls
+    const list = menu.locator(".menu-scroll");
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    expect(await menu.evaluate((el) => el.scrollHeight <= el.clientHeight + 1)).toBe(true);
+
+    // both actions are completely inside the menu, whatever the list is doing
+    for (const name of [text("profile.create"), text("profile.verify")]) {
+      const item = menu.getByRole("menuitem", { name });
+      await expect(item).toBeVisible();
+      const b = await item.boundingBox();
+      if (!b) throw new Error("no item");
+      expect(b.y).toBeGreaterThanOrEqual(m.y - 0.5);
+      expect(b.y + b.height).toBeLessThanOrEqual(m.y + m.height + 0.5);
+    }
+    // every profile can be reached by scrolling the list
+    await list.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    const last = menu.getByRole("menuitemradio", { name: /World 7/ });
+    const lb = await last.boundingBox();
+    const lm = await list.boundingBox();
+    if (!lb || !lm) throw new Error("no boxes");
+    expect(lb.y + lb.height).toBeLessThanOrEqual(lm.y + lm.height + 0.5);
+  });
 });
