@@ -50,7 +50,9 @@ Typical run on any machine:
 The compare step exits 0 only when nothing changed outside the Clade folder in the watched locations
 (`%APPDATA%\.minecraft`, AppData folders named like Clade, Documents, top-level AppData/ProgramData/profile
 folders, Clade registry keys, Run/RunOnce keys). Windows-owned artifacts (MuiCache and similar entries it
-writes for any exe it has seen) are listed as INFO, not as failures.
+writes for any exe it has seen) are listed as INFO, not as failures. So is the Microsoft Edge auto-launch Run value
+(`MicrosoftEdgeAutoLaunch_<32 hex>` pointing at the Program Files `msedge.exe`) that Edge creates itself after the
+browser sign-in Clade opens for Microsoft OAuth; any other Run value stays EXTERNAL.
 
 Optional, third-party-free extra: Microsoft's Sysinternals **Process Monitor** shows every file and registry
 operation of `Clade.exe`. It loads a kernel driver and needs administrator rights, so use it only inside a

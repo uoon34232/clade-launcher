@@ -388,6 +388,14 @@ describe("account management modal", () => {
     expect(dialog.textContent).toContain("never uploaded");
   });
 
+  it("says skin and cape management is not available in Clade yet, without blaming sign-in", async () => {
+    const { dialog } = await openManage();
+    const skin = screen.getByText("Skin management isn’t available in Clade yet.");
+    const cape = screen.getByText(/^Cape management isn’t available in Clade yet\./);
+    for (const el of [skin, cape]) expect(el.textContent).not.toMatch(/sign[- ]?in|Microsoft/i);
+    expect(dialog.textContent).not.toContain("which isn’t available yet");
+  });
+
   it("removing needs a confirmation, then removes only the account", async () => {
     const { accounts, profiles } = await openManage();
     fireEvent.click(screen.getByRole("button", { name: /Sign out and remove/ }));
@@ -459,6 +467,9 @@ describe("accounts in Russian", () => {
     expect(dialog.textContent).toContain("Скин");
     expect(dialog.textContent).toContain("Плащ");
     expect(screen.getByRole("radio", { name: "Классическая" })).toBeTruthy();
+    const skin = screen.getByText("Управление скином пока недоступно в Clade.");
+    const cape = screen.getByText(/^Управление плащами пока недоступно в Clade\./);
+    for (const el of [skin, cape]) expect(el.textContent).not.toMatch(/вход|Microsoft/i);
     fireEvent.click(screen.getByRole("button", { name: "Выйти и удалить…" }));
     expect(dialog.textContent).toContain(
       "Удалить Alex? Профили, миры и время игры останутся как есть.",
