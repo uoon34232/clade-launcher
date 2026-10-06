@@ -178,7 +178,19 @@ function New-Snapshot {
   return $snap
 }
 
-function Convert-ToSet($value) { return @($value | ForEach-Object { "$_" }) }
+function Convert-ToSet($value) {
+  # An empty registry key is stored as {}; it must become an empty list, not one blank entry (which
+  # the comparison would report as a blank REMOVED/CHANGED row).
+  return @($value | ForEach-Object { "$_" } | Where-Object { $_.Trim() -ne '' })
+}
+
+function Test-EdgeAutoLaunch([string] $line) {
+  # Microsoft Edge registers its own auto-launch Run value after a browser sign-in (Clade opens the system
+  # browser for Microsoft OAuth). Only the exact Edge shape in a normal Program Files install is browser-owned:
+  # the value name must be MicrosoftEdgeAutoLaunch_<32 hex>, and the value must be the quoted msedge.exe
+  # (optionally with the two switches Edge itself adds). Anything else stays a finding.
+  return ($line -match '^MicrosoftEdgeAutoLaunch_[0-9A-Fa-f]{32}="[A-Za-z]:\\Program Files( \(x86\))?\\Microsoft\\Edge\\Application\\msedge\.exe"( --(no-startup-window|win-session-start))*$')
+}
 
 function Compare-Lists([string[]] $a, [string[]] $b, [scriptblock] $key) {
   # Returns added / removed / changed, matching entries by $key (the part before the first '|').
@@ -246,8 +258,14 @@ foreach ($area in @($a.topLevelFolders.PSObject.Properties.Name)) {
 foreach ($k in @($a.registry.PSObject.Properties.Name)) {
   $rb = Convert-ToSet $b.registry.$k
   $ra = Convert-ToSet $a.registry.$k
-  foreach ($x in ($ra | Where-Object { $rb -notcontains $_ })) { $external.Add("[registry $k] ADDED/CHANGED $x") | Out-Null }
-  foreach ($x in ($rb | Where-Object { $ra -notcontains $_ })) { $external.Add("[registry $k] REMOVED/CHANGED $x") | Out-Null }
+  foreach ($x in ($ra | Where-Object { $rb -notcontains $_ })) {
+    if ($k -eq 'HKCU Run (autostart)' -and (Test-EdgeAutoLaunch $x)) { $info.Add("[browser-owned] Microsoft Edge auto-launch ADDED/CHANGED $x") | Out-Null }
+    else { $external.Add("[registry $k] ADDED/CHANGED $x") | Out-Null }
+  }
+  foreach ($x in ($rb | Where-Object { $ra -notcontains $_ })) {
+    if ($k -eq 'HKCU Run (autostart)' -and (Test-EdgeAutoLaunch $x)) { $info.Add("[browser-owned] Microsoft Edge auto-launch REMOVED/CHANGED $x") | Out-Null }
+    else { $external.Add("[registry $k] REMOVED/CHANGED $x") | Out-Null }
+  }
 }
 # Windows-owned artifacts (informational).
 foreach ($k in @($a.windowsOwnedArtifacts.PSObject.Properties.Name)) {

@@ -210,10 +210,10 @@ export const en = {
   "accountModal.skinSlim": "Slim",
   "accountModal.choosePng": "Choose PNG…",
   "accountModal.restoreDefault": "Restore default",
-  "accountModal.skinUnavailable": "Skin changes need Microsoft sign-in, which isn’t available yet.",
+  "accountModal.skinUnavailable": "Skin management isn’t available in Clade yet.",
   "accountModal.capeAvailable": "Choose one of the capes this account owns, or turn the cape off.",
   "accountModal.capeUnavailable":
-    "Capes this account owns will appear here once sign-in is available. Capes can only be equipped, never uploaded.",
+    "Cape management isn’t available in Clade yet. Capes can only be equipped, never uploaded.",
   "accountModal.confirmRemove":
     "Remove {name}? Your profiles, worlds and playtime stay as they are.",
   "accountModal.keep": "Keep account",

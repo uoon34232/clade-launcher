@@ -215,11 +215,10 @@ export const ru: Record<MessageKey, Message> = {
   "accountModal.skinSlim": "Тонкая",
   "accountModal.choosePng": "Выбрать PNG…",
   "accountModal.restoreDefault": "Вернуть стандартный",
-  "accountModal.skinUnavailable":
-    "Для смены скина нужен вход через Microsoft, который пока недоступен.",
+  "accountModal.skinUnavailable": "Управление скином пока недоступно в Clade.",
   "accountModal.capeAvailable": "Выбери один из плащей этого аккаунта или отключи плащ.",
   "accountModal.capeUnavailable":
-    "Плащи этого аккаунта появятся здесь, когда вход станет доступен. Плащи можно только надевать, загружать их нельзя.",
+    "Управление плащами пока недоступно в Clade. Плащи можно только надевать, загружать их нельзя.",
   "accountModal.confirmRemove": "Удалить {name}? Профили, миры и время игры останутся как есть.",
   "accountModal.keep": "Оставить аккаунт",
   "accountModal.remove": "Удалить аккаунт",

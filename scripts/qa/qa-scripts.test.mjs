@@ -3,7 +3,8 @@
 // configurations must stay minimal, and nothing developer-specific may be committed in them.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -92,6 +93,123 @@ describe("the QA scripts", () => {
     expect(r.stdout + r.stderr).toBe("");
     expect(r.status).toBe(0);
   }, 15_000);
+});
+
+describe("portable-audit Compare: registry Run values", () => {
+  const HEX = "507B6EAB61E0461F18F13A409140A5A9";
+  const EDGE_X86 = String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`;
+  const edge = (
+    exe = EDGE_X86,
+    tail = " --no-startup-window --win-session-start",
+    name = `MicrosoftEdgeAutoLaunch_${HEX}`,
+  ) => `${name}="${exe}"${tail}`;
+  const havePs = (() => {
+    const p = spawnSync("powershell", ["-NoProfile", "-Command", "1"], { encoding: "utf8" });
+    return !p.error && p.status === 0;
+  })();
+
+  /** Runs `portable-audit.ps1 -Action Compare` on two synthetic snapshots that differ only in the Run key. */
+  function compare(beforeRun, afterRun) {
+    const dir = mkdtempSync(join(tmpdir(), "clade-audit-test-"));
+    try {
+      const snap = (run) => ({
+        meta: { label: "t", takenLocal: "2026-01-01 00:00:00 +00:00" },
+        files: {},
+        topLevelFolders: {},
+        registry: {
+          "HKCU:\\Software\\Clade": {},
+          "HKCU Run (autostart)": run,
+          "HKCU RunOnce (autostart)": {},
+        },
+        windowsOwnedArtifacts: {},
+        processes: [],
+        cladeRootFiles: [],
+        cladeRootBigFolders: {},
+      });
+      const b = join(dir, "before.json");
+      const a = join(dir, "after.json");
+      writeFileSync(b, JSON.stringify(snap(beforeRun)));
+      writeFileSync(a, JSON.stringify(snap(afterRun)));
+      const r = spawnSync(
+        "powershell",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          join(root, "scripts/qa/portable-audit.ps1"),
+          "-Action",
+          "Compare",
+          "-Before",
+          b,
+          "-After",
+          a,
+        ],
+        { encoding: "utf8" },
+      );
+      return { code: r.status, out: r.stdout.replaceAll("\r\n", "\n") + r.stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const externalCount = (out) => Number(out.match(/== EXTERNAL changes[^\n]*\((\d+)\) ==/)[1]);
+  const T = 30_000;
+
+  it.skipIf(!havePs)(
+    "classifies the genuine Microsoft Edge auto-launch value as browser-owned INFO",
+    () => {
+      for (const exe of [
+        EDGE_X86,
+        String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+      ]) {
+        const r = compare({}, edge(exe));
+        expect(r.out).toContain("[browser-owned] Microsoft Edge auto-launch ADDED/CHANGED");
+        expect(externalCount(r.out)).toBe(0);
+        expect(r.code).toBe(0);
+      }
+    },
+    T,
+  );
+
+  it.skipIf(!havePs)(
+    "still reports similarly named values that are not the genuine Edge shape",
+    () => {
+      const lookalikes = [
+        edge(String.raw`C:\Users\someone\AppData\Local\Temp\msedge.exe`),
+        edge(String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\evil.exe`),
+        edge(EDGE_X86, " --no-startup-window --load-extension=x"),
+        edge(EDGE_X86, "", "MicrosoftEdgeAutoLaunch_NOTHEX"),
+        edge(EDGE_X86, "", "MyEdgeAutoLaunch_" + HEX),
+        edge(EDGE_X86, "", "CladeAutoStart"),
+      ];
+      for (const value of lookalikes) {
+        const r = compare({}, value);
+        expect(externalCount(r.out), value).toBe(1);
+        expect(r.out, value).not.toContain("[browser-owned]");
+        expect(r.code, value).toBe(1);
+      }
+    },
+    T,
+  );
+
+  it.skipIf(!havePs)(
+    "never prints a blank ADDED/REMOVED/CHANGED row for empty registry keys",
+    () => {
+      for (const [b, a] of [
+        [{}, {}],
+        [{}, edge()],
+        [edge(), {}],
+      ]) {
+        const r = compare(b, a);
+        expect(r.out).not.toMatch(/(ADDED|REMOVED)\/CHANGED\s*$/m);
+        expect(r.out).not.toMatch(/^ {2}$/m);
+      }
+      const same = compare({}, {});
+      expect(same.out).toContain("RESULT: no change outside the Clade folder");
+      expect(externalCount(same.out)).toBe(0);
+    },
+    T,
+  );
 });
 
 describe("the in-sandbox runner", () => {
