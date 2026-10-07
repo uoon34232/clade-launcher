@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in Clade Launcher does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Clade Preview supports Windows 11 x64 only.
+
+        **Do not paste** passwords, Microsoft sign-in codes, access or refresh tokens, callback addresses that contain a code, or vault files. For a security problem, follow [SECURITY.md](https://github.com/uoon34232/clade-launcher/blob/main/SECURITY.md) instead of opening a public issue.
+  - type: input
+    id: clade-version
+    attributes:
+      label: Clade version
+      description: Shown in the file name of the ZIP you downloaded, or in README.txt inside it.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 23H2, 64-bit
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics (optional)
+      description: In Settings, "Export diagnostics" saves a redacted ZIP under logs/diagnostics next to Clade.exe. Look through anything before you share it, and remove anything private.

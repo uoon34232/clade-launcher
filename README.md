@@ -68,6 +68,24 @@ No public build has been released yet.
 
 The first portable preview will be published in [GitHub Releases](https://github.com/uoon34232/clade-launcher/releases) once the release package has passed clean-machine testing.
 
+## Requirements
+
+- **Windows 11, 64-bit (x64).** This is the only platform the first Preview targets. Windows 10 is not supported by this Preview.
+- Nothing to install: extract the ZIP to a normal folder and run `Clade.exe`. No administrator rights are needed.
+
+## The Preview is not code-signed
+
+Clade Preview is not code-signed. Windows may therefore treat `Clade.exe` with suspicion:
+
+- **SmartScreen** may show a warning before it starts.
+- **Smart App Control**, when Windows 11 runs it in enforcement mode, may block `Clade.exe` completely, and it may offer no "Run anyway" option.
+
+Please do not disable or bypass Smart App Control, Defender or any other Windows security feature to run Clade.
+
+## Reporting bugs
+
+[Report a bug](https://github.com/uoon34232/clade-launcher/issues/new/choose) in GitHub Issues. Say which Clade and Windows version you use, what happened and how to reproduce it. Never post passwords, Microsoft sign-in codes, tokens, callback addresses or vault files. Security problems go through [SECURITY.md](SECURITY.md) instead.
+
 ## Documentation
 
 - [Technical documentation](docs/TECHNICAL.md): how Clade works and how to build it

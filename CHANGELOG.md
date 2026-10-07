@@ -2,9 +2,19 @@
 
 All notable changes to Clade Launcher will be documented in this file.
 
-The project is currently pre-release. Versioned entries will begin with the first public preview.
+The project is currently pre-release. The first public preview is 0.1.0; its entry below is the text of its release notes.
+
+## Release policy
+
+Clade follows semantic versioning where practical.
+
+The first public build is planned as a preview release rather than `1.0.0`. Breaking changes may occur during the preview period.
 
 ## [Unreleased]
+
+## [0.1.0]
+
+Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is not supported by this Preview. Clade is not code-signed, so Windows SmartScreen may warn about `Clade.exe`, and Windows 11 Smart App Control in enforcement mode may block it completely, with no "Run anyway" option. Please do not disable or bypass Windows security features to run Clade. Report bugs in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose) and never post passwords, sign-in codes, tokens or vault files.
 
 ### Added
 
@@ -40,16 +50,10 @@ The project is currently pre-release. Versioned entries will begin with the firs
 - Windows QA tooling: a Windows Sandbox harness (offline, online, online with GPU), an environment report and a before/after portability audit.
 - Launching has been validated on a development PC with a real GPU for modern Vanilla, Vanilla 1.12.2 (Java 8), Fabric, Forge, NeoForge and Quilt, including duplicate-launch protection, hiding and showing the window, surviving a closed launcher, and recovery after a crashed game.
 
-### In progress
+### Known limitations
 
-- Windows code signing. The executable is not signed; Windows Smart App Control currently blocks an unsigned `Clade.exe` in Windows Sandbox, and SmartScreen may warn. Signing is not implemented and the provider is not chosen yet.
-- Final portable release packaging and clean-machine verification of the release package, including the bundled WebView2 runtime (its redistribution approval is still pending).
-- GitHub Actions release automation: the tag-driven draft-release workflow, the packaging tools and the validation exist (see `docs/RELEASE.md`); the first real run is still to come.
-- Portable self-update design and implementation.
-- Changing the skin and managing owned capes (the account's current skin is only displayed for now).
-
-## Release policy
-
-Clade follows semantic versioning where practical.
-
-The first public build is planned as a preview release rather than `1.0.0`. Breaking changes may occur during the preview period.
+- Windows 11 x64 only. Windows 10 and other platforms are not supported by this Preview.
+- Not code-signed. SmartScreen may warn, and Smart App Control in enforcement mode may block `Clade.exe` outright.
+- No self-update yet: download a new release to update.
+- Changing the skin and managing capes are not available; the account's current skin is only displayed.
+- Launching needs a network connection once the saved Minecraft sign-in has expired. There is no offline mode.
