@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { ALEX, BLAKE } from "./support/fixtures";
 import { expect, test } from "./support/test";
 import { accountTrigger, playButton, profileTrigger, text } from "./support/ui";
@@ -140,6 +140,23 @@ test.describe("account management", () => {
     expect((await backend.state()).accounts).toHaveLength(2);
   });
 
+  // The dialog stays mounted for its exit animation, so "still visible" right after a click proves
+  // nothing. A dialog that is closing loses `data-open` at once; wait two frames so the click has
+  // been handled and rendered, then look at that state.
+  const rendered = (page: Page) =>
+    page.evaluate(
+      () =>
+        new Promise<void>((done) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => done())),
+        ),
+    );
+  const staysOpen = async (page: Page, dialog: Locator) => {
+    await rendered(page);
+    await expect(dialog).toHaveAttribute("data-open", "");
+    await expect(dialog).not.toHaveAttribute("data-closed", "");
+    await expect(dialog.getByRole("button", { name: text("accountModal.remove") })).toBeVisible();
+  };
+
   test("a stray click on the backdrop does not close the confirmation", async ({
     page,
     openApp,
@@ -147,8 +164,26 @@ test.describe("account management", () => {
     await openApp();
     const dialog = await openManage(page, BLAKE.username);
     await dialog.getByRole("button", { name: text("accountModal.signOutRemove") }).click();
+    // the click really lands on the backdrop, not on the window chrome
+    expect(
+      await page.evaluate(() => document.elementFromPoint(8, 8)?.getAttribute("data-slot")),
+    ).toBe("dialog-overlay");
     await page.mouse.click(8, 8);
-    await expect(dialog.getByRole("button", { name: text("accountModal.remove") })).toBeVisible();
+    await staysOpen(page, dialog);
+  });
+
+  test("Escape does not close the confirmation either; Keep gives the dialog its normal dismissal back", async ({
+    page,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openManage(page, BLAKE.username);
+    await dialog.getByRole("button", { name: text("accountModal.signOutRemove") }).click();
+    await page.keyboard.press("Escape");
+    await staysOpen(page, dialog);
+    await dialog.getByRole("button", { name: text("accountModal.keep") }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
   test("confirming removes only the account; profiles and playtime stay as they are", async ({
