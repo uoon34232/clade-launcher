@@ -40,7 +40,7 @@ test.describe("profile selector", () => {
     await profileTrigger(page).click();
     await page.getByRole("menuitemradio", { name: /^Creative/ }).click();
     await expect(profileTrigger(page)).toHaveAccessibleName(
-      text("profile.trigger", { label: "Creative · Fabric 1.21.4" }),
+      text("profile.trigger", { label: "Creative" }),
     );
     await expect(playButton(page)).toHaveText(text("play.play"));
     await expect
@@ -99,7 +99,7 @@ test.describe("create profile: Vanilla", () => {
     await create.click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(profileTrigger(page)).toHaveAccessibleName(
-      text("profile.trigger", { label: "Weekend · Vanilla 1.20.1" }),
+      text("profile.trigger", { label: "Weekend" }),
     );
     // a profile that has not been prepared yet
     await expect(playButton(page)).toHaveText(text("play.setup"));
@@ -226,7 +226,7 @@ test.describe("create profile: Modded", () => {
 
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(profileTrigger(page)).toHaveAccessibleName(
-      text("profile.trigger", { label: "With Forge · Forge 1.21.4" }),
+      text("profile.trigger", { label: "With Forge" }),
     );
     const [call] = await backend.calls("create_profile");
     const request = (

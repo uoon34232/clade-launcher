@@ -199,6 +199,9 @@ pub struct JavaProfile {
     /// Dashed lowercase UUID.
     pub uuid: String,
     pub name: String,
+    /// The public address of the account's ACTIVE skin texture, as the profile reports it. Not a
+    /// secret and never sent to the frontend; `skin.rs` validates it before use.
+    pub skin_url: Option<String>,
 }
 
 // ------------------------------------------------------------------------------ PKCE and state
@@ -547,6 +550,7 @@ pub async fn verify_java_profile<T: Transport>(
             Ok(JavaProfile {
                 uuid,
                 name: name.to_owned(),
+                skin_url: active_skin_url(&v),
             })
         }
         404 => {
@@ -565,6 +569,22 @@ pub async fn verify_java_profile<T: Transport>(
         s if s >= 500 || s == 429 => Err(AuthError::Offline),
         _ => Err(AuthError::BadResponse("unexpected profile answer")),
     }
+}
+
+/// The `url` of the profile's ACTIVE skin, if it has one.
+fn active_skin_url(profile: &Value) -> Option<String> {
+    profile
+        .get("skins")?
+        .as_array()?
+        .iter()
+        .find(|s| {
+            s.get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|st| st.eq_ignore_ascii_case("ACTIVE"))
+        })?
+        .get("url")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn owns_minecraft(entitlements: &Value) -> bool {
@@ -726,6 +746,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_profile_reports_the_active_skin_address_only() {
+        let skin = |extra: &str| {
+            let t = FakeTransport::new();
+            t.reply(
+                MC_PROFILE,
+                200,
+                format!(r#"{{"id":"{UUID_RAW}","name":"Steve_01","skins":[{extra}],"capes":[]}}"#),
+            );
+            async move {
+                let mc = McSession {
+                    access_token: Secret::new("MC-TOKEN".into()),
+                    expires_in: 3600,
+                };
+                verify_java_profile(&t, &mc).await.unwrap().skin_url
+            }
+        };
+        let old =
+            r#"{"id":"1","state":"INACTIVE","url":"http://textures.minecraft.net/texture/old"}"#;
+        let new = r#"{"id":"2","state":"ACTIVE","variant":"SLIM","url":"http://textures.minecraft.net/texture/new"}"#;
+        assert_eq!(
+            skin(&format!("{old},{new}")).await.as_deref(),
+            Some("http://textures.minecraft.net/texture/new")
+        );
+        assert_eq!(
+            skin(old).await,
+            None,
+            "an inactive skin is not the current one"
+        );
+        assert_eq!(skin("").await, None, "no skins listed: the default skin");
+        assert_eq!(skin(r#"{"state":"ACTIVE"}"#).await, None);
+    }
+
+    #[tokio::test]
     async fn the_full_chain_yields_a_verified_java_profile() {
         let t = FakeTransport::new();
         ok_chain(&t);
@@ -737,7 +790,8 @@ mod tests {
             profile,
             JavaProfile {
                 uuid: UUID.into(),
-                name: "Steve_01".into()
+                name: "Steve_01".into(),
+                skin_url: None,
             }
         );
         let calls = t.calls();

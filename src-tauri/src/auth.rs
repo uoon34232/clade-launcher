@@ -27,7 +27,7 @@ use tokio::time::timeout;
 use url::Url;
 
 use crate::accounts::{AccountMeta, AccountStatus, ReauthReason};
-use crate::accounts_api::{self, AccountsDto, AccountsState};
+use crate::accounts_api::{AccountsDto, AccountsState};
 use crate::coded_error::CodedError;
 use crate::ms_auth::{
     authorize_url, complete_chain, exchange_code, random_token, refresh_ms, AuthError, JavaProfile,
@@ -41,6 +41,8 @@ use crate::vault::{AccountSecrets, Vault, VaultError};
 pub const SIGN_IN_WAIT: Duration = Duration::from_secs(5 * 60);
 /// A cached Minecraft token this close to expiry is refreshed instead of used.
 const TOKEN_MARGIN_SECS: i64 = 300;
+/// How long sign-in or a refresh waits for a decorative avatar download before answering without it.
+const SKIN_WAIT: Duration = Duration::from_secs(3);
 pub const PROGRESS_EVENT: &str = "sign-in-progress";
 
 // ------------------------------------------------------------------------------ callback
@@ -415,6 +417,8 @@ pub async fn ensure_fresh<T: Transport>(
         Some(_) => Err(AuthError::WrongAccount),
         None => Err(AuthError::UnknownAccount),
     })??;
+    // The profile just reported the current skin: note it (the download happens off this path).
+    accounts.record_skin(&profile.uuid, profile.skin_url.as_deref());
     Ok(session.access_token)
 }
 
@@ -637,7 +641,12 @@ async fn run_sign_in(
         persist(vault, accounts, &signed, reauth_for.as_deref(), now_unix())?;
     }
     tracing::info!("signed in a Minecraft Java account");
-    accounts_api::list(accounts.path()).map_err(|e| AuthError::Storage(e.to_string()))
+    // The avatar is cosmetic: noting and fetching the skin can never fail the sign-in.
+    accounts.record_skin(&signed.profile.uuid, signed.profile.skin_url.as_deref());
+    accounts.sync_pending_skins(SKIN_WAIT).await; // briefly; whatever is not done finishes later
+    accounts
+        .list()
+        .map_err(|e| AuthError::Storage(e.to_string()))
 }
 
 #[tauri::command]
@@ -662,8 +671,12 @@ pub async fn refresh_account(
     .await;
     match result {
         // A needs-sign-in verdict is recorded on the account; the list shows it.
-        Ok(()) | Err(AuthError::NeedsSignIn(_)) => accounts_api::list(accounts.path())
-            .map_err(|e| AuthError::Storage(e.to_string()).into()),
+        Ok(()) | Err(AuthError::NeedsSignIn(_)) => {
+            accounts.sync_pending_skins(SKIN_WAIT).await;
+            accounts
+                .list()
+                .map_err(|e| AuthError::Storage(e.to_string()).into())
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -750,6 +763,7 @@ mod tests {
             profile: JavaProfile {
                 uuid: uuid.into(),
                 name: name.into(),
+                skin_url: None,
             },
         }
     }

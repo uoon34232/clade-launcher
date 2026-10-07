@@ -673,7 +673,7 @@ test.describe("the profile menu with many profiles", () => {
   }));
   test.use({ backendConfig: { profiles: many, selected: "world-0" } });
 
-  test("scrolls only the list, and keeps Create profile and Verify files fully visible", async ({
+  test("scrolls only the list, and keeps Create profile, Verify files and Remove fully visible", async ({
     page,
     openApp,
   }) => {
@@ -695,7 +695,7 @@ test.describe("the profile menu with many profiles", () => {
     expect(await menu.evaluate((el) => el.scrollHeight <= el.clientHeight + 1)).toBe(true);
 
     // both actions are completely inside the menu, whatever the list is doing
-    for (const name of [text("profile.create"), text("profile.verify")]) {
+    for (const name of [text("profile.create"), text("profile.verify"), text("profile.remove")]) {
       const item = menu.getByRole("menuitem", { name });
       await expect(item).toBeVisible();
       const b = await item.boundingBox();

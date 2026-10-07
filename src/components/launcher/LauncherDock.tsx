@@ -21,6 +21,9 @@ interface Props {
   onVerifyProfile: () => void;
   /** The selected profile's game is starting or running, so "Verify files" is unavailable. */
   verifyDisabled?: boolean;
+  /** Remove the selected profile from Clade (its files are kept). */
+  onRemoveProfile: () => void;
+  removeDisabled?: boolean;
   onOpenSettings: () => void;
 }
 
@@ -42,6 +45,8 @@ export function LauncherDock(p: Props) {
           onCreate={p.onCreateProfile}
           onVerify={p.onVerifyProfile}
           verifyDisabled={p.verifyDisabled}
+          onRemove={p.onRemoveProfile}
+          removeDisabled={p.removeDisabled}
         />
         <PlayButton onClick={p.onPlay} state={p.playState} />
         <SettingsButton onClick={p.onOpenSettings} />

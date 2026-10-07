@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   accountsApi,
+  accountsEvents,
   NO_ACCOUNTS,
   type AccountsApi,
   type AccountsSnapshot,
@@ -19,6 +20,7 @@ import { LauncherDock } from "./LauncherDock";
 import { OnboardingDialog, type OnboardingExit } from "./OnboardingDialog";
 import type { PlayState } from "./PlayButton";
 import { PrepareDialog } from "./PrepareDialog";
+import { RemoveProfileDialog } from "./RemoveProfileDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { SignInDialog } from "./SignInDialog";
 import { WindowChrome } from "./WindowChrome";
@@ -38,6 +40,7 @@ type Surface =
   | { kind: "create-profile" }
   | { kind: "settings" }
   | { kind: "prepare"; id: string; verify?: boolean }
+  | { kind: "remove-profile"; id: string }
   | { kind: "sign-in"; accountId: string | null }
   | { kind: "account"; id: string };
 
@@ -51,6 +54,8 @@ export function LauncherHome({
 }: Props) {
   const [snapshot, setSnapshot] = useState<ProfilesSnapshot>(EMPTY);
   const [accounts, setAccounts] = useState<AccountsSnapshot>(NO_ACCOUNTS);
+  // Until the first answer the dock must not claim "sign in" for accounts that simply have not loaded.
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [surface, setSurface] = useState<Surface>({ kind: "none" });
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -63,9 +68,27 @@ export function LauncherHome({
   useEffect(refresh, [refresh]);
 
   const refreshAccounts = useCallback(() => {
-    accountsClient.list().then(setAccounts, () => setAccounts(NO_ACCOUNTS)); // no backend, no accounts: nothing is invented
+    accountsClient
+      .list()
+      .then(setAccounts, () => setAccounts(NO_ACCOUNTS)) // no backend, no accounts: nothing is invented
+      .finally(() => setAccountsLoaded(true));
   }, [accountsClient]);
   useEffect(refreshAccounts, [refreshAccounts]);
+
+  // Avatars are fetched in the background after the list was answered; the backend says when to look again.
+  useEffect(() => {
+    let stale = false;
+    let off: (() => void) | null = null;
+    const subscribe = accountsClient.onChanged ?? accountsEvents.onChanged;
+    void subscribe(refreshAccounts).then((u) => {
+      if (stale) u();
+      else off = u;
+    });
+    return () => {
+      stale = true;
+      off?.();
+    };
+  }, [accountsClient, refreshAccounts]);
 
   // What the backend says about running games: the starting state, "playing", and how each ended.
   useEffect(() => {
@@ -85,6 +108,7 @@ export function LauncherHome({
         });
         if (ev.state === "stopped") {
           refresh(); // the playtime moved
+          refreshAccounts(); // a launch may have refreshed the sign-in and noted a new skin
           if (ev.exit && ev.exit.kind !== "normal") {
             setProblem({ kind: "ended", profileId: ev.instanceId, exit: ev.exit });
           }
@@ -98,7 +122,7 @@ export function LauncherHome({
       stale = true;
       off?.();
     };
-  }, [launchClient, refresh]);
+  }, [launchClient, refresh, refreshAccounts]);
 
   // Choosing an account changes who plays, never what is played: no profile is touched.
   const selectAccount = (id: string) => {
@@ -152,9 +176,23 @@ export function LauncherHome({
     });
   };
 
-  // The primary action: set the profile up, or play it; with none, start creating one.
+  // Game files (set up, verify, repair) and launching need the ACTIVE account to be able to play:
+  // one that is missing or must sign in again blocks them (the backend refuses them too). Creating
+  // and choosing profiles never needs an account. Another, ready account never stands in.
+  const activeAccount = accounts.accounts.find((a) => a.id === accounts.active) ?? null;
+  const accountReady = !accountsLoaded || (activeAccount !== null && !activeAccount.needsSignIn);
+  // For an account that must sign in again, the same account signs in (no duplicate is created).
+  const signInForGame = () =>
+    setSurface({
+      kind: "sign-in",
+      accountId: activeAccount?.needsSignIn ? activeAccount.id : null,
+    });
+
+  // The primary action: set the profile up, or play it; with none, start creating one; without an
+  // account that can play, sign in first.
   const play = () => {
     if (!selectedProfile) setSurface({ kind: "create-profile" });
+    else if (!accountReady) signInForGame();
     else if (!selectedProfile.ready) setSurface({ kind: "prepare", id: selectedProfile.id });
     else launch(selectedProfile.id);
   };
@@ -163,14 +201,20 @@ export function LauncherHome({
   const preparing = prepareSurface
     ? (snapshot.profiles.find((p) => p.id === prepareSurface.id) ?? null)
     : null;
+  const removing =
+    surface.kind === "remove-profile"
+      ? (snapshot.profiles.find((p) => p.id === surface.id) ?? null)
+      : null;
   const run = selectedProfile ? runs[selectedProfile.id] : undefined;
   const playState: PlayState =
     run ??
-    (preparing && selectedProfile && preparing.id === selectedProfile.id && preparing.ready
-      ? "repairing"
-      : selectedProfile && !selectedProfile.ready
-        ? "setup"
-        : "play");
+    (selectedProfile && !accountReady
+      ? "signin"
+      : preparing && selectedProfile && preparing.id === selectedProfile.id && preparing.ready
+        ? "repairing"
+        : selectedProfile && !selectedProfile.ready
+          ? "setup"
+          : "play");
 
   const openCreate = () => {
     playSound("click");
@@ -209,7 +253,11 @@ export function LauncherHome({
           onVerifyProfile={() =>
             selectedProfile && setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
           }
-          verifyDisabled={run !== undefined}
+          verifyDisabled={run !== undefined || !accountReady}
+          removeDisabled={run !== undefined}
+          onRemoveProfile={() =>
+            selectedProfile && setSurface({ kind: "remove-profile", id: selectedProfile.id })
+          }
           onPlay={play}
           playState={playState}
           onOpenSettings={() => setSurface({ kind: "settings" })}
@@ -227,6 +275,15 @@ export function LauncherHome({
           verify={prepareSurface?.verify === true}
           onClose={close}
           onPrepared={setSnapshot}
+          api={api}
+        />
+        <RemoveProfileDialog
+          profile={removing}
+          onClose={close}
+          onRemoved={(next) => {
+            setSnapshot(next); // the backend's list and a valid selection; no restart needed
+            close();
+          }}
           api={api}
         />
         <LaunchProblemDialog

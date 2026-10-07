@@ -190,6 +190,16 @@ function install(cfg: BackendConfig): void {
       case "select_profile":
         state.selected = args.id as string;
         return null;
+      // "Remove from Clade": the real command moves the folder to instances/.removed/ and deletes
+      // nothing. Here the profile just leaves the list, with a valid selection (the next one, or none).
+      case "remove_profile": {
+        const id = args.id as string;
+        if (!state.profiles.some((p) => p.id === id)) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        state.profiles = state.profiles.filter((p) => p.id !== id);
+        state.selected = state.profiles[0]?.id ?? null;
+        return profilesSnapshot();
+      }
       case "get_version_catalog":
         return clone(cfg.catalog);
       case "get_loader_options": {
@@ -240,10 +250,16 @@ function install(cfg: BackendConfig): void {
       }
 
       // ---- preparing a profile: held open until the test finishes or fails it
-      case "prepare_profile":
+      case "prepare_profile": {
+        // The real backend refuses before anything is claimed or fetched: only a ready ACTIVE
+        // account (the effective one, with no stand-in) may prepare or verify.
+        const active = state.accounts.find((a) => a.id === state.active) ?? state.accounts[0];
+        if (!active || active.needsSignIn)
+          return fail("account_required", "Sign in with a Minecraft account first.");
         return new Promise((resolve, reject) => {
           pendingPrepare = { id: args.id as string, resolve, reject };
         });
+      }
       case "cancel_prepare":
         if (pendingPrepare) {
           pendingPrepare.reject({ code: "cancelled", message: "Preparation was cancelled." });

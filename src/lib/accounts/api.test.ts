@@ -5,7 +5,8 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (c: string, a?: Record<string, unknown>) => invoke(c, a),
 }));
 
-import { accountsApi, parseAccounts } from "./api";
+import { accountsApi, parseAccounts, skinSize } from "./api";
+import { testSkin } from "./testSkin";
 
 const tauri = (on: boolean) => {
   if (on) (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
@@ -24,18 +25,34 @@ describe("accounts api", () => {
           username: "Alex",
           uuid: "u",
           needsSignIn: true,
-          head: "data:image/png;base64,AAAA",
+          skin: testSkin(),
         },
-        { id: "b", username: "Blake", head: "https://example.test/head.png" },
+        { id: "b", username: "Blake", skin: "https://example.test/skin.png" },
+        { id: "c", username: "Casey", skin: "data:image/png;base64,AAAA" },
+        { id: "d", username: "Drew", skin: testSkin(65, 65) },
+        { id: "e", username: "Eli", skin: testSkin(128, 100) },
+        { id: "f", username: "Fran", skin: testSkin(64, 32) },
+        { id: "g", username: "Gus", skin: testSkin(256, 256) },
+        { id: "h", username: "Hal", skin: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" },
         { id: "", username: "x" },
         "junk",
       ],
       active: "ghost",
       capabilities: { signIn: true },
     });
-    expect(s.accounts.map((a) => a.id)).toEqual(["a", "b"]);
-    expect(s.accounts[0]).toMatchObject({ needsSignIn: true, head: "data:image/png;base64,AAAA" });
-    expect(s.accounts[1].head).toBeNull();
+    expect(s.accounts.map((a) => a.id)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+    expect(s.accounts[0]).toMatchObject({ needsSignIn: true, skin: testSkin() });
+    // Only an inline PNG of a skin shape is kept: never a URL, never another type, never odd sizes.
+    expect(s.accounts.map((a) => a.skin !== null)).toEqual([
+      true, //  64x64
+      false, // a URL
+      false, // not a real PNG
+      false, // 65x65
+      false, // 128x100
+      true, //  64x32 (old format)
+      true, //  256x256 (high resolution)
+      false, // another image type
+    ]);
     expect(s.active).toBe("a");
     expect(s.capabilities).toEqual({ signIn: true, skin: false, cape: false });
     expect(parseAccounts(null)).toEqual({
@@ -69,5 +86,27 @@ describe("accounts api", () => {
       code: "approval_required",
     });
     expect(invoke).toHaveBeenLastCalledWith("begin_sign_in", { accountId: null });
+  });
+});
+
+describe("skinSize", () => {
+  it("reads the size from the PNG header and accepts only skin shapes", () => {
+    expect(skinSize(testSkin(64, 64))).toEqual({ width: 64, height: 64 });
+    expect(skinSize(testSkin(64, 32))).toEqual({ width: 64, height: 32 });
+    expect(skinSize(testSkin(512, 512))).toEqual({ width: 512, height: 512 });
+    for (const [w, h] of [
+      [0, 0],
+      [63, 63],
+      [64, 48],
+      [96, 96],
+      [2048, 2048],
+      [64, 128],
+    ])
+      expect(skinSize(testSkin(w, h)), `${w}x${h}`).toBeNull();
+    expect(skinSize("https://example.test/skin.png")).toBeNull();
+    expect(skinSize("data:image/png;base64,!!!")).toBeNull();
+    expect(
+      skinSize(`data:image/png;base64,${btoa("not a png at all, just text of some length")}`),
+    ).toBeNull();
   });
 });

@@ -9,6 +9,7 @@ import type {
 } from "@/lib/profiles/api";
 import { BackendError } from "@/lib/ipc";
 import { LauncherHome } from "./LauncherHome";
+import { readyAccountsClient } from "@/lib/accounts/testAccounts";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
 
@@ -115,6 +116,7 @@ function makeApi(initial: ProfilesSnapshot) {
     create,
     prepare,
     cancelPrepare,
+    remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),
     onPrepareProgress,
   };
 }
@@ -157,7 +159,9 @@ describe("LauncherHome", () => {
     expect(BASE_PHRASES.map((p) => phraseText(p))).toContain(
       screen.getByRole("heading", { level: 1 }).textContent,
     );
-    expect(screen.getByRole("button", { name: "Set up" })).toBeTruthy(); // the profile is not prepared yet
+    // No account yet: the primary action asks to sign in instead of offering a download that would be refused.
+    expect(screen.getByRole("button", { name: "Sign in to continue" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add an account" })).toBeTruthy();
   });
@@ -178,15 +182,18 @@ describe("LauncherHome", () => {
       selected: "modded",
       totalPlaytimeSeconds: 0,
     });
-    render(<LauncherHome api={api} />);
+    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
     await flush();
-    expect(screen.getByRole("button", { name: /Profile: Modded · Fabric 1\.20\.1/ })).toBeTruthy();
+    const trigger = screen.getByRole("button", { name: "Profile: Modded. Change profile" });
+    // The collapsed dock button shows only the profile's name: no version, loader or "Vanilla".
+    expect(trigger.textContent).toBe("Modded");
+    expect(trigger.textContent).not.toMatch(/Fabric|1\.20\.1|Vanilla|·/);
   });
 
   it("shows no fake profiles when there is no backend or no profile", async () => {
     const api = makeApi(empty);
     api.list.mockRejectedValueOnce(new Error("no backend"));
-    render(<LauncherHome api={api} />);
+    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
     await flush();
     expect(screen.getByRole("button", { name: /Create a profile/ })).toBeTruthy();
     expect(screen.queryByText(/Vanilla 1\./)).toBeNull();
@@ -209,7 +216,7 @@ describe("total playtime under the subtitle", () => {
   });
 
   it("is hidden gracefully for a brand-new launcher", async () => {
-    render(<LauncherHome api={makeApi(empty)} />);
+    render(<LauncherHome api={makeApi(empty)} accountsClient={readyAccountsClient()} />);
     await flush();
     expect(screen.queryByText(/Played/)).toBeNull();
   });
@@ -217,7 +224,7 @@ describe("total playtime under the subtitle", () => {
 
 describe("Create profile", () => {
   async function openDialog(api: ReturnType<typeof makeApi>, snapshot?: ProfilesSnapshot) {
-    render(<LauncherHome api={api} />);
+    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
     await flush();
     void snapshot;
     fireEvent.click(screen.getByRole("button", { name: /Create a profile/ }));
@@ -246,7 +253,7 @@ describe("Create profile", () => {
 
   it("validates the name and refuses duplicates", async () => {
     const api = makeApi({ profiles: [profile()], selected: "survival", totalPlaytimeSeconds: 0 });
-    render(<LauncherHome api={api} />);
+    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
     await flush();
     fireEvent.click(screen.getByRole("button", { name: /Profile: Survival/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Create profile/ }));
@@ -284,7 +291,7 @@ describe("Create profile", () => {
     expect(api.loaderOptions).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(
-      await screen.findByRole("button", { name: /Profile: Survival · Vanilla 26\.3/ }),
+      await screen.findByRole("button", { name: "Profile: Survival. Change profile" }),
     ).toBeTruthy();
   });
 
@@ -332,7 +339,7 @@ describe("Create profile", () => {
       },
     });
     expect(
-      await screen.findByRole("button", { name: /Profile: Modded · Forge 26\.3/ }),
+      await screen.findByRole("button", { name: "Profile: Modded. Change profile" }),
     ).toBeTruthy();
   });
 

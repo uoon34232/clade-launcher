@@ -8,20 +8,33 @@
 //! capabilities say so.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
 use crate::auth::AuthState;
 use crate::coded_error::CodedError;
 use crate::ms_auth::AuthError;
+use crate::net::HttpFetcher;
+use crate::skin::SkinCache;
+
+/// Sent when avatars were fetched in the background: the interface lists the accounts again.
+pub const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
+/// Overall time one background round of skin downloads may take, however many accounts there are.
+const BACKGROUND_SKIN_BUDGET: Duration = Duration::from_secs(10);
 
 /// Serialises read-modify-write of `accounts.json`.
 pub struct AccountsState {
     path: PathBuf,
     gate: Mutex<()>,
+    /// The avatar cache and the client that fills it; absent in tests that do not need skins.
+    skins: Option<(SkinCache, Result<HttpFetcher, String>)>,
+    /// A background round of skin downloads is running.
+    syncing: AtomicBool,
 }
 
 impl AccountsState {
@@ -29,7 +42,82 @@ impl AccountsState {
         Self {
             path,
             gate: Mutex::new(()),
+            skins: None,
+            syncing: AtomicBool::new(false),
         }
+    }
+
+    /// Enables account avatars: skins are cached in `cache` and fetched with `http` (the global
+    /// allow-list; the texture host is a Mojang host).
+    pub fn with_skins(mut self, cache: SkinCache, http: Result<HttpFetcher, String>) -> Self {
+        self.skins = Some((cache, http));
+        self
+    }
+
+    /// Notes the skin an account's profile just reported (`None`: the default skin). Local only.
+    pub fn record_skin(&self, uuid: &str, reported: Option<&str>) {
+        if let Some((cache, _)) = &self.skins {
+            cache.record(uuid, reported);
+        }
+    }
+
+    fn known_uuids(&self) -> Vec<String> {
+        let _g = self.lock();
+        AccountsFile::load(&self.path)
+            .map(|f| f.accounts.into_iter().map(|a| a.minecraft_uuid).collect())
+            .unwrap_or_default()
+    }
+
+    /// Downloads the skins that are noted but not cached yet, all together and within one overall
+    /// `budget` (never a wait per account). Returns whether anything was waiting. Cosmetic: it
+    /// cannot fail.
+    pub async fn sync_pending_skins(&self, budget: Duration) -> bool {
+        let Some((cache, Ok(http))) = &self.skins else {
+            return false;
+        };
+        cache.sync_all(http, &self.known_uuids(), budget).await
+    }
+
+    /// Whether some account has a skin waiting to be downloaded (local files only).
+    fn skins_pending(&self) -> bool {
+        match &self.skins {
+            Some((cache, Ok(_))) => self.known_uuids().iter().any(|u| cache.pending(u)),
+            _ => false,
+        }
+    }
+
+    /// Starts fetching the waiting skins in the background, at most one such round at a time, and
+    /// tells the interface (`accounts-changed`) when it is done so it can list again. The account
+    /// list itself never waits for the network: avatars are decorative.
+    pub fn sync_skins_in_background(&self, app: &AppHandle) {
+        if !self.skins_pending() || self.syncing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AccountsState>();
+            let ran = state.sync_pending_skins(BACKGROUND_SKIN_BUDGET).await;
+            state.syncing.store(false, Ordering::Release);
+            if ran {
+                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+            }
+        });
+    }
+
+    /// Fills in each account's avatar from the cache (no network).
+    pub fn attach(&self, mut list: AccountsDto) -> AccountsDto {
+        if let Some((cache, _)) = &self.skins {
+            for a in &mut list.accounts {
+                a.skin = cache.data_uri(&a.uuid);
+            }
+        }
+        list
+    }
+
+    /// The accounts as the frontend sees them, avatars included.
+    pub fn list(&self) -> Result<AccountsDto, AccountError> {
+        let _g = self.lock();
+        Ok(self.attach(list(&self.path)?))
     }
 
     fn lock(&self) -> MutexGuard<'_, ()> {
@@ -82,9 +170,10 @@ pub struct AccountDto {
     pub username: String,
     pub uuid: String,
     pub needs_sign_in: bool,
-    /// A data URI of the player's head, rendered and cached by the backend once skins are
-    /// fetched. `None` until then (the UI draws a neutral placeholder).
-    pub head: Option<String>,
+    /// The account's current skin texture as an inline PNG (`data:image/png;base64,...`), cached by
+    /// the backend from the account's own profile. The UI cuts the head and the hat layer out of
+    /// it. `None` when there is none (the UI draws a neutral placeholder).
+    pub skin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -101,7 +190,7 @@ fn dto(a: &AccountMeta) -> AccountDto {
         username: a.username.clone(),
         uuid: a.minecraft_uuid.clone(),
         needs_sign_in: matches!(a.status, AccountStatus::NeedsReauth { .. }),
-        head: None,
+        skin: None,
     }
 }
 
@@ -168,9 +257,13 @@ pub fn remove(path: &Path, id: &str) -> Result<AccountsDto, AccountError> {
 }
 
 #[tauri::command]
-pub fn list_accounts(state: State<'_, AccountsState>) -> Result<AccountsDto, CodedError> {
-    let _g = state.lock();
-    list(&state.path).map_err(|e| e.coded())
+pub fn list_accounts(
+    app: AppHandle,
+    state: State<'_, AccountsState>,
+) -> Result<AccountsDto, CodedError> {
+    // Answers at once from local files; waiting avatars are fetched in the background.
+    state.sync_skins_in_background(&app);
+    state.list().map_err(|e| e.coded())
 }
 
 #[tauri::command]
@@ -179,7 +272,9 @@ pub fn select_account(
     id: String,
 ) -> Result<AccountsDto, CodedError> {
     let _g = state.lock();
-    select(&state.path, &id).map_err(|e| e.coded())
+    select(&state.path, &id)
+        .map(|d| state.attach(d))
+        .map_err(|e| e.coded())
 }
 
 #[tauri::command]
@@ -188,7 +283,9 @@ pub fn remove_account(
     auth: State<'_, AuthState>,
     id: String,
 ) -> Result<AccountsDto, CodedError> {
-    remove_and_forget(&state, &id, |id| auth.forget(id)).map_err(|e| e.coded())
+    remove_and_forget(&state, &id, |id| auth.forget(id))
+        .map(|d| state.attach(d))
+        .map_err(|e| e.coded())
 }
 
 /// Removes the account's metadata, then its vault secrets, and never holds the accounts gate while
@@ -201,7 +298,17 @@ pub fn remove_and_forget(
 ) -> Result<AccountsDto, AccountError> {
     let dto = {
         let _g = state.lock();
-        remove(&state.path, id)?
+        let uuid = load(&state.path).ok().and_then(|f| {
+            f.accounts
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.minecraft_uuid.clone())
+        });
+        let dto = remove(&state.path, id)?;
+        if let (Some(uuid), Some((cache, _))) = (uuid, &state.skins) {
+            cache.forget(&uuid); // the avatar of a removed account goes with it
+        }
+        dto
     };
     forget(id); // sign out: its secrets leave the vault too (when it is unlocked)
     Ok(dto)
@@ -215,7 +322,10 @@ mod tests {
         AccountMeta {
             id: id.into(),
             username: name.into(),
-            minecraft_uuid: "00000000-0000-4000-8000-00000000a001".into(),
+            minecraft_uuid: format!(
+                "00000000-0000-4000-8000-00000000{}",
+                if id == "a" { "a001" } else { "b002" }
+            ),
             added_at: 1,
             last_used_at: None,
             status: AccountStatus::Ready,
@@ -279,6 +389,69 @@ mod tests {
         let mut called = false;
         assert!(remove_and_forget(&state, "nope", |_| called = true).is_err());
         assert!(!called);
+    }
+
+    #[test]
+    fn each_account_gets_its_own_avatar_and_removing_one_clears_only_its_cache() {
+        use crate::net::HttpFetcher;
+        let d = tempfile::tempdir().unwrap();
+        let (_d2, p) = seeded();
+        let cache = SkinCache::new(d.path().join("cache").join("skins"));
+        let no_net: Result<HttpFetcher, String> = Err("tests do not use the network".into());
+        let state = AccountsState::new(p).with_skins(cache.clone(), no_net);
+        let uuids: Vec<String> = state
+            .list()
+            .unwrap()
+            .accounts
+            .iter()
+            .map(|a| a.uuid.clone())
+            .collect();
+        assert!(state
+            .list()
+            .unwrap()
+            .accounts
+            .iter()
+            .all(|a| a.skin.is_none()));
+
+        // Seed the cache the way a finished sync leaves it: a different texture per account.
+        for (i, uuid) in uuids.iter().enumerate() {
+            let id = format!("{:0>64}", i + 1);
+            state.record_skin(
+                uuid,
+                Some(&format!("https://textures.minecraft.net/texture/{id}")),
+            );
+            let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+            png.extend_from_slice(b"IHDR");
+            png.extend_from_slice(&64u32.to_be_bytes());
+            png.extend_from_slice(&64u32.to_be_bytes());
+            png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0, i as u8]);
+            let stem = crate::ms_auth::dashed_uuid(uuid).unwrap();
+            let dir = d.path().join("cache").join("skins");
+            std::fs::write(dir.join(format!("{stem}.png")), &png).unwrap();
+            std::fs::write(dir.join(format!("{stem}.have")), &id).unwrap();
+        }
+        let skins: Vec<Option<String>> = state
+            .list()
+            .unwrap()
+            .accounts
+            .into_iter()
+            .map(|a| a.skin)
+            .collect();
+        assert!(skins.iter().all(|s| s
+            .as_deref()
+            .is_some_and(|s| s.starts_with("data:image/png;base64,"))));
+        assert_ne!(skins[0], skins[1], "every account shows its own skin");
+        // Selecting another account never mixes avatars up.
+        let dto = state.attach(select(state.path(), "b").unwrap());
+        assert_eq!(dto.accounts[0].skin, skins[0]);
+        assert_eq!(dto.accounts[1].skin, skins[1]);
+
+        remove_and_forget(&state, "a", |_| ()).unwrap();
+        assert!(cache.data_uri(&uuids[0]).is_none());
+        assert!(
+            cache.data_uri(&uuids[1]).is_some(),
+            "the other account keeps its avatar"
+        );
     }
 
     #[test]

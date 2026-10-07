@@ -54,6 +54,7 @@ export const en = {
   "play.launching": "Launching…",
   "play.playing": "Playing",
   "play.repairing": "Repairing…",
+  "play.signIn": "Sign in to continue",
 
   // ---- dock: settings button
   "dock.settings": "Settings",
@@ -71,6 +72,12 @@ export const en = {
   "profile.trigger": "Profile: {label}. Change profile",
   "profile.create": "+ Create profile",
   "profile.verify": "Verify files",
+  "profile.remove": "Remove from Clade…",
+  "removeProfile.title": "Remove “{profile}” from Clade?",
+  "removeProfile.body":
+    "The profile will disappear from Clade, but its worlds, mods, settings, screenshots and other files will be kept inside the Clade folder. Nothing will be permanently deleted.",
+  "removeProfile.confirm": "Remove from Clade",
+  "removeProfile.working": "Removing…",
   "profile.vanilla": "Vanilla",
   "profile.modded": "Modded",
 
@@ -326,6 +333,8 @@ export const en = {
     "Files couldn't be saved. Check that the drive has space and isn't read-only.",
   "error.prepare.disk_space":
     "There isn't enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
+  "error.prepare.account_required":
+    "Sign in with a Minecraft account to download or verify game files. Your profiles stay as they are.",
   "error.prepare.busy": "Another profile is being set up. Wait for it to finish.",
   "error.prepare.already_running":
     "This profile is starting or running. Close the game before setting it up or verifying it.",
@@ -380,6 +389,11 @@ export const en = {
     "{loader} {version} is not a compatible version for Minecraft {minecraft}.",
   "error.profile.invalid_name": "That name can't be used.",
   "error.profile.storage": "Could not save the profile.",
+  "error.profile.remove_failed":
+    "The profile could not be moved. Close anything that uses its folder (Explorer, an editor) and try again. Nothing was changed.",
+  "error.profile.remove_refused": "This profile can't be removed from here. Nothing was changed.",
+  "error.profile.already_running": "This profile is starting or running. Close the game first.",
+  "error.profile.busy": "This profile is being set up. Wait for it to finish.",
 
   "error.catalog.unknown": "Could not load the version list.",
 } satisfies Record<string, Message>;

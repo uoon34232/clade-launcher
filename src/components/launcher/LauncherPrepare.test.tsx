@@ -10,6 +10,7 @@ import type {
   ProfilesSnapshot,
 } from "@/lib/profiles/api";
 import { LauncherHome } from "./LauncherHome";
+import { readyAccountsClient } from "@/lib/accounts/testAccounts";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
 
@@ -61,6 +62,7 @@ function makeApi(initial: ProfilesSnapshot) {
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("no"))),
     prepare,
     cancelPrepare,
+    remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),
     onPrepareProgress,
     emit: (p: Partial<PrepareProgress>) =>
       act(() =>
@@ -116,7 +118,7 @@ afterEach(() => cleanup());
 
 async function open(initial: ProfilesSnapshot, label: string) {
   const api = makeApi(initial);
-  render(<LauncherHome api={api} />);
+  render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
   await flush();
   fireEvent.click(screen.getByRole("button", { name: label }));
   const dialog = await screen.findByRole("dialog");
@@ -161,7 +163,7 @@ describe("setting a profile up", () => {
     const api = makeApi(snap(pending));
     render(
       <StrictMode>
-        <LauncherHome api={api} />
+        <LauncherHome api={api} accountsClient={readyAccountsClient()} />
       </StrictMode>,
     );
     await flush();
@@ -210,7 +212,7 @@ describe("setting a profile up", () => {
 
   it("with no profile at all, the primary action starts creating one", async () => {
     const api = makeApi({ profiles: [], selected: null, totalPlaytimeSeconds: 0 });
-    render(<LauncherHome api={api} />);
+    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
     await flush();
     fireEvent.click(screen.getByRole("button", { name: "Play" }));
     const dialog = await screen.findByRole("dialog");

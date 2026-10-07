@@ -22,6 +22,10 @@ interface Props {
   onVerify: () => void;
   /** The selected profile's game is starting or running: its files must not be touched now. */
   verifyDisabled?: boolean;
+  /** Starts removing the SELECTED profile from Clade (after a confirmation); its files are kept. */
+  onRemove: () => void;
+  /** Its game is starting or running: it cannot be moved now. (An account is not needed to remove it.) */
+  removeDisabled?: boolean;
 }
 
 const TRIGGER =
@@ -39,6 +43,8 @@ export function ProfileSelector({
   onCreate,
   onVerify,
   verifyDisabled = false,
+  onRemove,
+  removeDisabled = false,
 }: Props) {
   const t = useT();
   const current = profiles.find((p) => p.id === selectedId) ?? profiles[0];
@@ -129,6 +135,17 @@ export function ProfileSelector({
           }}
         >
           {t("profile.verify")}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5 shrink-0" />
+        <DropdownMenuItem
+          disabled={removeDisabled}
+          className="text-clay-soft focus:bg-clay/20 focus:text-clay-soft min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          onClick={() => {
+            playSound("click");
+            window.setTimeout(onRemove, 0);
+          }}
+        >
+          {t("profile.remove")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

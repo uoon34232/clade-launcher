@@ -14,8 +14,11 @@ export interface Account {
   username: string;
   uuid: string;
   needsSignIn: boolean;
-  /** Data URI of the player's head once the backend has one; otherwise a placeholder is drawn. */
-  head: string | null;
+  /**
+   * The account's current Minecraft skin texture as an inline PNG, cached by the backend from the
+   * account's own profile. The avatar is cut out of it (see PlayerHead); null draws a placeholder.
+   */
+  skin: string | null;
 }
 
 export interface Capabilities {
@@ -36,6 +39,33 @@ export const NO_ACCOUNTS: AccountsSnapshot = {
   capabilities: { signIn: false, skin: false, cape: false },
 };
 
+/**
+ * The pixel size of an inline skin PNG, read from its header: 64 times a whole factor wide, as
+ * tall as wide or (the old format) half as tall. Null when it is not such an image. The head and
+ * hat layers are cut out of it with `width / 64` as the scale.
+ */
+export function skinSize(dataUri: string): { width: number; height: number } | null {
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/]{32,}={0,2})$/.exec(dataUri);
+  if (!m) return null;
+  let bytes: string;
+  try {
+    bytes = atob(m[1].slice(0, 32)); // the first 24 bytes: signature, IHDR length and type, width, height
+  } catch {
+    return null;
+  }
+  if (!bytes.startsWith("\x89PNG\r\n\x1a\n") || bytes.slice(12, 16) !== "IHDR") return null;
+  const u32 = (at: number) =>
+    ((bytes.charCodeAt(at) << 24) |
+      (bytes.charCodeAt(at + 1) << 16) |
+      (bytes.charCodeAt(at + 2) << 8) |
+      bytes.charCodeAt(at + 3)) >>>
+    0;
+  const w = u32(16);
+  const h = u32(20);
+  const ok = w >= 64 && w <= 1024 && w % 64 === 0 && (h === w || h * 2 === w);
+  return ok ? { width: w, height: h } : null;
+}
+
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
 
@@ -47,14 +77,14 @@ export function parseAccounts(raw: unknown): AccountsSnapshot {
     const id = str(a.id);
     const username = str(a.username);
     if (!id || !username) continue;
-    const head = str(a.head);
+    const skin = str(a.skin);
     accounts.push({
       id,
       username,
       uuid: str(a.uuid) ?? "",
       needsSignIn: a.needsSignIn === true,
-      // Only an inline PNG is ever drawn; nothing is ever loaded from a URL.
-      head: head && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(head) ? head : null,
+      // Only an inline PNG of a plausible skin size is ever drawn; nothing is loaded from a URL.
+      skin: skin && skinSize(skin) !== null ? skin : null,
     });
   }
   const c = isObj(o.capabilities) ? o.capabilities : {};
@@ -115,4 +145,13 @@ export const accountsApi = {
   },
 };
 
-export type AccountsApi = typeof accountsApi;
+/** The backend finished fetching avatars in the background: list the accounts again. */
+async function onChanged(callback: () => void): Promise<() => void> {
+  if (!inTauri()) return () => undefined;
+  return listen<unknown>("accounts-changed", () => callback());
+}
+
+export const accountsEvents = { onChanged };
+
+// `onChanged` is optional for the launcher (tests and previews may not provide it).
+export type AccountsApi = typeof accountsApi & Partial<typeof accountsEvents>;

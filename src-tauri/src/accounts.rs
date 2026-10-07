@@ -130,6 +130,17 @@ impl AccountsFile {
         true
     }
 
+    /// The account a launch would use, only if it can play right now: the effective active
+    /// account, and only while it is `Ready` (not signed out, not waiting for a new sign-in).
+    /// Preparing, verifying and launching all require this; there is no fallback to another account.
+    pub fn ready_active(&self) -> Option<&AccountMeta> {
+        let id = self.effective_active()?;
+        self.accounts
+            .iter()
+            .find(|a| a.id == id)
+            .filter(|a| matches!(a.status, AccountStatus::Ready))
+    }
+
     /// The active account id, repaired: a dangling or missing value falls back to the first account.
     pub fn effective_active(&self) -> Option<&str> {
         self.active
@@ -174,6 +185,30 @@ mod tests {
             last_used_at: None,
             status: AccountStatus::Ready,
         }
+    }
+
+    #[test]
+    fn only_a_ready_active_account_can_play_and_no_other_account_stands_in() {
+        let mut f = AccountsFile::default();
+        assert!(f.ready_active().is_none(), "no account");
+        f.accounts.push(meta("a"));
+        f.accounts.push(meta("b"));
+        f.active = Some("a".into());
+        assert_eq!(f.ready_active().map(|a| a.id.as_str()), Some("a"));
+        // The active one must sign in again: the ready one next to it is NOT used instead.
+        f.mark_needs_reauth("a", ReauthReason::Revoked, 5);
+        assert!(f.ready_active().is_none());
+        // Switching the active account is what makes the other one count.
+        assert!(f.select("b"));
+        assert_eq!(f.ready_active().map(|a| a.id.as_str()), Some("b"));
+        // A dangling active id falls back exactly like the launch does (first account).
+        f.active = Some("gone".into());
+        assert!(
+            f.ready_active().is_none(),
+            "the first account is `a`, which must sign in"
+        );
+        f.mark_ready("a");
+        assert_eq!(f.ready_active().map(|a| a.id.as_str()), Some("a"));
     }
 
     #[test]

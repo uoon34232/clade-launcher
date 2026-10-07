@@ -35,10 +35,7 @@ test.describe("language", () => {
     await expect(page.getByText(textRu("hero.subtitle"))).toBeVisible();
     await expect(playButton(page)).toHaveText(textRu("play.play"));
     await expect(profileTrigger(page)).toHaveAccessibleName(
-      textRu("profile.trigger").replace(
-        "{label}",
-        `Survival · ${textRu("profile.vanilla")} 1.21.4`,
-      ),
+      textRu("profile.trigger").replace("{label}", "Survival"),
     );
 
     // Create profile reads in Russian too

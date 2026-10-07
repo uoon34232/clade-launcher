@@ -533,7 +533,9 @@ html[data-glass="on"] {
     inset 0 1px 0 rgb(255 255 255 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.5),
     0 0 0 2px rgb(43 38 34 / 0.06);
   --glass-modal-shadow: 0 34px 80px -32px rgb(43 38 34 / 0.5);
-  --glass-menu-bg: rgb(43 38 34 / 0.81);
+  /* dock popovers (account and profile menus) are mostly graphite: they sit over the large headline, so
+     only a faint hint of the window material may show through, or the text behind muddies the list */
+  --glass-menu-bg: rgb(43 38 34 / 0.98);
   --glass-menu-edge:
     inset 0 1px 0 rgb(255 255 255 / 0.12), 0 0 0 1px rgb(255 255 255 / 0.07);
   --glass-menu-shadow: 0 22px 54px -20px rgb(43 38 34 / 0.55);
@@ -546,7 +548,7 @@ html[data-glass="on"][data-glass-live="false"] {
   --page-base: rgb(243 237 227 / 0.94);
   --glass-dock-bg: rgb(43 38 34 / 0.93);
   --glass-modal-bg: rgb(246 240 230 / 0.96);
-  --glass-menu-bg: rgb(43 38 34 / 0.97);
+  --glass-menu-bg: rgb(43 38 34 / 0.99);
 }
 html[data-glass="on"],
 html[data-glass="on"] body {

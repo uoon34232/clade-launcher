@@ -39,11 +39,20 @@ const entries = [
 ];
 
 describe("labels", () => {
-  it("shows name, type and version concisely", () => {
-    expect(profileLabel(p())).toBe("Survival · Vanilla 1.21.4");
+  it("the dock label is only the profile's own name, never the version or loader", () => {
+    expect(profileLabel(p())).toBe("Survival");
     expect(
       profileLabel(p({ name: "Modded", kind: "modded", loader: "fabric", minecraft: "1.20.1" })),
-    ).toBe("Modded · Fabric 1.20.1");
+    ).toBe("Modded");
+    // Technical words appear only when they are literally part of the name.
+    expect(profileLabel(p({ name: "Vanilla" }))).toBe("Vanilla");
+    expect(
+      profileLabel(p({ name: "My Forge", kind: "modded", loader: "forge", minecraft: "1.21.4" })),
+    ).toBe("My Forge");
+    // The technical details stay available for the profile menu.
+    expect(profileDetail(p({ kind: "modded", loader: "fabric", loaderVersion: "0.16.9" }))).toBe(
+      "Fabric 1.21.4 · 0.16.9",
+    );
     expect(buildLabel(p({ kind: "modded", loader: "neoforge", minecraft: "26.1" }))).toBe(
       "NeoForge 26.1",
     );
