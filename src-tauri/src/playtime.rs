@@ -20,13 +20,13 @@
 //!   [`MAX_TICK_GAP`] (PC slept or hibernated with the game open, launcher process frozen)
 //!   counts only one heartbeat interval instead of the whole gap.
 //! - If the launcher or PC dies mid-session, the journal still holds the time up to the last
-//!   heartbeat. [`PlaytimeStore::recover`] runs at startup and banks it, so at most about one
-//!   heartbeat interval is lost.
+//!   persisted heartbeat. [`PlaytimeStore::recover`] runs at startup and banks that much.
 //! - Banking a finished session is idempotent: each total remembers recently applied session
 //!   ids, so a crash between the two file updates cannot double count on recovery.
 //!
-//! Known limit: if the launcher is closed while the game keeps running, time after that point
-//! is not counted (the launcher is what observes the process).
+//! Known limit: if the launcher stops while the game keeps running, time after that point is not
+//! counted (the launcher is what observes the process). The loss is therefore not bounded by the
+//! heartbeat interval: it can be the whole session if the launcher stopped before its first tick.
 
 use std::fs;
 use std::io;

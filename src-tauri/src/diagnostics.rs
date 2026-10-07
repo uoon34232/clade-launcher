@@ -4,7 +4,9 @@
 //! arbitrary file is ever read on request, and the vault, account files, tokens, saves, mods and
 //! Minecraft files are never candidates. Text that does come from a log is redacted before it is
 //! written: the Clade folder and the Windows user folder are replaced by placeholders, e-mail
-//! addresses and anything that looks like a token or a password are removed.
+//! addresses and anything that looks like a token or a password are removed, and the Minecraft
+//! profile names and UUIDs of the accounts Clade knows about (read from the metadata-only
+//! `accounts.json`, never the vault) are replaced by placeholders. Local game logs are not touched.
 //!
 //! The ZIP is written inside the Clade folder (`logs/diagnostics/`), so it stays portable.
 
@@ -16,6 +18,7 @@ use serde::Serialize;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+use crate::accounts::AccountsFile;
 use crate::coded_error::CodedError;
 use crate::instances::{InstanceStore, Profile, SetupState};
 use crate::portable::fsutil::atomic_write;
@@ -389,6 +392,63 @@ pub fn redact(root: &Path, text: &str) -> String {
         .join("\n")
 }
 
+/// The Minecraft identities Clade knows about, taken from `accounts.json` (metadata only: no token
+/// is stored there). A missing or unreadable file simply means nothing extra is redacted.
+fn known_identities(root: &PortableRoot) -> Vec<String> {
+    let Ok(file) = AccountsFile::load(&root.accounts_file()) else {
+        return Vec::new();
+    };
+    file.accounts
+        .iter()
+        .flat_map(|a| [a.username.clone(), a.minecraft_uuid.clone()])
+        .filter(|v| !v.trim().is_empty())
+        .collect()
+}
+
+/// Replaces each known profile name and UUID (dashed or not) with a placeholder. Only the exact
+/// known values are touched, a name only as a whole word, so ordinary words are never redacted.
+pub fn redact_identities(text: &str, known: &[String]) -> String {
+    let mut out = text.to_owned();
+    for value in known {
+        let looks_like_uuid =
+            value.len() >= 32 && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        if looks_like_uuid {
+            let plain = value.replace('-', "");
+            for v in [value.as_str(), plain.as_str()] {
+                out = replace_ignore_case(&out, v, "<mc-uuid>");
+            }
+        } else {
+            out = replace_word_ignore_case(&out, value, "<mc-name>");
+        }
+    }
+    out
+}
+
+fn replace_word_ignore_case(text: &str, needle: &str, with: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let (lt, ln) = (text.to_lowercase(), needle.to_lowercase());
+    // Lower-casing can change byte lengths for some scripts; fall back to the unchanged text then.
+    if lt.len() != text.len() || ln.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(pos) = lt[i..].find(&ln) {
+        let (a, b) = (i + pos, i + pos + ln.len());
+        let before_ok = !text[..a].chars().next_back().is_some_and(word);
+        let after_ok = !text[b..].chars().next().is_some_and(word);
+        out.push_str(&text[i..a]);
+        out.push_str(if before_ok && after_ok {
+            with
+        } else {
+            &text[a..b]
+        });
+        i = b;
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
 fn replace_ignore_case(text: &str, needle: &str, with: &str) -> String {
     let (lt, ln) = (text.to_ascii_lowercase(), needle.to_ascii_lowercase());
     let mut out = String::with_capacity(text.len());
@@ -558,12 +618,19 @@ pub fn collect(
             ),
         ),
     ];
+    let known = known_identities(root);
     if let Some(t) = tail(&root.logs_dir().join("clade.log")) {
-        files.push(("logs/clade.log", redact(root.path(), &t)));
+        files.push((
+            "logs/clade.log",
+            redact_identities(&redact(root.path(), &t), &known),
+        ));
     }
     if let Some(p) = minecraft_latest_log(root, settings) {
         if let Some(t) = tail(&p) {
-            files.push(("logs/minecraft-latest.log", redact(root.path(), &t)));
+            files.push((
+                "logs/minecraft-latest.log",
+                redact_identities(&redact(root.path(), &t), &known),
+            ));
         }
     }
     files
