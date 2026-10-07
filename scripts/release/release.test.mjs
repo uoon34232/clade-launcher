@@ -461,9 +461,16 @@ describe("building the package", () => {
       "English letters",
       "reasonably",
       "SmartScreen",
+      "Windows 11, 64-bit (x64)",
+      "Smart App Control",
+      "not code-signed",
+      "issues/new/choose",
       "github.com/uoon34232/clade-launcher",
     ])
       expect(text, needle).toContain(needle);
+    // honest about the platform and the missing signature, and never advises weakening Windows security
+    expect(text).toContain("Please do not disable or bypass Smart App Control");
+    expect(text).not.toMatch(/Windows 10 (is|are) supported|run as administrator|disable (Smart App Control|Defender)/i);
     expect(scanText("README.txt", text)).toEqual([]);
   });
 

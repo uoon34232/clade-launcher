@@ -3,9 +3,20 @@ Clade Launcher {{VERSION}} (portable)
 
 Clade is a portable launcher for Minecraft: Java Edition on Windows.
 
+Requirements
+ - Windows 11, 64-bit (x64). This Preview targets nothing else; Windows 10 is not supported by this Preview.
+ - Nothing needs to be installed and no administrator rights are needed.
+
 To start
  1. Extract the whole ZIP to a normal folder. Do not run Clade.exe from inside the ZIP.
- 2. Run Clade.exe. Nothing needs to be installed and no administrator rights are needed.
+ 2. Run Clade.exe.
+
+Preview build, not code-signed
+ - This is an early Preview and it is not code-signed.
+ - Windows SmartScreen may warn about Clade.exe.
+ - Windows 11 Smart App Control, when it runs in enforcement mode, may block Clade.exe completely and
+   may offer no "Run anyway" option. Please do not disable or bypass Smart App Control, Defender or any
+   other Windows security feature to run Clade.
 
 Your data
  - Everything Clade stores (accounts, profiles, game files, Java runtimes, settings, logs) is kept in
@@ -20,9 +31,13 @@ Tips
    short path that uses only English letters, digits and plain punctuation (for example D:\Clade-Launcher).
  - Microsoft may ask you to sign in again, on any computer.
 
-Preview build
- - This is an early Preview and it is not code-signed, so Windows SmartScreen or your antivirus
-   software may warn about Clade.exe.
+Reporting a bug
+ - https://github.com/uoon34232/clade-launcher/issues/new/choose
+ - Say which Clade and Windows version you use, what happened and how to reproduce it. Settings >
+   "Export diagnostics" saves a redacted ZIP under logs\diagnostics next to Clade.exe; look through
+   it before you attach it.
+ - Never post passwords, Microsoft sign-in codes, tokens, callback addresses or vault files.
+ - Security problems: see SECURITY.md in the project repository, not a public issue.
 
 Licences
  - LICENSE (Apache License 2.0), THIRD-PARTY-NOTICES.txt and the licenses folder.

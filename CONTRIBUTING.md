@@ -61,7 +61,7 @@ Changes should preserve these constraints:
 
 ## Issues
 
-When reporting a bug, include:
+Report bugs through [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose); the bug form lists what to include. When reporting a bug, include:
 
 - what you were trying to do;
 - exact steps to reproduce it;

@@ -10,6 +10,8 @@ Until the first preview is published, security fixes apply to the current develo
 
 ## Reporting a vulnerability
 
+Ordinary bugs belong in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose). Use the steps below only for a security-sensitive problem.
+
 Please do **not** publish secrets, access tokens, refresh tokens, vault contents, personal account data, or exploit details in a public issue.
 
 If GitHub private vulnerability reporting is enabled for this repository, use the repository's **Security** tab to report the issue privately.
