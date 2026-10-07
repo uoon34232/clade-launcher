@@ -483,3 +483,83 @@ fn key_and_secret_style_names_are_recognised_by_shape() {
         assert_eq!(redact(d.path(), line), line, "over-redacted: {line:?}");
     }
 }
+
+#[test]
+fn known_minecraft_names_and_uuids_are_redacted_from_exported_logs_only() {
+    use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let uuid = "00000000-0000-4000-8000-0000000000aa";
+    let mut accounts = AccountsFile::default();
+    accounts.accounts.push(AccountMeta {
+        id: "acc1".into(),
+        username: "FixtureAlex".into(),
+        minecraft_uuid: uuid.into(),
+        added_at: 0,
+        last_used_at: None,
+        status: AccountStatus::Ready,
+    });
+    accounts.save(&r.accounts_file()).unwrap();
+
+    let line = format!(
+        "[main] Setting user: FixtureAlex\n[main] profile {uuid} / {} owner fixturealex!\n\
+         [main] FixtureAlexander and Alex_Fixture and Steve are other words\n",
+        uuid.replace('-', "")
+    );
+    fs::write(r.logs_dir().join("clade.log"), &line).unwrap();
+    let game_logs = r.instances_dir().join("p").join("game").join("logs");
+    fs::create_dir_all(&game_logs).unwrap();
+    fs::write(game_logs.join("latest.log"), &line).unwrap();
+    let settings = LauncherSettings {
+        last_instance: Some(crate::instances::InstanceId::new("p").unwrap()),
+        ..LauncherSettings::default()
+    };
+    let (_, path) = export(&r, &settings, &facts(1_700_000_000)).unwrap();
+    let files = read_zip(&path);
+    let all: String = files
+        .iter()
+        .map(|(_, t)| t.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for known in [
+        "FixtureAlex\n",
+        uuid,
+        &uuid.replace('-', ""),
+        "fixturealex!",
+    ] {
+        assert!(!all.contains(known), "{known} leaked into the export");
+    }
+    assert!(!all.to_lowercase().contains("setting user: fixturealex\n"));
+    // Context stays useful, placeholders mark the removals, and other words are untouched.
+    let mc = &files
+        .iter()
+        .find(|(n, _)| n == "logs/minecraft-latest.log")
+        .unwrap()
+        .1;
+    assert!(mc.contains("Setting user: <mc-name>"));
+    assert!(mc.contains("profile <mc-uuid> / <mc-uuid> owner <mc-name>!"));
+    assert!(mc.contains("FixtureAlexander and Alex_Fixture and Steve are other words"));
+    // The local game log itself is not rewritten.
+    assert_eq!(
+        fs::read_to_string(game_logs.join("latest.log")).unwrap(),
+        line
+    );
+}
+
+#[test]
+fn identity_redaction_needs_known_values_and_handles_odd_input() {
+    assert_eq!(redact_identities("user Steve here", &[]), "user Steve here");
+    assert_eq!(
+        redact_identities("user Steve here", &["Steve".to_owned()]),
+        "user <mc-name> here"
+    );
+    assert_eq!(
+        redact_identities("Steve's world, Steve2, xSteve", &["Steve".to_owned()]),
+        "<mc-name>'s world, Steve2, xSteve"
+    );
+    assert_eq!(redact_identities("a", &[String::new()]), "a");
+    // A missing accounts.json redacts nothing and does not fail the export.
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    assert!(known_identities(&r).is_empty());
+}
