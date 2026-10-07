@@ -30,6 +30,7 @@ pub mod profiles;
 pub mod runtimes;
 pub mod safe_archive;
 pub mod settings;
+pub mod skin;
 pub mod startup;
 pub mod startup_text;
 pub mod support_cmd;
@@ -170,7 +171,13 @@ pub fn run() {
         .map_err(|e| e.to_string()),
         loaders: net::HttpFetcher::new(loaders::official_policy()).map_err(|e| e.to_string()),
     };
-    let accounts_state = accounts_api::AccountsState::new(root.accounts_file());
+    let accounts_state = accounts_api::AccountsState::new(root.accounts_file()).with_skins(
+        skin::SkinCache::new(root.cache_dir().join("skins")),
+        net::HttpFetcher::new(download_policy::DownloadPolicy::new(
+            download_policy::DEFAULT_ALLOWED_HOSTS,
+        ))
+        .map_err(|e| e.to_string()),
+    );
     let auth_state = auth::AuthState::new(
         root.vault_file(),
         net::HttpFetcher::for_auth(download_policy::DownloadPolicy::new(

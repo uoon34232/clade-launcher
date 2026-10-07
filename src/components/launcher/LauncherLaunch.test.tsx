@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi } from "@/lib/accounts/api";
+import { READY_ACCOUNTS } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import { LaunchRefused, type LaunchApi, type LaunchEvent, type LaunchExit } from "@/lib/launch/api";
@@ -63,12 +64,12 @@ function makeProfiles(initial: ProfilesSnapshot) {
   };
 }
 
-function makeAccounts() {
-  const none = {
-    accounts: [],
-    active: null,
-    capabilities: { signIn: true, skin: false, cape: false },
-  };
+function makeAccounts(signedIn = true) {
+  // By default the active account can play, so the dock offers Play / Set up; a refusal then comes
+  // from the (mocked) backend. `signedIn = false` is an empty list: the dock asks to sign in.
+  const none = signedIn
+    ? READY_ACCOUNTS
+    : { accounts: [], active: null, capabilities: { signIn: true, skin: false, cape: false } };
   return {
     list: vi.fn<AccountsApi["list"]>(() => Promise.resolve(none)),
     select: vi.fn<AccountsApi["select"]>(() => Promise.resolve(none)),

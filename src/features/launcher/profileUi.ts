@@ -22,9 +22,12 @@ export function buildLabel(p: Pick<ProfileSummary, "kind" | "loader" | "minecraf
   return `${what} ${p.minecraft}`;
 }
 
-/** The dock label: "Survival · Vanilla 1.21.4". */
-export function profileLabel(p: ProfileSummary): string {
-  return `${p.name} · ${buildLabel(p)}`;
+/**
+ * The dock button's text: only the name the person gave the profile ("Survival"). Minecraft
+ * version, loader and the like belong to the profile menu (see `profileDetail`), never here.
+ */
+export function profileLabel(p: Pick<ProfileSummary, "name">): string {
+  return p.name;
 }
 
 /** Second line in the profile menu: the build, plus the loader version when known. */

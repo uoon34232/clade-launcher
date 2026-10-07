@@ -14,6 +14,8 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::accounts::AccountsFile;
+use crate::accounts_api::AccountsState;
 use crate::download::{Cancel, Progress};
 use crate::instances::InstanceId;
 use crate::loader_install::SystemEnv;
@@ -181,16 +183,30 @@ fn client(r: &Result<HttpFetcher, String>) -> Result<&HttpFetcher, PrepareError>
         .map_err(|_| PrepareError::Unsupported("networking is unavailable".into()))
 }
 
+/// Preparing, repairing and verifying a profile download or re-check game files, so they need an
+/// account that can play: the active one, `Ready`. Checked here, in the backend, before anything
+/// is claimed or fetched; the dock button is only a convenience on top of this.
+pub(crate) fn require_ready_account(accounts: &AccountsState) -> Result<(), PrepareError> {
+    let file = AccountsFile::load(accounts.path())
+        .map_err(|e| PrepareError::Storage(format!("the account list could not be read: {e}")))?;
+    file.ready_active()
+        .map(|_| ())
+        .ok_or(PrepareError::AccountRequired)
+}
+
 #[tauri::command]
 pub async fn prepare_profile(
     app: AppHandle,
     state: State<'_, PrepareState>,
     settings: State<'_, SettingsState>,
+    accounts: State<'_, AccountsState>,
     id: String,
     verify: Option<bool>,
 ) -> Result<ProfilesDto, PrepareFailure> {
     let instance =
         InstanceId::new(&id).map_err(|_| PrepareFailure::from(&PrepareError::NotFound))?;
+    // Not a failed preparation: nothing is claimed, nothing is fetched, no failure is remembered.
+    require_ready_account(&accounts).map_err(|e| PrepareFailure::from(&e))?;
     let cancel = Cancel::new();
     if let Err(refused) = state.begin(&instance, &cancel) {
         return Err((&refused).into());
@@ -293,6 +309,60 @@ mod tests {
     fn state(root: PortableRoot) -> PrepareState {
         let no = || Err("tests do not use the network".to_owned());
         PrepareState::new(root, no(), no(), no(), no())
+    }
+
+    #[test]
+    fn preparing_or_verifying_needs_a_ready_active_account_in_the_backend() {
+        use crate::accounts::{AccountMeta, AccountStatus, ReauthReason};
+        let d = tempfile::tempdir().unwrap();
+        let accounts = AccountsState::new(d.path().join("accounts.json"));
+        let meta = |id: &str| AccountMeta {
+            id: id.into(),
+            username: format!("Fixture{id}"),
+            minecraft_uuid: "00000000-0000-4000-8000-00000000a001".into(),
+            added_at: 1,
+            last_used_at: None,
+            status: AccountStatus::Ready,
+        };
+        let code = |a: &AccountsState| {
+            require_ready_account(a)
+                .err()
+                .map(|e| PrepareFailure::from(&e).code)
+        };
+
+        // No account at all (and no accounts.json): rejected with the stable code.
+        assert_eq!(code(&accounts), Some("account_required"));
+        accounts
+            .update(|f| {
+                f.accounts.push(meta("a"));
+                f.accounts.push(meta("b"));
+                f.active = Some("a".into());
+            })
+            .unwrap();
+        assert_eq!(code(&accounts), None, "a ready active account may prepare");
+        // The active account needs to sign in again; the other one being ready changes nothing.
+        accounts
+            .update(|f| f.mark_needs_reauth("a", ReauthReason::Revoked, 5))
+            .unwrap();
+        assert_eq!(code(&accounts), Some("account_required"));
+        // The failure is a structured code with no parameters, and the accounts stay untouched.
+        let f = PrepareFailure::from(&PrepareError::AccountRequired);
+        assert_eq!((f.code, f.params.is_none()), ("account_required", true));
+        assert_eq!(accounts.update(|f| f.accounts.len()).unwrap(), 2);
+        // An unreadable list is a storage problem, not "sign in".
+        std::fs::write(accounts.path(), b"{ not json").unwrap();
+        assert_eq!(code(&accounts), Some("storage"));
+    }
+
+    #[test]
+    fn the_command_checks_the_account_before_it_claims_or_fetches_anything() {
+        // `prepare_profile` must refuse before `begin` (which claims the profile) and before any
+        // download client is touched; keep the order from regressing.
+        let src = include_str!("prepare_cmd.rs");
+        let body = &src[src.find("pub async fn prepare_profile").unwrap()..];
+        let gate = body.find("require_ready_account(&accounts)").unwrap();
+        assert!(gate < body.find("state.begin(").unwrap());
+        assert!(gate < body.find("run(").unwrap());
     }
 
     #[test]

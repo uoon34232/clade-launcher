@@ -240,10 +240,16 @@ function install(cfg: BackendConfig): void {
       }
 
       // ---- preparing a profile: held open until the test finishes or fails it
-      case "prepare_profile":
+      case "prepare_profile": {
+        // The real backend refuses before anything is claimed or fetched: only a ready ACTIVE
+        // account (the effective one, with no stand-in) may prepare or verify.
+        const active = state.accounts.find((a) => a.id === state.active) ?? state.accounts[0];
+        if (!active || active.needsSignIn)
+          return fail("account_required", "Sign in with a Minecraft account first.");
         return new Promise((resolve, reject) => {
           pendingPrepare = { id: args.id as string, resolve, reject };
         });
+      }
       case "cancel_prepare":
         if (pendingPrepare) {
           pendingPrepare.reject({ code: "cancelled", message: "Preparation was cancelled." });

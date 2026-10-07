@@ -40,7 +40,7 @@ test.describe("home", () => {
       text("account.trigger", { name: ALEX.username }),
     );
     await expect(profileTrigger(page)).toHaveAccessibleName(
-      text("profile.trigger", { label: "Survival · Vanilla 1.21.4" }),
+      text("profile.trigger", { label: "Survival" }),
     );
     await expect(playButton(page)).toHaveText(text("play.play"));
     await expect(playButton(page)).toBeEnabled();

@@ -46,14 +46,14 @@ const ACCOUNTS: AccountsSnapshot = {
       username: "Alex",
       uuid: "00000000-0000-4000-8000-00000000a001",
       needsSignIn: false,
-      head: null,
+      skin: null,
     },
     {
       id: "b",
       username: "Blake",
       uuid: "00000000-0000-4000-8000-00000000b002",
       needsSignIn: true,
-      head: null,
+      skin: null,
     },
   ],
   active: "a",
@@ -162,9 +162,7 @@ describe("the home screen in Russian", () => {
     const d = within(dock());
     expect(d.getByRole("button", { name: "Играть" })).toBeTruthy();
     expect(d.getByRole("button", { name: "Аккаунт: Alex. Сменить аккаунт" })).toBeTruthy();
-    expect(
-      d.getByRole("button", { name: "Профиль: Survival · Ванильный 1.21.4. Сменить профиль" }),
-    ).toBeTruthy();
+    expect(d.getByRole("button", { name: "Профиль: Survival. Сменить профиль" })).toBeTruthy();
     expect(d.getByRole("button", { name: "Настройки" })).toBeTruthy();
     expect(BASE_PHRASES.map(phraseText)).toContain(
       screen.getByRole("heading", { level: 1 }).textContent,

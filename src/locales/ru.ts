@@ -52,6 +52,7 @@ export const ru: Record<MessageKey, Message> = {
   "play.launching": "Запуск…",
   "play.playing": "В игре",
   "play.repairing": "Восстановление…",
+  "play.signIn": "Войти для продолжения",
 
   // ---- dock: settings button
   "dock.settings": "Настройки",
@@ -329,6 +330,8 @@ export const ru: Record<MessageKey, Message> = {
     "Не удалось сохранить файлы. Проверь, есть ли место на диске и можно ли на него писать.",
   "error.prepare.disk_space":
     "На диске, где находится Clade, не хватает места: нужно около {required}, доступно {available}. Освободи место и повтори.",
+  "error.prepare.account_required":
+    "Войди в аккаунт Minecraft, чтобы скачивать или проверять файлы игры. Профили останутся как есть.",
   "error.prepare.busy": "Сейчас готовится другой профиль. Дождись завершения.",
   "error.prepare.already_running":
     "Этот профиль запускается или запущен. Закрой игру, прежде чем готовить или проверять его.",

@@ -79,6 +79,8 @@ pub enum PrepareError {
     Storage(String),
     #[error("There isn't enough free space on the drive that holds Clade: about {} is needed and {} is available. Free some space and try again.", crate::system::human(*.needed), crate::system::human(*.available))]
     DiskSpace { needed: u64, available: u64 },
+    #[error("Sign in with a Minecraft account before downloading or verifying game files.")]
+    AccountRequired,
     #[error("That profile no longer exists.")]
     NotFound,
     #[error("Another profile is being set up. Wait for it to finish.")]
@@ -102,6 +104,7 @@ impl PrepareError {
             Self::Loader(_) => "loader",
             Self::Storage(_) => "storage",
             Self::DiskSpace { .. } => "disk_space",
+            Self::AccountRequired => "account_required",
             Self::NotFound => "not_found",
             Self::Busy => "busy",
             Self::GameRunning => "already_running",

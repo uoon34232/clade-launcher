@@ -54,6 +54,7 @@ export const en = {
   "play.launching": "Launching…",
   "play.playing": "Playing",
   "play.repairing": "Repairing…",
+  "play.signIn": "Sign in to continue",
 
   // ---- dock: settings button
   "dock.settings": "Settings",
@@ -326,6 +327,8 @@ export const en = {
     "Files couldn't be saved. Check that the drive has space and isn't read-only.",
   "error.prepare.disk_space":
     "There isn't enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
+  "error.prepare.account_required":
+    "Sign in with a Minecraft account to download or verify game files. Your profiles stay as they are.",
   "error.prepare.busy": "Another profile is being set up. Wait for it to finish.",
   "error.prepare.already_running":
     "This profile is starting or running. Close the game before setting it up or verifying it.",

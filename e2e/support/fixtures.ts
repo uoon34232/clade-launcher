@@ -18,7 +18,7 @@ export interface FixtureAccount {
   username: string;
   uuid: string;
   needsSignIn: boolean;
-  head: string | null;
+  skin: string | null;
 }
 
 export interface FixtureUiSettings {
@@ -83,14 +83,14 @@ export const ALEX: FixtureAccount = {
   username: "FixtureAlex",
   uuid: ZERO_UUID(1),
   needsSignIn: false,
-  head: null,
+  skin: null,
 };
 export const BLAKE: FixtureAccount = {
   id: "acc-blake",
   username: "FixtureBlake",
   uuid: ZERO_UUID(2),
   needsSignIn: false,
-  head: null,
+  skin: null,
 };
 
 export const SURVIVAL: FixtureProfile = {

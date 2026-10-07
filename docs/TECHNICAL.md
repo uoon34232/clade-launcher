@@ -113,7 +113,7 @@ Clade-Launcher/
 ├─ libraries/   shared libraries
 ├─ assets/      shared game assets
 ├─ runtimes/    java/ and webview2/
-├─ cache/       scratch and catalog caches
+├─ cache/       scratch, catalog and skin (avatar) caches
 └─ logs/
 ```
 
@@ -246,7 +246,11 @@ Limit: a stolen copy of the folder allows unlimited offline guessing. Argon2id s
 
 An account is **never** bound to a profile. Profiles define the version, the loader and the files; accounts define the Microsoft/Minecraft identity. Neither a profile manifest, any profile file nor playtime references an account, and selecting or removing an account changes none of them (tests assert this byte for byte). Only the selected account is persisted, as a convenience, in `accounts.json`.
 
-The same Minecraft UUID never creates a second entry. The newest sign-in becomes the selected account. Removing an account also removes its vault secrets.
+The same Minecraft UUID never creates a second entry. The newest sign-in becomes the selected account. Removing an account also removes its vault secrets and its cached avatar.
+
+**Avatar.** The head shown for an account comes from its own current skin. The profile Minecraft services return at sign-in and at every credential refresh lists the ACTIVE skin; its public address is checked (exactly `https://textures.minecraft.net/texture/<hex id>`, the one Mojang texture host, no query or credentials) and the PNG is downloaded through the normal allow-listed client and stored in `cache/skins/` (`<uuid>.want` holds only the validated texture id; `<uuid>.png` and `<uuid>.have` the texture and the id it came from: public ids only, no address, no token). No third-party skin service and no web page is used. The backend sends the texture to the interface as an inline PNG; the interface cuts the 8x8 face and the 8x8 outer hat layer out of it (scaled for high-resolution skins) and shows them nearest-neighbour, never smoothed. A changed skin replaces the cache atomically; a download that fails keeps the previous file and is retried. The account list never waits for the network: `list_accounts` answers from local files at once and, when a skin is waiting, fetches all waiting skins together in the background (one round at a time, one overall time limit however many accounts there are) and then sends `accounts-changed`, on which the window lists again. Sign-in and a credential refresh wait for it at most about three seconds. The profile (and so a new skin) is read only when credentials are obtained: at sign-in, when a launch has to renew them, or on an explicit refresh; the avatar then updates at the end of that launch or at the next start, whichever comes first, without signing in again. A missing, offline, malformed or unsupported texture never affects sign-in or the account menu: the neutral face is drawn instead.
+
+**Account required for game files.** Anything that downloads or re-checks game files, namely setting a profile up (Minecraft, libraries, assets, managed Java and loader files), repairing it and Verify files, and launching, needs the ACTIVE account to be `Ready` (not missing, signed out or waiting for a new sign-in; another ready account is never used instead). The backend enforces it: `prepare_profile` answers `account_required` before it claims the profile or touches the network (launching keeps its own `no_account` and `needs_sign_in` reasons). Looking up versions and loaders for the Create profile dialog is only metadata and stays available, as do onboarding, Settings and creating, selecting, editing and deleting profiles. In the dock, the primary button reads "Sign in to continue" instead of Set up or Play while the active account cannot play and opens the normal sign-in (the same account for "sign in again"); Verify files is unavailable then. It updates as soon as a sign-in succeeds.
 
 ## 13. Launching the game
 
