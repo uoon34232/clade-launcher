@@ -3,10 +3,10 @@ import type { Account, AccountsApi, AccountsSnapshot } from "@/lib/accounts/api"
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
 import { playSound } from "@/lib/sound/soundService";
+import { AccountAppearance } from "./AccountAppearance";
 import { Modal, ModalFooter, ModalHeader, ModalSection } from "./Modal";
 import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_QUIET, BUTTON_SOFT } from "./modalStyles";
 import { PlayerHead } from "./PlayerHead";
-import { Segmented } from "./Segmented";
 
 interface Props {
   /** The account being managed; `null` keeps the dialog closed. */
@@ -18,13 +18,11 @@ interface Props {
   api: AccountsApi;
 }
 
-const SKIN_MODELS = ["classic", "slim"] as const;
-
 /**
  * Everything about one Minecraft Java account, and nothing else: profile, skin, cape, removal.
  * Skin and cape changes are made on the account itself through Mojang's authenticated profile
- * service (see `profile_service.rs`), so they show up in the game and the official launcher too.
- * Until sign-in exists those controls are visible but off.
+ * service (see `profile_service.rs` and `AccountAppearance`), so they show up in the game and the
+ * official launcher too.
  */
 export function AccountDialog({
   account,
@@ -42,7 +40,12 @@ export function AccountDialog({
   // Lives here, not in the body, so the modal can ignore Escape and the backdrop while the removal
   // is being confirmed: only Keep or Remove answer it. A closed dialog or another account starts over.
   const [confirming, setConfirming] = useState(false);
-  if (confirming && (account === null || account.id !== shown?.id)) setConfirming(false);
+  // The same for the "restore the default skin?" question inside the appearance section.
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  if ((confirming || confirmingReset) && (account === null || account.id !== shown?.id)) {
+    setConfirming(false);
+    setConfirmingReset(false);
+  }
 
   return (
     <Modal
@@ -50,7 +53,7 @@ export function AccountDialog({
       onOpenChange={(o) => !o && onClose()}
       size="md"
       initialFocus={doneRef}
-      locked={confirming}
+      locked={confirming || confirmingReset}
     >
       {current && (
         <Body
@@ -58,6 +61,8 @@ export function AccountDialog({
           account={current}
           confirming={confirming}
           setConfirming={setConfirming}
+          confirmingReset={confirmingReset}
+          setConfirmingReset={setConfirmingReset}
           capabilities={capabilities}
           onClose={onClose}
           onRemoved={onRemoved}
@@ -74,6 +79,8 @@ function Body({
   account,
   confirming,
   setConfirming,
+  confirmingReset,
+  setConfirmingReset,
   capabilities,
   onClose,
   onSignInAgain,
@@ -84,12 +91,13 @@ function Body({
   account: Account;
   confirming: boolean;
   setConfirming: (confirming: boolean) => void;
+  confirmingReset: boolean;
+  setConfirmingReset: (confirming: boolean) => void;
   doneRef: RefObject<HTMLButtonElement | null>;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const canSkin = capabilities.skin;
 
   const remove = () => {
     setBusy(true);
@@ -139,35 +147,14 @@ function Body({
         </div>
       </ModalSection>
 
-      <ModalSection title={t("accountModal.skin")}>
-        <div className="flex flex-wrap items-center gap-3">
-          <Segmented
-            value="classic"
-            onChange={() => undefined}
-            label={t("accountModal.skinModel")}
-            options={SKIN_MODELS.map((m) => ({
-              value: m,
-              label: t(m === "classic" ? "accountModal.skinClassic" : "accountModal.skinSlim"),
-              disabled: !canSkin,
-            }))}
-          />
-          <button type="button" disabled={!canSkin} className={BUTTON_SOFT}>
-            {t("accountModal.choosePng")}
-          </button>
-          <button type="button" disabled={!canSkin} className={BUTTON_QUIET}>
-            {t("accountModal.restoreDefault")}
-          </button>
-        </div>
-        {!canSkin && (
-          <p className="text-ink-muted text-[0.8125rem]">{t("accountModal.skinUnavailable")}</p>
-        )}
-      </ModalSection>
-
-      <ModalSection title={t("accountModal.cape")}>
-        <p className="text-ink-muted text-[0.875rem]">
-          {capabilities.cape ? t("accountModal.capeAvailable") : t("accountModal.capeUnavailable")}
-        </p>
-      </ModalSection>
+      <AccountAppearance
+        account={account}
+        skin={capabilities.skin}
+        cape={capabilities.cape}
+        api={api}
+        confirmingReset={confirmingReset}
+        setConfirmingReset={setConfirmingReset}
+      />
 
       <ModalFooter>
         {confirming ? (
@@ -192,6 +179,7 @@ function Body({
           <>
             <button
               type="button"
+              disabled={confirmingReset}
               className={`${BUTTON_DANGER} mr-auto`}
               onClick={() => setConfirming(true)}
             >

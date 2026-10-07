@@ -23,6 +23,7 @@ interface Control {
     selected: string | null;
     accounts: BackendConfig["accounts"];
     active: string | null;
+    appearance: BackendConfig["appearance"];
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
   };
@@ -31,6 +32,8 @@ interface Control {
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
   refuseNextLaunch: (code: string, accountId?: string | null) => void;
   failNext: (cmd: string, code: string, params?: Record<string, unknown>) => void;
+  holdNext: (cmd: string) => void;
+  releaseHeld: () => boolean;
   hasPendingPrepare: () => boolean;
 }
 
@@ -50,6 +53,7 @@ function install(cfg: BackendConfig): void {
     selected: cfg.selected,
     accounts: clone(cfg.accounts),
     active: cfg.active,
+    appearance: clone(cfg.appearance),
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
   };
@@ -78,6 +82,23 @@ function install(cfg: BackendConfig): void {
   let launchRefusal: { code: string; accountId: string | null } | null = null;
   // One-shot failures a test asks for, by command (support actions, settings saves, ...).
   const failures = new Map<string, { code: string; params: Record<string, unknown> }>();
+  // Commands a test wants to stay open until it releases them, to see the busy state.
+  const holds = new Set<string>();
+  let held: (() => void) | null = null;
+  // A real (solid-colour) 64x64 PNG, so the browser can decode it like a skin.
+  const NEW_SKIN =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAZklEQVR42u3QQREAAAQAMFHFEFAvcjh7rMCiK+ezECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAu4HLPSxsmj7bLHgAAAAAElFTkSuQmCC";
+  const lookOf = (id: unknown) => {
+    const key = String(id);
+    state.appearance[key] ??= { skinModel: null, capes: [] };
+    return state.appearance[key];
+  };
+  // The wire format of the real commands (src-tauri/src/appearance_cmd.rs): `skinVariant`, not the fixture's name.
+  const wire = (l: { skinModel: string | null; capes: unknown[] }) => ({
+    skinVariant: l.skinModel,
+    capes: clone(l.capes),
+  });
+  const knownAccount = (id: unknown) => state.accounts.some((a) => a.id === id);
 
   const profilesSnapshot = () => ({
     profiles: clone(state.profiles),
@@ -87,8 +108,8 @@ function install(cfg: BackendConfig): void {
   const accountsSnapshot = () => ({
     accounts: clone(state.accounts),
     active: state.active,
-    // What this build can do: sign-in exists, skin and cape changes do not yet.
-    capabilities: { signIn: true, skin: false, cape: false },
+    // What this build can do.
+    capabilities: { signIn: true, skin: true, cape: true },
   });
   const fail = (code: string, message: string, extra: Record<string, unknown> = {}) =>
     Promise.reject({ code, message, ...extra });
@@ -103,6 +124,13 @@ function install(cfg: BackendConfig): void {
     if (planned) {
       failures.delete(cmd);
       return fail(planned.code, `${cmd} was made to fail by the test`, { params: planned.params });
+    }
+    if (holds.delete(cmd)) {
+      return new Promise((resolve, reject) => {
+        held = () => {
+          void Promise.resolve(handle(cmd, args)).then(resolve, reject);
+        };
+      });
     }
     const announce = () => emit("ui-settings-changed", clone(state.ui));
     // The same decision the real backend makes (src-tauri/src/glass.rs): High Contrast is always opaque,
@@ -294,6 +322,42 @@ function install(cfg: BackendConfig): void {
         state.accounts = state.accounts.filter((a) => a.id !== args.id);
         if (state.active === args.id) state.active = state.accounts[0]?.id ?? null;
         return accountsSnapshot();
+      case "account_appearance":
+        if (!knownAccount(args.id)) return fail("unknown_account", "No such account.");
+        return wire(lookOf(args.id));
+      case "set_account_skin": {
+        if (!knownAccount(args.id)) return fail("unknown_account", "No such account.");
+        const png = args.png as number[];
+        const isPng = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every(
+          (b, i) => png[i] === b,
+        );
+        const width = ((png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19]) >>> 0;
+        const height = ((png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23]) >>> 0;
+        if (!isPng || width !== 64 || ![32, 64].includes(height) || png.length > 256 * 1024)
+          return fail("invalid_skin", "Not a skin.");
+        lookOf(args.id).skinModel = args.variant as "classic" | "slim";
+        const account = state.accounts.find((a) => a.id === args.id);
+        if (account) account.skin = NEW_SKIN;
+        emit("accounts-changed", null);
+        return wire(lookOf(args.id));
+      }
+      case "reset_account_skin": {
+        if (!knownAccount(args.id)) return fail("unknown_account", "No such account.");
+        lookOf(args.id).skinModel = null;
+        const account = state.accounts.find((a) => a.id === args.id);
+        if (account) account.skin = null;
+        emit("accounts-changed", null);
+        return wire(lookOf(args.id));
+      }
+      case "set_account_cape": {
+        if (!knownAccount(args.id)) return fail("unknown_account", "No such account.");
+        const look = lookOf(args.id);
+        if (args.capeId !== null && !look.capes.some((c) => c.id === args.capeId))
+          return fail("cape_not_owned", "Not owned.");
+        for (const c of look.capes) c.active = c.id === args.capeId;
+        emit("accounts-changed", null);
+        return wire(look);
+      }
       case "vault_status":
         return { exists: false, unlocked: false };
       case "create_vault":
@@ -371,6 +435,15 @@ function install(cfg: BackendConfig): void {
     failNext: (cmd, code, params = {}) => {
       failures.set(cmd, { code, params });
     },
+    holdNext: (cmd) => {
+      holds.add(cmd);
+    },
+    releaseHeld: () => {
+      if (!held) return false;
+      held();
+      held = null;
+      return true;
+    },
   };
 }
 
@@ -435,6 +508,19 @@ export class Backend {
       ([c, p]) => (window as unknown as { __e2e: Control }).__e2e.failPrepare(c, p),
       [code, params] as const,
     );
+  }
+
+  /** Keeps the next call of a command open until `release()`, so a test can see the busy state. */
+  async holdNext(cmd: string): Promise<void> {
+    await this.page.evaluate(
+      (c) => (window as unknown as { __e2e: Control }).__e2e.holdNext(c),
+      cmd,
+    );
+  }
+
+  /** Lets a held command run and answer. */
+  async release(): Promise<void> {
+    await this.page.evaluate(() => (window as unknown as { __e2e: Control }).__e2e.releaseHeld());
   }
 
   /** Makes the next call of a command fail once with a coded error, as the Rust side would. */

@@ -58,7 +58,7 @@ Clade speaks English and Russian. Change the language in Settings and the whole 
 
 Clade is in active pre-release development.
 
-Implemented today: creating profiles, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, launching the game, removing a profile from Clade without deleting its files, and the English and Russian interface.
+Implemented today: creating profiles, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game, removing a profile from Clade without deleting its files, and the English and Russian interface.
 
 Sign-in and launching have been verified with a real Minecraft account on a development PC, for Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and the clean-machine validation of a release package is still to do. There is no stable release.
 

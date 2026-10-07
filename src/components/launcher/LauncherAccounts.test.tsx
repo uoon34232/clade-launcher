@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi, AccountsSnapshot, SignInStage, VaultStatus } from "@/lib/accounts/api";
+import { appearanceStubs } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { ProfilesApi } from "@/lib/profiles/api";
@@ -27,7 +28,7 @@ vi.mock("@/lib/sound/soundService", () => {
 });
 
 // Test fixtures only: production code never invents accounts.
-const CAPS = { signIn: true, skin: false, cape: false };
+const CAPS = { signIn: true, skin: true, cape: true };
 const two: AccountsSnapshot = {
   accounts: [
     {
@@ -99,6 +100,7 @@ function makeAccounts(
     list,
     select,
     remove,
+    ...appearanceStubs(),
     vaultStatus,
     createVault,
     unlockVault,
@@ -375,26 +377,31 @@ describe("account management modal", () => {
     return { ...ctx, dialog };
   }
 
-  it("shows the profile and keeps skin and cape controls off while the official service is unavailable", async () => {
-    const { dialog } = await openManage();
+  it("shows the profile, and says in words that an account signed out cannot change its look", async () => {
+    const { dialog, accounts } = await openManage();
     expect(dialog.textContent).toContain("Blake");
     expect(dialog.textContent).toContain("00000000-0000-4000-8000-00000000b002");
     expect(dialog.textContent).toContain("Needs to sign in again");
+    expect(dialog.textContent).toContain("Sign in again to change your Minecraft appearance.");
     expect(screen.getByRole<HTMLButtonElement>("button", { name: /Choose PNG/ }).disabled).toBe(
       true,
     );
     expect(
       screen.getByRole<HTMLButtonElement>("button", { name: "Restore default" }).disabled,
     ).toBe(true);
-    expect(dialog.textContent).toContain("never uploaded");
+    expect(accounts.appearance).not.toHaveBeenCalled();
+    // the old "not available yet" sentences are gone
+    expect(dialog.textContent).not.toMatch(/isn.t available in Clade yet|never uploaded/);
   });
 
-  it("says skin and cape management is not available in Clade yet, without blaming sign-in", async () => {
-    const { dialog } = await openManage();
-    const skin = screen.getByText("Skin management isn’t available in Clade yet.");
-    const cape = screen.getByText(/^Cape management isn’t available in Clade yet\./);
-    for (const el of [skin, cape]) expect(el.textContent).not.toMatch(/sign[- ]?in|Microsoft/i);
-    expect(dialog.textContent).not.toContain("which isn’t available yet");
+  it("shows no skin or cape section when the build does not offer them", async () => {
+    const ctx = await setup({ ...two, capabilities: { signIn: true, skin: false, cape: false } });
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Manage Blake" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(ctx.accounts.appearance).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /Choose PNG/ })).toBeNull();
+    expect(dialog.textContent).not.toMatch(/Skin|Cape/);
   });
 
   it("removing needs a confirmation, then removes only the account", async () => {
@@ -468,9 +475,8 @@ describe("accounts in Russian", () => {
     expect(dialog.textContent).toContain("Скин");
     expect(dialog.textContent).toContain("Плащ");
     expect(screen.getByRole("radio", { name: "Классическая" })).toBeTruthy();
-    const skin = screen.getByText("Управление скином пока недоступно в Clade.");
-    const cape = screen.getByText(/^Управление плащами пока недоступно в Clade\./);
-    for (const el of [skin, cape]) expect(el.textContent).not.toMatch(/вход|Microsoft/i);
+    expect(screen.getByRole("button", { name: "Выбрать PNG…" })).toBeTruthy();
+    expect(await screen.findByText("У этого аккаунта нет плащей.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Выйти и удалить…" }));
     expect(dialog.textContent).toContain(
       "Удалить Alex? Профили, миры и время игры останутся как есть.",

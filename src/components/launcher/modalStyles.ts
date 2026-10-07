@@ -17,4 +17,7 @@ export const BUTTON_DANGER = `${BUTTON} text-clay-deep hover:bg-clay/10 focus-vi
 const BUTTON_SMALL =
   "dock-item min-h-9 cursor-default rounded-[0.9rem] px-3 py-1.5 text-[0.8125rem] leading-tight font-medium outline-none focus-visible:ring-2 focus-visible:ring-clay/45 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:scale-100";
 export const BUTTON_SMALL_SOFT = `${BUTTON_SMALL} bg-sand-soft text-graphite hover:bg-sand`;
+// A quiet outlined button: clearly something to press, yet calmer than the filled soft one.
+export const BUTTON_SMALL_GHOST = `${BUTTON_SMALL} text-ink-muted ring-1 ring-inset ring-graphite/15 hover:bg-graphite/5 hover:text-graphite hover:ring-graphite/25`;
+export const BUTTON_SMALL_DANGER = `${BUTTON_SMALL} text-clay-deep hover:bg-clay/10`;
 export const BUTTON_SMALL_QUIET = `${BUTTON_SMALL} text-ink-muted hover:text-graphite`;

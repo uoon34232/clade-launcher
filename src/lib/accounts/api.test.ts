@@ -5,7 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (c: string, a?: Record<string, unknown>) => invoke(c, a),
 }));
 
-import { accountsApi, parseAccounts, skinSize } from "./api";
+import { accountsApi, parseAccounts, parseAppearance, skinSize } from "./api";
 import { testSkin } from "./testSkin";
 
 const tauri = (on: boolean) => {
@@ -108,5 +108,51 @@ describe("skinSize", () => {
     expect(
       skinSize(`data:image/png;base64,${btoa("not a png at all, just text of some length")}`),
     ).toBeNull();
+  });
+});
+
+describe("appearance api", () => {
+  const CAPE = "11111111-2222-4333-8444-555555555555";
+
+  it("reads the model and the owned capes, and ignores anything else", () => {
+    expect(
+      parseAppearance({
+        skinVariant: "slim",
+        capes: [
+          { id: CAPE, alias: "Migrator", active: true, url: "https://example.test/cape.png" },
+          { id: "not-an-id", alias: "bad", active: false },
+          { alias: "no id" },
+          "junk",
+          { id: CAPE.toUpperCase(), alias: "", active: "yes" },
+        ],
+        token: "FAKE-TOKEN",
+      }),
+    ).toEqual({
+      skinModel: "slim",
+      capes: [
+        { id: CAPE, alias: "Migrator", active: true },
+        { id: CAPE.toUpperCase(), alias: null, active: false },
+      ],
+    });
+    expect(parseAppearance(null)).toEqual({ skinModel: null, capes: [] });
+    expect(parseAppearance({ skinVariant: "wide" }).skinModel).toBeNull();
+    expect(parseAppearance({ skinVariant: "classic" }).skinModel).toBe("classic");
+  });
+
+  it("sends only an account id, a model, bytes or an owned cape id to the backend", async () => {
+    tauri(true);
+    invoke.mockResolvedValue({ skinVariant: null, capes: [] });
+    await accountsApi.appearance("acc");
+    await accountsApi.setSkin("acc", "slim", new Uint8Array([1, 2, 3]));
+    await accountsApi.resetSkin("acc");
+    await accountsApi.setCape("acc", CAPE);
+    await accountsApi.setCape("acc", null);
+    expect(invoke.mock.calls).toEqual([
+      ["account_appearance", { id: "acc" }],
+      ["set_account_skin", { id: "acc", variant: "slim", png: [1, 2, 3] }],
+      ["reset_account_skin", { id: "acc" }],
+      ["set_account_cape", { id: "acc", capeId: CAPE }],
+      ["set_account_cape", { id: "acc", capeId: null }],
+    ]);
   });
 });

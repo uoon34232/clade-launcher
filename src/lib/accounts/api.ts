@@ -96,6 +96,44 @@ export function parseAccounts(raw: unknown): AccountsSnapshot {
   };
 }
 
+/** The two Java skin models. */
+export type SkinModel = "classic" | "slim";
+
+/** A cape the account owns. The id is only ever handed back to equip it; it is never shown. */
+export interface Cape {
+  id: string;
+  /** The service's name for the cape, when it gives one. */
+  alias: string | null;
+  active: boolean;
+}
+
+/** What the account's Minecraft profile says about its look right now. */
+export interface Appearance {
+  /** The model of the active skin; null when the account has no custom skin or it is not reported. */
+  skinModel: SkinModel | null;
+  capes: Cape[];
+}
+
+/** The largest skin file the launcher sends (the backend enforces the same bound). */
+export const MAX_SKIN_BYTES = 256 * 1024;
+
+const CAPE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseAppearance(raw: unknown): Appearance {
+  const o = isObj(raw) ? raw : {};
+  const capes: Cape[] = [];
+  for (const c of Array.isArray(o.capes) ? o.capes : []) {
+    if (!isObj(c)) continue;
+    const id = str(c.id);
+    if (!id || !CAPE_ID.test(id)) continue;
+    capes.push({ id, alias: str(c.alias), active: c.active === true });
+  }
+  return {
+    skinModel: o.skinVariant === "classic" || o.skinVariant === "slim" ? o.skinVariant : null,
+    capes,
+  };
+}
+
 export interface VaultStatus {
   /** An encrypted account store exists in the launcher folder. */
   exists: boolean;
@@ -112,6 +150,19 @@ export const accountsApi = {
   select: async (id: string) => parseAccounts(await call("select_account", { id })),
   /** Signs out: removes the account and its stored credentials. Never touches a profile. */
   remove: async (id: string) => parseAccounts(await call("remove_account", { id })),
+
+  // Skin and cape changes are made on the Minecraft account itself, by the backend, with
+  // credentials the frontend never sees. Each one names the account; none can name a path or a URL.
+  /** The account's current skin model and the capes it owns. */
+  appearance: async (id: string) => parseAppearance(await call("account_appearance", { id })),
+  /** Uploads PNG bytes as the account's skin with the chosen model. The backend checks the image. */
+  setSkin: async (id: string, model: SkinModel, png: Uint8Array) =>
+    parseAppearance(await call("set_account_skin", { id, variant: model, png: Array.from(png) })),
+  /** Goes back to the account's default skin. */
+  resetSkin: async (id: string) => parseAppearance(await call("reset_account_skin", { id })),
+  /** Equips one of the account's own capes, or hides the cape (null). */
+  setCape: async (id: string, capeId: string | null) =>
+    parseAppearance(await call("set_account_cape", { id, capeId })),
 
   vaultStatus: async (): Promise<VaultStatus> => {
     const raw = await call("vault_status");

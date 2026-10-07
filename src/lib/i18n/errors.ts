@@ -8,7 +8,15 @@ import { hasMessage, tDynamic, type Params } from "./index";
 
 /** Which part of the launcher an error came from; the same code can mean different things. */
 export type ErrorDomain =
-  "launch" | "prepare" | "signIn" | "vault" | "account" | "profile" | "catalog" | "settings";
+  | "launch"
+  | "prepare"
+  | "signIn"
+  | "vault"
+  | "account"
+  | "appearance"
+  | "profile"
+  | "catalog"
+  | "settings";
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
