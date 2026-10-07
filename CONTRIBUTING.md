@@ -23,8 +23,8 @@ pnpm build                              # production build of the frontend
 pnpm test:e2e                           # browser end-to-end tests
 cd src-tauri
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
 The end-to-end tests need Playwright's Chromium. Install it once with `pnpm exec playwright install chromium`. They use a stand-in backend with synthetic data, so they never need a Microsoft account or a network connection ([how they work](docs/TECHNICAL.md#17-automated-guards-and-tests)).

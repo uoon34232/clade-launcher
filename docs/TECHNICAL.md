@@ -2,7 +2,7 @@
 
 This document explains how Clade Launcher is built and which rules its code follows. It is written for contributors and for anyone who wants to check the claims made in the [README](../README.md). For reporting vulnerabilities see [SECURITY.md](../SECURITY.md); for contribution rules see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-> **Pre-release status.** Clade Launcher is currently pre-release. The launch pipeline is implemented, but a real authenticated Minecraft launch has not yet been verified because Minecraft Services AppID approval is pending.
+> **Pre-release status.** Clade Launcher is currently pre-release. Mojang has approved the Microsoft application ID, and sign-in and launching have been verified with a real account on a development PC. The executable is not code-signed, and the clean-machine validation of a release package (including the bundled WebView2 runtime) has not been done yet.
 
 ## Contents
 
@@ -350,16 +350,16 @@ The runtime's redistribution terms, the unsigned executable, the lack of automat
 
 ## 19. Known limitations and current status
 
-- **Authenticated launch is unverified.** Clade's Microsoft application ID is awaiting Minecraft Services approval. Until Mojang approves it, `login_with_xbox` answers with an "invalid app registration" error and Clade shows a clear message and saves nothing. This is by design and is not bypassed. Everything after that step (entitlements, profile, persistence, refresh and the real launch with a real account) has only been exercised against scripted transports and development fixtures.
+- **Authentication is verified on a development PC only.** Mojang has approved the Microsoft application ID. The whole chain (Microsoft sign-in, Xbox Live, XSTS, Minecraft login, entitlements, profile), persistence through the vault after a restart, and launches of modern Vanilla, 1.12.2, Fabric, Forge, NeoForge and Quilt were verified there with a real account and a real GPU. That machine has a system WebView2 and a real `.minecraft`, so it is not a clean-machine certification. The automated tests still use scripted transports and development fixtures only.
 - Microsoft may ask for a new sign-in on any PC (an expired or revoked session, a password change, a new-device check). Portability cannot prevent that.
 - The bundled WebView2 runtime is not updated automatically; security fixes require re-packaging with a newer runtime.
 - A clean-machine test without any WebView2 installed has not been done yet.
-- Windows may warn about an unsigned `Clade.exe` (SmartScreen, Smart App Control), and antivirus software may block it. Code signing is not implemented.
+- `Clade.exe` is not code-signed and signing is not implemented yet (the provider is still to be chosen). Windows Smart App Control blocks an unsigned `Clade.exe` in Windows Sandbox, SmartScreen may warn, and antivirus software may block it. Smart App Control also evaluates the third-party DLLs a game loads, which signing Clade cannot change.
 - The filesystem must be NTFS or exFAT; FAT32 cannot hold files over 4 GB and has no atomic-rename guarantee.
 - The launcher is not fully hermetic: Java may touch the registry for its preferences, and mods can write wherever they choose.
 - A profile whose `instance.json` is damaged is left untouched and does not appear in the profile list; healthy profiles are unaffected. The reason is written to the log and to the diagnostics summary, but the interface has no warning surface for it yet.
 - "Verify files" can only check a Java runtime against a list that Mojang's manifest provides: the list recorded at install time, or the current manifest when it describes the same version. An older runtime whose version Mojang no longer lists is covered only by its `java.exe` hash.
-- Self-update and skin/cape management are not implemented yet.
+- Self-update and changing the skin or managing capes are not implemented yet (the account's current skin is only displayed).
 
 ## 20. Settings, first-run introduction and diagnostics
 

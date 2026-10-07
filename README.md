@@ -58,19 +58,21 @@ Clade speaks English and Russian. Change the language in Settings and the whole 
 
 Clade is in active pre-release development.
 
-Implemented today: creating profiles, preparing Minecraft, Java and loaders, checking and repairing files, the English and Russian interface, and the game launch pipeline.
+Implemented today: creating profiles, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, launching the game, removing a profile from Clade without deleting its files, and the English and Russian interface.
 
-The final end-to-end launch with a real Microsoft account is still waiting for Minecraft Services AppID approval and has not yet been verified. There is no stable release.
+Sign-in and launching have been verified with a real Minecraft account on a development PC, for Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and the clean-machine validation of a release package is still to do. There is no stable release.
 
 ## Download
 
 No public build has been released yet.
 
-The first portable preview will be published in [GitHub Releases](https://github.com/uoon34232/clade-launcher/releases) after sign-in and launching have been verified with a real Minecraft account and Clade has passed clean-machine testing.
+The first portable preview will be published in [GitHub Releases](https://github.com/uoon34232/clade-launcher/releases) once the release package has passed clean-machine testing.
 
 ## Documentation
 
 - [Technical documentation](docs/TECHNICAL.md): how Clade works and how to build it
+- [Releasing](docs/RELEASE.md): how the portable package is built and verified
+- [Windows QA](docs/QA-WINDOWS.md): how a package is validated on a clean machine
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

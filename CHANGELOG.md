@@ -32,14 +32,21 @@ The project is currently pre-release. Versioned entries will begin with the firs
 - Final Clade branding: logo mark, application and Windows icons, README banner, social preview and interface recordings.
 - Apache License 2.0.
 - Public source tree, build instructions and automated guard tests for portability, product rules and the application icon.
+- Real Microsoft, Xbox and Minecraft sign-in, approved by Mojang and verified with a real account; the account avatar is the head (with the hat layer) of the account's current Minecraft skin, cached inside the Clade folder.
+- Preparing, verifying and launching a profile require a ready active account; without one the main button reads "Sign in to continue". Creating and browsing profiles still works.
+- "Remove from Clade" takes a profile out of the list and keeps its whole folder, worlds included, under `instances/.removed/`. Nothing is deleted.
+- The dock's profile button shows only the profile's name, and the profile and account menus are denser.
+- Exported diagnostics redact the known Minecraft profile names and UUIDs.
+- Windows QA tooling: a Windows Sandbox harness (offline, online, online with GPU), an environment report and a before/after portability audit.
+- Launching has been validated on a development PC with a real GPU for modern Vanilla, Vanilla 1.12.2 (Java 8), Fabric, Forge, NeoForge and Quilt, including duplicate-launch protection, hiding and showing the window, surviving a closed launcher, and recovery after a crashed game.
 
 ### In progress
 
-- Minecraft Services AppID approval. Until Mojang approves Clade's Microsoft application ID, sign-in stops at that step, so the final authenticated end-to-end launch with a real account has **not** been verified. The launch pipeline has only been exercised with development fixtures.
-- Final portable release packaging and clean-machine verification.
-- GitHub Actions release automation: the tag-driven draft-release workflow, the packaging tools and the validation exist (see `docs/RELEASE.md`); the approved WebView2 runtime pin and the first real run are still to come.
+- Windows code signing. The executable is not signed; Windows Smart App Control currently blocks an unsigned `Clade.exe` in Windows Sandbox, and SmartScreen may warn. Signing is not implemented and the provider is not chosen yet.
+- Final portable release packaging and clean-machine verification of the release package, including the bundled WebView2 runtime (its redistribution approval is still pending).
+- GitHub Actions release automation: the tag-driven draft-release workflow, the packaging tools and the validation exist (see `docs/RELEASE.md`); the first real run is still to come.
 - Portable self-update design and implementation.
-- Official skin and owned-cape management after real authenticated account verification.
+- Changing the skin and managing owned capes (the account's current skin is only displayed for now).
 
 ## Release policy
 
