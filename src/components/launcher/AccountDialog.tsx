@@ -39,6 +39,10 @@ export function AccountDialog({
   if (account && account !== shown) setShown(account);
   const current = account ?? shown;
   const doneRef = useRef<HTMLButtonElement>(null);
+  // Lives here, not in the body, so the modal can ignore Escape and the backdrop while the removal
+  // is being confirmed: only Keep or Remove answer it. A closed dialog or another account starts over.
+  const [confirming, setConfirming] = useState(false);
+  if (confirming && (account === null || account.id !== shown?.id)) setConfirming(false);
 
   return (
     <Modal
@@ -46,11 +50,14 @@ export function AccountDialog({
       onOpenChange={(o) => !o && onClose()}
       size="md"
       initialFocus={doneRef}
+      locked={confirming}
     >
       {current && (
         <Body
           key={current.id}
           account={current}
+          confirming={confirming}
+          setConfirming={setConfirming}
           capabilities={capabilities}
           onClose={onClose}
           onRemoved={onRemoved}
@@ -65,15 +72,21 @@ export function AccountDialog({
 
 function Body({
   account,
+  confirming,
+  setConfirming,
   capabilities,
   onClose,
   onSignInAgain,
   onRemoved,
   api,
   doneRef,
-}: Omit<Props, "account"> & { account: Account; doneRef: RefObject<HTMLButtonElement | null> }) {
+}: Omit<Props, "account"> & {
+  account: Account;
+  confirming: boolean;
+  setConfirming: (confirming: boolean) => void;
+  doneRef: RefObject<HTMLButtonElement | null>;
+}) {
   const t = useT();
-  const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const canSkin = capabilities.skin;
