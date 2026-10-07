@@ -17,14 +17,19 @@ const look: Appearance = {
 
 /** The dialog holds the "restore the default skin?" question; this stands in for it. */
 function Harness(
-  props: Omit<Parameters<typeof AccountAppearance>[0], "confirmingReset" | "setConfirmingReset">,
+  props: Omit<
+    Parameters<typeof AccountAppearance>[0],
+    "confirmingReset" | "setConfirmingReset" | "setRecovering"
+  >,
 ) {
   const [confirmingReset, setConfirmingReset] = useState(false);
+  const [, setRecovering] = useState(false);
   return (
     <AccountAppearance
       {...props}
       confirmingReset={confirmingReset}
       setConfirmingReset={setConfirmingReset}
+      setRecovering={setRecovering}
     />
   );
 }

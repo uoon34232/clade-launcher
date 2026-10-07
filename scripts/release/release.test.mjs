@@ -463,6 +463,8 @@ describe("building the package", () => {
       "SmartScreen",
       "Windows 11, 64-bit (x64)",
       "Smart App Control",
+      "Start fresh",
+      "retired-vaults",
       "not code-signed",
       "issues/new/choose",
       "github.com/uoon34232/clade-launcher",

@@ -563,3 +563,31 @@ fn identity_redaction_needs_known_values_and_handles_odd_input() {
     let r = root(d.path());
     assert!(known_identities(&r).is_empty());
 }
+
+#[test]
+fn archived_vaults_are_never_candidates_for_the_export() {
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let retired = r
+        .data_dir()
+        .join("retired-vaults")
+        .join("1700000000-0123456789ab");
+    fs::create_dir_all(&retired).unwrap();
+    fs::write(retired.join("vault.bin"), b"RETIRED-VAULT-SECRET-BYTES").unwrap();
+    fs::write(
+        retired.join("vault.bin.bak"),
+        b"RETIRED-BACKUP-SECRET-BYTES",
+    )
+    .unwrap();
+    let (_, path) = export(&r, &LauncherSettings::default(), &facts(1_700_000_000)).unwrap();
+    let entries = read_zip(&path);
+    for (name, content) in &entries {
+        assert!(ENTRIES.contains(&name.as_str()), "{name}");
+        assert!(
+            !name.contains("retired") && !name.contains("vault"),
+            "{name}"
+        );
+        assert!(!content.contains("RETIRED-"), "{name}");
+        assert!(!content.contains("retired-vaults"), "{name}");
+    }
+}

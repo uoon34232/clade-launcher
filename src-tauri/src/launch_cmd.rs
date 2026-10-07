@@ -164,7 +164,7 @@ impl LaunchState {
         }
     }
 
-    fn mark_playing(&self, id: &InstanceId) {
+    pub(crate) fn mark_playing(&self, id: &InstanceId) {
         if let Some(e) = self.lock().get_mut(id.as_str()) {
             e.phase = Phase::Playing;
         }
@@ -179,6 +179,13 @@ impl LaunchState {
     /// true must not end Clade.
     pub fn has_live_game(&self) -> bool {
         self.lock().values().any(|e| e.pid.is_some())
+    }
+
+    /// Is some game still *starting* (its credentials are being fetched or its process is coming up)?
+    /// A game that is already running is not: that is `Phase::Playing`. "Start fresh" waits only for
+    /// the first kind (see `vault_recovery`).
+    pub fn any_starting(&self) -> bool {
+        self.lock().values().any(|e| e.phase == Phase::Launching)
     }
 
     pub fn set_exit_when_idle(&self, on: bool) {

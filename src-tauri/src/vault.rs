@@ -69,6 +69,9 @@ const _: () = assert!(KdfParams::DEFAULT.m_cost_kib >= 19 * 1024 && KdfParams::D
 pub enum VaultError {
     #[error("vault io error: {0}")]
     Io(#[from] io::Error),
+    /// There is no vault file at all (never created, or archived by "Start fresh").
+    #[error("there is no vault file")]
+    Missing,
     #[error("vault file is malformed or from an unsupported version")]
     BadFormat,
     #[error("vault key-derivation parameters are outside the accepted range")]
@@ -268,10 +271,14 @@ impl Vault {
     }
 
     pub fn unlock(path: &Path, passphrase: &str) -> Result<Self, VaultError> {
-        if fs::metadata(path)?.len() > MAX_FILE_LEN {
+        let missing = |e: io::Error| match e.kind() {
+            io::ErrorKind::NotFound => VaultError::Missing,
+            _ => VaultError::Io(e),
+        };
+        if fs::metadata(path).map_err(missing)?.len() > MAX_FILE_LEN {
             return Err(VaultError::BadFormat);
         }
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(path).map_err(missing)?;
         let header = Header::decode(&bytes)?;
         let key = header.kdf.derive(passphrase.as_bytes(), &header.salt)?;
         let plaintext = cipher(&key)?
@@ -322,6 +329,12 @@ impl Vault {
         }
         atomic_write(&self.path, &out)?;
         Ok(())
+    }
+
+    /// Who this vault is: its random salt, new for every vault that is created. A credential write
+    /// that was prepared against one vault must never land in another (see `auth::ensure_fresh`).
+    pub fn generation(&self) -> [u8; SALT_LEN] {
+        self.salt
     }
 
     pub fn account(&self, id: &str) -> Option<&AccountSecrets> {

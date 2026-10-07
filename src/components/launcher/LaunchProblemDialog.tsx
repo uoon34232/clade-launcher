@@ -1,10 +1,11 @@
-import { useState, type SubmitEvent } from "react";
+import { useState, type ReactNode, type SubmitEvent } from "react";
 import type { AccountsApi } from "@/lib/accounts/api";
 import { hasMessage, tDynamic, useT, type MessageKey } from "@/lib/i18n";
 import { describeCode, describeError } from "@/lib/i18n/errors";
 import type { LaunchExit } from "@/lib/launch/api";
 import { playSound } from "@/lib/sound/soundService";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
+import { VaultRecovery } from "./VaultRecovery";
 import { BUTTON_PRIMARY, BUTTON_QUIET, BUTTON_SOFT, FIELD, LABEL } from "./modalStyles";
 
 /** What went wrong, from a launch that was refused or a game that ended badly. */
@@ -19,6 +20,8 @@ interface Props {
   onSignIn: (accountId: string | null) => void;
   onRetry: (profileId: string) => void;
   onOpenLogs: (profileId: string) => void;
+  /** "Start fresh" archived the old vault: every account has to sign in again now. */
+  onVaultReset: () => void;
   accountsClient: AccountsApi;
 }
 
@@ -32,14 +35,17 @@ export function LaunchProblemDialog(p: Props) {
   const [shown, setShown] = useState(p.problem);
   if (p.problem && p.problem !== shown) setShown(p.problem);
   const problem = p.problem ?? shown;
+  // "Start fresh?" is showing: Escape and the backdrop leave it alone.
+  const [asking, setAsking] = useState(false);
   return (
     <Modal
       open={p.problem !== null}
       onOpenChange={(o) => !o && p.onClose()}
       size="sm"
       closeOnBackdrop={false}
+      locked={asking}
     >
-      {problem && <Body key={problemKey(problem)} {...p} problem={problem} />}
+      {problem && <Body key={problemKey(problem)} {...p} problem={problem} onAsking={setAsking} />}
     </Modal>
   );
 }
@@ -68,8 +74,10 @@ function Body({
   onSignIn,
   onRetry,
   onOpenLogs,
+  onVaultReset,
+  onAsking,
   accountsClient,
-}: Props & { problem: Problem }) {
+}: Props & { problem: Problem; onAsking: (asking: boolean) => void }) {
   const t = useT();
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
@@ -141,7 +149,7 @@ function Body({
         },
       );
     };
-    return (
+    const form = (recoveryLink: ReactNode) => (
       <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
         <ModalHeader
           title={t("problem.unlockTitle")}
@@ -167,6 +175,7 @@ function Body({
             {error}
           </p>
         )}
+        {recoveryLink}
         <ModalFooter>
           {quiet(t("common.cancel"), onClose)}
           <button type="submit" disabled={busy || pass.length === 0} className={BUTTON_PRIMARY}>
@@ -174,6 +183,20 @@ function Body({
           </button>
         </ModalFooter>
       </form>
+    );
+    return (
+      <VaultRecovery
+        api={accountsClient}
+        layout="modal"
+        onAsking={onAsking}
+        onDone={() => {
+          setPass("");
+          setError(null);
+          onVaultReset(); // the accounts must sign in again: the dialog says so next
+        }}
+      >
+        {form}
+      </VaultRecovery>
     );
   }
 

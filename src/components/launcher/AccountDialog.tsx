@@ -42,9 +42,15 @@ export function AccountDialog({
   const [confirming, setConfirming] = useState(false);
   // The same for the "restore the default skin?" question inside the appearance section.
   const [confirmingReset, setConfirmingReset] = useState(false);
-  if ((confirming || confirmingReset) && (account === null || account.id !== shown?.id)) {
+  // ...and the "Start fresh?" question of a forgotten passphrase.
+  const [recovering, setRecovering] = useState(false);
+  if (
+    (confirming || confirmingReset || recovering) &&
+    (account === null || account.id !== shown?.id)
+  ) {
     setConfirming(false);
     setConfirmingReset(false);
+    setRecovering(false);
   }
 
   return (
@@ -53,7 +59,7 @@ export function AccountDialog({
       onOpenChange={(o) => !o && onClose()}
       size="md"
       initialFocus={doneRef}
-      locked={confirming || confirmingReset}
+      locked={confirming || confirmingReset || recovering}
     >
       {current && (
         <Body
@@ -63,6 +69,7 @@ export function AccountDialog({
           setConfirming={setConfirming}
           confirmingReset={confirmingReset}
           setConfirmingReset={setConfirmingReset}
+          setRecovering={setRecovering}
           capabilities={capabilities}
           onClose={onClose}
           onRemoved={onRemoved}
@@ -81,6 +88,7 @@ function Body({
   setConfirming,
   confirmingReset,
   setConfirmingReset,
+  setRecovering,
   capabilities,
   onClose,
   onSignInAgain,
@@ -93,6 +101,7 @@ function Body({
   setConfirming: (confirming: boolean) => void;
   confirmingReset: boolean;
   setConfirmingReset: (confirming: boolean) => void;
+  setRecovering: (recovering: boolean) => void;
   doneRef: RefObject<HTMLButtonElement | null>;
 }) {
   const t = useT();
@@ -154,6 +163,7 @@ function Body({
         api={api}
         confirmingReset={confirmingReset}
         setConfirmingReset={setConfirmingReset}
+        setRecovering={setRecovering}
       />
 
       <ModalFooter>

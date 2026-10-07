@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type SubmitEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type SubmitEvent,
+  type RefObject,
+} from "react";
 import type { AccountsApi, AccountsSnapshot, SignInStage } from "@/lib/accounts/api";
 import { useT, type MessageKey } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
@@ -6,6 +13,7 @@ import { BackendError } from "@/lib/ipc";
 import { playSound } from "@/lib/sound/soundService";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
 import { BUTTON_PRIMARY, BUTTON_QUIET, BUTTON_SOFT, FIELD, LABEL } from "./modalStyles";
+import { VaultRecovery } from "./VaultRecovery";
 
 interface Props {
   open: boolean;
@@ -40,6 +48,8 @@ const MIN_PASSPHRASE = 8;
 export function SignInDialog({ open, onOpenChange, account, onSignedIn, api }: Props) {
   // While a sign-in runs, closing the modal (Escape, backdrop) cancels it.
   const cancelRef = useRef<(() => void) | null>(null);
+  // "Start fresh?" is showing: Escape and the backdrop leave it alone.
+  const [asking, setAsking] = useState(false);
 
   return (
     <Modal
@@ -50,11 +60,13 @@ export function SignInDialog({ open, onOpenChange, account, onSignedIn, api }: P
       }}
       size="sm"
       closeOnBackdrop={false}
+      locked={asking}
     >
       <Flow
         account={account}
         api={api}
         cancelRef={cancelRef}
+        onAsking={setAsking}
         onClose={() => onOpenChange(false)}
         onSignedIn={onSignedIn}
       />
@@ -66,10 +78,12 @@ function Flow({
   account,
   api,
   cancelRef,
+  onAsking,
   onClose,
   onSignedIn,
 }: Pick<Props, "account" | "api" | "onSignedIn"> & {
   cancelRef: RefObject<(() => void) | null>;
+  onAsking: (asking: boolean) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -170,7 +184,7 @@ function Flow({
   if (phase.kind === "create" || phase.kind === "unlock") {
     const creating = phase.kind === "create";
     const mismatch = creating && confirm.length > 0 && confirm !== pass;
-    return (
+    const form = (recoveryLink: ReactNode) => (
       <form onSubmit={submitPassphrase} className="flex flex-col gap-4" noValidate>
         <ModalHeader
           title={creating ? t("signin.createTitle") : t("signin.unlockTitle")}
@@ -221,6 +235,7 @@ function Flow({
             {fieldError}
           </p>
         )}
+        {recoveryLink}
         <ModalFooter>
           <button
             type="button"
@@ -245,6 +260,23 @@ function Flow({
           </button>
         </ModalFooter>
       </form>
+    );
+    if (creating) return form(null);
+    return (
+      <VaultRecovery
+        api={api}
+        layout="modal"
+        onAsking={onAsking}
+        onDone={() => {
+          // The old store is archived and the accounts must sign in again: the next step is a new passphrase.
+          setPass("");
+          setConfirm("");
+          setFieldError(null);
+          setPhase({ kind: "create" });
+        }}
+      >
+        {form}
+      </VaultRecovery>
     );
   }
 

@@ -336,7 +336,13 @@ describe("structured backend errors are worded in the current language", () => {
         "remove_failed",
         "remove_refused",
       ],
-      ...["passphrase_mismatch", "passphrase_too_short", "vault_exists", "vault_unreadable"],
+      ...[
+        "passphrase_mismatch",
+        "passphrase_too_short",
+        "vault_exists",
+        "vault_unreadable",
+        "vault_missing",
+      ],
     ]);
     for (const c of new Set(coded)) expect(known.has(c), `unknown code ${c}`).toBe(true);
     const profileCodes = [
@@ -353,6 +359,21 @@ describe("structured backend errors are worded in the current language", () => {
       "remove_refused",
     ];
     expect(wanted("profile", profileCodes)).toEqual([]);
+    // "Start fresh" (vault_recovery.rs) and the unlock errors
+    expect(
+      wanted("vault", [
+        "passphrase_mismatch",
+        "vault_unreadable",
+        "vault_missing",
+        "sign_in_in_progress",
+        "appearance_busy",
+        "game_starting",
+        "vault_unlocked",
+        "reset_failed",
+        "accounts_not_updated",
+        "storage",
+      ]),
+    ).toEqual([]);
     expect(
       wanted("settings", [
         "unsupported_value",

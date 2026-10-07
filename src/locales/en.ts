@@ -193,6 +193,12 @@ export const en = {
   "signin.createDescription":
     "Sign-in details are encrypted in this folder with a passphrase you choose. It can't be recovered, so keep it safe.",
   "signin.unlockTitle": "Unlock your accounts",
+  "recovery.link": "Forgot passphrase?",
+  "recovery.title": "Start fresh?",
+  "recovery.body":
+    "Clade can’t recover a forgotten passphrase. Starting fresh archives the old encrypted sign-in store and stops using those saved sign-ins in this Clade folder. You’ll sign in to your Microsoft accounts again. Your profiles, worlds, playtime and settings are kept.",
+  "recovery.keep": "Keep trying",
+  "recovery.confirm": "Start fresh",
   "signin.unlockDescription": "Enter your passphrase to sign in. It stays on this computer.",
   "signin.passphraseNote": {
     other: "At least {count} characters. A few words work well.",
@@ -383,6 +389,16 @@ export const en = {
   "error.vault.passphrase_too_short": "That passphrase is too short.",
   "error.vault.vault_exists": "Accounts are already protected by a passphrase.",
   "error.vault.vault_unreadable": "The encrypted account store could not be opened.",
+  "error.vault.vault_missing":
+    "The encrypted account store is missing from this folder. Start fresh to sign in again.",
+  "error.vault.sign_in_in_progress": "A sign-in is in progress. Finish or cancel it first.",
+  "error.vault.appearance_busy": "A skin or cape change is still running. Try again in a moment.",
+  "error.vault.game_starting": "A game is starting. Try again once it has started.",
+  "error.vault.vault_unlocked": "Your accounts are already unlocked.",
+  "error.vault.reset_failed":
+    "Clade couldn’t archive the old sign-in store, so nothing was changed. Close anything using the Clade folder and try again.",
+  "error.vault.accounts_not_updated":
+    "The old sign-in store was archived, but the account list couldn’t be updated. Try Start fresh again.",
 
   "error.account.unknown": "Could not remove the account.",
   "error.account.unknown_account": "That account no longer exists.",

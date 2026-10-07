@@ -183,6 +183,12 @@ export const accountsApi = {
    */
   signIn: async (accountId: string | null) =>
     parseAccounts(await call("begin_sign_in", { accountId })),
+  /**
+   * "Start fresh": archives the old encrypted sign-in store (kept inside the Clade folder, never
+   * deleted) and makes every account sign in again. Only while the vault is locked, missing or
+   * unreadable. Resolves with the updated account list.
+   */
+  resetVault: async () => parseAccounts(await call("reset_vault")),
   cancelSignIn: async (): Promise<void> => {
     await call("cancel_sign_in");
   },

@@ -72,6 +72,8 @@ export interface BackendConfig {
   selected: string | null;
   accounts: FixtureAccount[];
   active: string | null;
+  /** The encrypted sign-in store: does the file exist, and is it open this session. */
+  vault: { exists: boolean; unlocked: boolean };
   /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
   appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;
@@ -200,6 +202,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
   selected: "survival",
   accounts: [ALEX, BLAKE],
   active: ALEX.id,
+  vault: { exists: false, unlocked: false },
   appearance: {},
   ui: {
     soundEnabled: true,

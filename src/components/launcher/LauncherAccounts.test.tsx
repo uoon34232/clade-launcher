@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi, AccountsSnapshot, SignInStage, VaultStatus } from "@/lib/accounts/api";
-import { appearanceStubs } from "@/lib/accounts/testAccounts";
+import { appearanceStubs, recoveryStubs } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { ProfilesApi } from "@/lib/profiles/api";
@@ -101,6 +101,7 @@ function makeAccounts(
     select,
     remove,
     ...appearanceStubs(),
+    ...recoveryStubs(),
     vaultStatus,
     createVault,
     unlockVault,

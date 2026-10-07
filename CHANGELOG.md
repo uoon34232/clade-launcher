@@ -45,6 +45,7 @@ Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is no
 - Real Microsoft, Xbox and Minecraft sign-in, approved by Mojang and verified with a real account; the account avatar is the head (with the hat layer) of the account's current Minecraft skin, cached inside the Clade folder.
 - Changing your Minecraft skin and capes from the account dialog: upload a 64x64 or 64x32 PNG as Classic or Slim, restore the default skin, and equip or hide the capes the account owns. The change is made on the Minecraft account itself, so it shows in the game and other launchers.
 - Preparing, verifying and launching a profile require a ready active account; without one the main button reads "Sign in to continue". Creating and browsing profiles still works.
+- "Forgot passphrase?" with "Start fresh" on every passphrase unlock: the old encrypted sign-in store is archived under `data/retired-vaults/` (nothing is deleted), every account signs in again with a new passphrase, and profiles, worlds, playtime and settings are kept. It does not sign you out at Microsoft.
 - "Remove from Clade" takes a profile out of the list and keeps its whole folder, worlds included, under `instances/.removed/`. Nothing is deleted.
 - The dock's profile button shows only the profile's name, and the profile and account menus are denser.
 - Exported diagnostics redact the known Minecraft profile names and UUIDs.
@@ -58,3 +59,4 @@ Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is no
 - No self-update yet: download a new release to update.
 - Skin and cape changes are new and have not yet been tried against a real Minecraft account, so report anything odd.
 - Launching needs a network connection once the saved Minecraft sign-in has expired. There is no offline mode.
+- Archived vaults under `data/retired-vaults/` are not cleaned up by Clade; delete them yourself when you no longer need them.

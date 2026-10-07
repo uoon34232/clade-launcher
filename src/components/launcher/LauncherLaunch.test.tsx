@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi } from "@/lib/accounts/api";
-import { READY_ACCOUNTS, appearanceStubs } from "@/lib/accounts/testAccounts";
+import { READY_ACCOUNTS, appearanceStubs, recoveryStubs } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import { LaunchRefused, type LaunchApi, type LaunchEvent, type LaunchExit } from "@/lib/launch/api";
@@ -76,6 +76,7 @@ function makeAccounts(signedIn = true) {
     select: vi.fn<AccountsApi["select"]>(() => Promise.resolve(none)),
     remove: vi.fn<AccountsApi["remove"]>(() => Promise.resolve(none)),
     ...appearanceStubs(),
+    ...recoveryStubs(),
     vaultStatus: vi.fn<AccountsApi["vaultStatus"]>(() =>
       Promise.resolve({ exists: true, unlocked: true }),
     ),

@@ -20,6 +20,11 @@ export const READY_ACCOUNTS: AccountsSnapshot = {
 
 export const NO_LOOK: Appearance = { skinModel: null, capes: [] };
 
+/** "Start fresh" for tests that do not use it. */
+export function recoveryStubs(snapshot: AccountsSnapshot = READY_ACCOUNTS) {
+  return { resetVault: vi.fn<AccountsApi["resetVault"]>(() => Promise.resolve(snapshot)) };
+}
+
 /** The appearance half of an accounts client for tests that do not use it: nothing owned, nothing changes. */
 export function appearanceStubs() {
   return {
@@ -41,6 +46,7 @@ export function readyAccountsClient(snapshot: AccountsSnapshot = READY_ACCOUNTS)
     ),
     createVault: vi.fn<AccountsApi["createVault"]>(() => Promise.resolve()),
     unlockVault: vi.fn<AccountsApi["unlockVault"]>(() => Promise.resolve()),
+    ...recoveryStubs(snapshot),
     signIn: vi.fn<AccountsApi["signIn"]>(() => new Promise(() => undefined)),
     cancelSignIn: vi.fn<AccountsApi["cancelSignIn"]>(() => Promise.resolve()),
     onSignInProgress: vi.fn<AccountsApi["onSignInProgress"]>(() =>

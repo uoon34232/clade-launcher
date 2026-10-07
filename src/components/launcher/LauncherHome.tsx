@@ -302,6 +302,14 @@ export function LauncherHome({
             launch(id);
           }}
           onOpenLogs={(id) => void launchClient.openLogs(id).catch(() => undefined)}
+          onVaultReset={() =>
+            // "Start fresh" archived the old vault: the account must sign in again before it can play.
+            setProblem((cur) =>
+              cur?.kind === "refused"
+                ? { ...cur, code: "needs_sign_in", accountId: accounts.active }
+                : cur,
+            )
+          }
           accountsClient={accountsClient}
         />
         <SettingsDialog open={surface.kind === "settings"} onOpenChange={(o) => !o && close()} />

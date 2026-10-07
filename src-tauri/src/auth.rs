@@ -14,6 +14,7 @@
 //!   "needs sign in again".
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -353,10 +354,13 @@ pub async fn ensure_fresh<T: Transport>(
     id: &str,
     now: i64,
 ) -> Result<Secret, AuthError> {
-    let secrets = {
+    // Which vault this refresh belongs to. The network steps below take a while; if the vault is
+    // replaced meanwhile (it was archived by "Start fresh" and a new one created), the results of this
+    // refresh must not be written into it.
+    let (secrets, generation) = {
         let guard = lock(vault);
         let v = guard.as_ref().ok_or(AuthError::VaultLocked)?;
-        v.account(id).cloned()
+        (v.account(id).cloned(), v.generation())
     };
     let mark = |reason: ReauthReason| {
         let _ = accounts.update(|f| f.mark_needs_reauth(id, reason, now));
@@ -393,6 +397,9 @@ pub async fn ensure_fresh<T: Transport>(
     if let Some(new_refresh) = &tokens.refresh {
         let mut guard = lock(vault);
         let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+        if v.generation() != generation {
+            return Err(AuthError::VaultLocked);
+        }
         let mut updated = secrets.clone();
         updated.ms_refresh_token = Some(new_refresh.expose().to_owned());
         v.set_account(id, updated).map_err(storage)?;
@@ -405,6 +412,9 @@ pub async fn ensure_fresh<T: Transport>(
     {
         let mut guard = lock(vault);
         let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+        if v.generation() != generation {
+            return Err(AuthError::VaultLocked); // the vault changed: nothing of this refresh is kept
+        }
         v.set_account(id, secrets_for(&refresh, &session, now))
             .map_err(storage)?;
     }
@@ -422,7 +432,7 @@ pub async fn ensure_fresh<T: Transport>(
     Ok(session.access_token)
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -432,7 +442,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct AuthState {
     pub vault_path: std::path::PathBuf,
     pub vault: Mutex<Option<Vault>>,
-    running: Mutex<Option<Arc<Notify>>>,
+    pub(crate) running: Mutex<Option<Arc<Notify>>>,
+    /// Bumped by "Start fresh" (`vault_recovery`). An unlock or create that began before it must not
+    /// install its vault afterwards: that vault's file has been archived.
+    pub(crate) epoch: AtomicU64,
     pub http: Result<HttpFetcher, String>,
 }
 
@@ -442,8 +455,30 @@ impl AuthState {
             vault_path,
             vault: Mutex::new(None),
             running: Mutex::new(None),
+            epoch: AtomicU64::new(0),
             http,
         }
+    }
+
+    /// Puts an unlocked or freshly created vault into the slot, unless "Start fresh" archived the
+    /// vault files since this operation began (`started` is the epoch it saw then). `after` runs under
+    /// the vault lock, only when the vault is really installed.
+    pub(crate) fn install_vault(
+        &self,
+        mut vault: Vault,
+        started: u64,
+        after: impl FnOnce(&mut Vault),
+    ) -> Result<(), CodedError> {
+        let mut slot = lock(&self.vault);
+        if self.epoch.load(Ordering::SeqCst) != started {
+            return Err(CodedError::new(
+                "vault_missing",
+                "the vault was archived while it was being opened",
+            ));
+        }
+        after(&mut vault);
+        *slot = Some(vault);
+        Ok(())
     }
 
     /// Removes an account's secrets if the vault is unlocked. A locked vault keeps them until
@@ -457,7 +492,7 @@ impl AuthState {
     }
 }
 
-struct RunGuard<'a>(&'a Mutex<Option<Arc<Notify>>>);
+pub(crate) struct RunGuard<'a>(pub(crate) &'a Mutex<Option<Arc<Notify>>>);
 impl Drop for RunGuard<'_> {
     fn drop(&mut self) {
         *lock(self.0) = None;
@@ -492,11 +527,12 @@ impl From<AuthError> for SignInError {
 }
 
 /// The vault's failures as stable codes (the UI words them).
-fn vault_error(e: &VaultError) -> CodedError {
+pub(crate) fn vault_error(e: &VaultError) -> CodedError {
     match e {
         VaultError::Authentication => CodedError::new("passphrase_mismatch", "passphrase rejected"),
         VaultError::PassphraseTooShort => CodedError::new("passphrase_too_short", e.to_string()),
         VaultError::AlreadyExists => CodedError::new("vault_exists", "a vault already exists"),
+        VaultError::Missing => CodedError::new("vault_missing", "there is no vault file"),
         _ => CodedError::new("vault_unreadable", e.to_string()),
     }
 }
@@ -516,12 +552,12 @@ pub async fn create_vault(
 ) -> Result<(), CodedError> {
     let passphrase = zeroize::Zeroizing::new(passphrase);
     let path = auth.vault_path.clone();
+    let started = auth.epoch.load(Ordering::SeqCst);
     let vault = tokio::task::spawn_blocking(move || Vault::create(&path, &passphrase))
         .await
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
         .map_err(|e| vault_error(&e))?;
-    *lock(&auth.vault) = Some(vault);
-    Ok(())
+    auth.install_vault(vault, started, |_| ())
 }
 
 /// Drops the vault entries of accounts that were removed while the vault was locked.
@@ -566,13 +602,14 @@ pub async fn unlock_vault(
 ) -> Result<(), CodedError> {
     let passphrase = zeroize::Zeroizing::new(passphrase);
     let path = auth.vault_path.clone();
-    let mut vault = tokio::task::spawn_blocking(move || Vault::unlock(&path, &passphrase))
+    let started = auth.epoch.load(Ordering::SeqCst);
+    let vault = tokio::task::spawn_blocking(move || Vault::unlock(&path, &passphrase))
         .await
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
         .map_err(|e| vault_error(&e))?;
-    purge_orphans(&mut vault, accounts.path());
-    *lock(&auth.vault) = Some(vault);
-    Ok(())
+    auth.install_vault(vault, started, |v| {
+        purge_orphans(v, accounts.path());
+    })
 }
 
 fn transport(auth: &AuthState) -> Result<&HttpFetcher, AuthError> {
@@ -1431,5 +1468,75 @@ mod tests {
         }))
         .unwrap();
         assert!(json.contains("no_java_profile") && json.contains("does not own"));
+    }
+
+    /// A transport that, at the first request, swaps what is in the vault slot: what happens to a
+    /// refresh that is in flight while "Start fresh" archives the vault and a new one is created.
+    struct SwapsTheVault<'a> {
+        inner: FakeTransport,
+        slot: &'a Mutex<Option<Vault>>,
+        next: Mutex<Option<Option<Vault>>>,
+    }
+
+    impl Transport for SwapsTheVault<'_> {
+        fn send(
+            &self,
+            request: crate::net::HttpRequest,
+        ) -> impl std::future::Future<
+            Output = Result<crate::net::HttpResponse, crate::net::FetchError>,
+        > + Send {
+            if let Some(next) = lock(&self.next).take() {
+                *lock(self.slot) = next;
+            }
+            self.inner.send(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_started_before_start_fresh_cannot_write_into_the_new_vault() {
+        let e = env();
+        let id = seeded(&e, 50); // expired: a refresh will run
+        let accounts_before = AccountsFile::load(e.accounts.path()).unwrap();
+        let fresh = Vault::create_with(&e.dir.path().join("fresh.bin"), "another passphrase", FAST)
+            .unwrap();
+        let t = SwapsTheVault {
+            inner: FakeTransport::new(),
+            slot: &e.vault,
+            next: Mutex::new(Some(Some(fresh))),
+        };
+        script_ok(&t.inner, "NEW-REFRESH", "Steve_01", UUID_RAW);
+        let r = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000).await;
+        assert!(matches!(r, Err(AuthError::VaultLocked)), "{r:?}");
+        // nothing of the in-flight refresh reached the new vault
+        let g = lock(&e.vault);
+        assert!(g.as_ref().unwrap().account(&id).is_none());
+        // and the account list is exactly as it was
+        assert_eq!(
+            AccountsFile::load(e.accounts.path()).unwrap(),
+            accounts_before
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_whose_vault_was_locked_meanwhile_writes_nothing() {
+        let e = env();
+        let id = seeded(&e, 50);
+        let t = SwapsTheVault {
+            inner: FakeTransport::new(),
+            slot: &e.vault,
+            next: Mutex::new(Some(None)), // locked while the request is out
+        };
+        script_ok(&t.inner, "NEW-REFRESH", "Steve_01", UUID_RAW);
+        let r = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000).await;
+        assert!(matches!(r, Err(AuthError::VaultLocked)), "{r:?}");
+        assert!(lock(&e.vault).is_none());
+    }
+
+    #[test]
+    fn unlocking_a_vault_file_that_is_not_there_has_its_own_code() {
+        let e = env();
+        let missing = e.dir.path().join("not-there.bin");
+        let err = Vault::unlock(&missing, "whatever passphrase").unwrap_err();
+        assert_eq!(vault_error(&err).code, "vault_missing");
     }
 }

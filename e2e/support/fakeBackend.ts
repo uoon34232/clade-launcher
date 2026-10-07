@@ -24,6 +24,7 @@ interface Control {
     accounts: BackendConfig["accounts"];
     active: string | null;
     appearance: BackendConfig["appearance"];
+    vault: BackendConfig["vault"];
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
   };
@@ -54,6 +55,7 @@ function install(cfg: BackendConfig): void {
     accounts: clone(cfg.accounts),
     active: cfg.active,
     appearance: clone(cfg.appearance),
+    vault: clone(cfg.vault),
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
   };
@@ -359,9 +361,20 @@ function install(cfg: BackendConfig): void {
         return wire(look);
       }
       case "vault_status":
-        return { exists: false, unlocked: false };
+        return clone(state.vault);
       case "create_vault":
+        state.vault = { exists: true, unlocked: true };
+        return null;
       case "unlock_vault":
+        state.vault.unlocked = true;
+        return null;
+      // "Start fresh": like the backend, only for a vault that is not open; every account signs in again.
+      case "reset_vault":
+        if (state.vault.unlocked) return fail("vault_unlocked", "The vault is open.");
+        state.vault = { exists: false, unlocked: false };
+        for (const a of state.accounts) a.needsSignIn = true;
+        emit("accounts-changed", null);
+        return accountsSnapshot();
       case "cancel_sign_in":
         return null;
       case "begin_sign_in":

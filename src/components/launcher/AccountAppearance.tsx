@@ -18,6 +18,7 @@ import { describeError, errorCode } from "@/lib/i18n/errors";
 import { playSound } from "@/lib/sound/soundService";
 import { cn } from "@/lib/utils";
 import { ModalSection } from "./Modal";
+import { VaultRecovery } from "./VaultRecovery";
 import { Segmented } from "./Segmented";
 import {
   BUTTON_PRIMARY,
@@ -47,6 +48,8 @@ interface Props {
    */
   confirmingReset: boolean;
   setConfirmingReset: (confirming: boolean) => void;
+  /** "Start fresh?" (forgotten passphrase) is showing: held by the dialog, like the question above. */
+  setRecovering: (recovering: boolean) => void;
 }
 
 /**
@@ -61,6 +64,7 @@ export function AccountAppearance({
   api,
   confirmingReset,
   setConfirmingReset,
+  setRecovering,
 }: Props) {
   const t = useT();
   const [load, setLoad] = useState<Load>({ kind: "loading" });
@@ -167,6 +171,7 @@ export function AccountAppearance({
         api={api}
         onRetry={reload}
         onUnlocked={reload}
+        onAsking={setRecovering}
       />
     ) : null;
 
@@ -352,6 +357,7 @@ function Notice({
   api,
   onRetry,
   onUnlocked,
+  onAsking,
 }: {
   needsSignIn: boolean;
   failure: unknown;
@@ -359,6 +365,7 @@ function Notice({
   api: AccountsApi;
   onRetry: () => void;
   onUnlocked: () => void;
+  onAsking: (asking: boolean) => void;
 }) {
   const t = useT();
   const [pass, setPass] = useState("");
@@ -398,30 +405,50 @@ function Notice({
         {describeError("appearance", failure)}
       </p>
       {locked ? (
-        <form onSubmit={unlock} className="flex flex-wrap items-end gap-3" noValidate>
-          <div className="flex min-w-[12rem] flex-1 flex-col gap-1.5">
-            <label htmlFor="appearance-unlock" className={LABEL}>
-              {t("common.passphrase")}
-            </label>
-            <input
-              id="appearance-unlock"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              value={pass}
-              onChange={(e) => setPass(e.target.value)}
-              className={FIELD}
-            />
-          </div>
-          <button type="submit" disabled={busy || pass.length === 0} className={BUTTON_PRIMARY}>
-            {busy ? t("common.working") : t("common.unlock")}
-          </button>
-          {unlockError && (
-            <p role="alert" className="text-clay-deep w-full text-[0.875rem]">
-              {unlockError}
-            </p>
+        <VaultRecovery
+          api={api}
+          layout="inline"
+          onAsking={onAsking}
+          onDone={() => {
+            // Every account has to sign in again now; the dialog's own state follows from the list.
+            setPass("");
+            setUnlockError(null);
+          }}
+        >
+          {(recoveryLink) => (
+            <>
+              <form onSubmit={unlock} className="flex flex-wrap items-end gap-3" noValidate>
+                <div className="flex min-w-[12rem] flex-1 flex-col gap-1.5">
+                  <label htmlFor="appearance-unlock" className={LABEL}>
+                    {t("common.passphrase")}
+                  </label>
+                  <input
+                    id="appearance-unlock"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={pass}
+                    onChange={(e) => setPass(e.target.value)}
+                    className={FIELD}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={busy || pass.length === 0}
+                  className={BUTTON_PRIMARY}
+                >
+                  {busy ? t("common.working") : t("common.unlock")}
+                </button>
+                {unlockError && (
+                  <p role="alert" className="text-clay-deep w-full text-[0.875rem]">
+                    {unlockError}
+                  </p>
+                )}
+              </form>
+              {recoveryLink}
+            </>
           )}
-        </form>
+        </VaultRecovery>
       ) : (
         errorCode(failure) !== "invalid_skin" && (
           <div>

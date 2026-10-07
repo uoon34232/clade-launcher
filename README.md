@@ -40,6 +40,8 @@ Add as many Microsoft accounts as you like and switch between them from the bar 
 
 You sign in on Microsoft's own page in your browser. Clade never sees your password. There is no cracked, guest or offline mode.
 
+Your saved sign-ins are encrypted with a passphrase you choose, and it cannot be recovered. If you forget it, choose **Forgot passphrase?** on the unlock screen, then **Start fresh**: Clade archives the old encrypted store inside its own folder (`data/retired-vaults/`, nothing is deleted) and you sign in to your accounts again with a new passphrase. Your profiles, worlds, playtime and settings are kept. Starting fresh does not sign you out at Microsoft. Clearing out old archived stores is manual for now.
+
 <p align="center"><img src="docs/media/account-menu.gif" alt="Switching accounts and opening an account card" width="720"></p>
 
 ## Truly portable

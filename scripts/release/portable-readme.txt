@@ -30,6 +30,9 @@ Tips
  - For the best compatibility with older Minecraft and Java versions, keep the folder in a reasonably
    short path that uses only English letters, digits and plain punctuation (for example D:\Clade-Launcher).
  - Microsoft may ask you to sign in again, on any computer.
+ - Forgot the passphrase that protects your sign-ins? It cannot be recovered. Choose "Forgot passphrase?"
+   on the unlock screen, then "Start fresh". The old encrypted store is kept in data\retired-vaults, you
+   sign in again with a new passphrase, and your profiles, worlds, playtime and settings stay as they are.
 
 Reporting a bug
  - https://github.com/uoon34232/clade-launcher/issues/new/choose

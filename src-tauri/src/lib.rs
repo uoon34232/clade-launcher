@@ -38,6 +38,7 @@ pub mod support_cmd;
 pub mod system;
 pub mod ui_settings;
 pub mod vault;
+pub mod vault_recovery;
 pub mod versions;
 pub mod webview;
 pub mod window_fit;
@@ -295,6 +296,7 @@ pub fn run() {
             auth::vault_status,
             auth::create_vault,
             auth::unlock_vault,
+            vault_recovery::reset_vault,
             auth::begin_sign_in,
             auth::cancel_sign_in,
             auth::refresh_account,
