@@ -1,0 +1,173 @@
+#[cfg(test)]
+use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+fn setup() -> (tempfile::TempDir, PortableRoot) {
+    let d = tempfile::tempdir().unwrap();
+    let root = PortableRoot::at(d.path());
+    root.ensure_layout().unwrap();
+    (d, root)
+}
+
+fn vanilla(name: &str) -> NewInstance {
+    NewInstance::vanilla(name, "1.21.4").unwrap()
+}
+
+fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            walk(base, &p, out);
+        } else {
+            let rel = p
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, fs::read(&p).unwrap());
+        }
+    }
+}
+
+/// Every file below `dir` with its bytes.
+fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+#[test]
+fn retiring_a_profile_moves_every_file_unchanged_and_nothing_lists_it_again() {
+    let (_d, root) = setup();
+    let store = InstanceStore::new(&root);
+    let keep = store.create(vanilla("Keep"), 1).unwrap();
+    let gone = store
+        .create(
+            NewInstance::modded(
+                "Gone",
+                "1.21.4",
+                LoaderKind::Fabric,
+                LoaderVersionSpec::Auto,
+            )
+            .unwrap(),
+            2,
+        )
+        .unwrap();
+    let dirs = store.dirs(&gone.id);
+    // User content of every kind, including files nobody knows about.
+    let content: [(&str, &[u8]); 10] = [
+        ("game/saves/World One/level.dat", &[0x1f, 0x8b, 1, 2, 3]),
+        (
+            "game/saves/World One/region/r.0.0.mca",
+            &[0, 1, 2, 255, 254],
+        ),
+        ("game/mods/some-mod.jar", b"PK-mod"),
+        ("game/config/some-mod.toml", b"enabled = true\n"),
+        ("game/screenshots/2026-01-01.png", b"png"),
+        ("game/options.txt", b"fov:90.0\n"),
+        ("game/logs/latest.log", b"log"),
+        ("game/unknown-by-minecraft/x.bin", b"?"),
+        ("home/AppData/Roaming/thing.dat", b"home"),
+        ("playtime.json", b"{\"schema\":1}"),
+    ];
+    for (rel, bytes) in content {
+        let p = dirs.root().join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, bytes).unwrap();
+    }
+    let before = tree(dirs.root());
+    assert!(before.contains_key("instance.json"));
+    let other_before = tree(store.dirs(&keep.id).root());
+
+    let kept_at = store.retire(&gone.id).unwrap();
+
+    // The entire content, byte for byte, now sits inside the instances folder's retained area.
+    assert_eq!(tree(&kept_at), before);
+    assert!(kept_at.starts_with(root.instances_dir().join(RETAINED_DIR)));
+    assert!(!dirs.root().exists(), "it left the active profile folder");
+    // It is not an active profile, not reported as a problem, and not even a valid instance id.
+    let listing = store.list().unwrap();
+    assert_eq!(
+        listing
+            .instances
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![keep.id.as_str()]
+    );
+    assert!(listing.problems.is_empty(), "{:?}", listing.problems);
+    assert!(InstanceId::new(RETAINED_DIR).is_err());
+    assert!(store.get(&gone.id).is_err());
+    // The other profile is untouched.
+    assert_eq!(tree(store.dirs(&keep.id).root()), other_before);
+}
+
+#[test]
+fn every_removal_gets_its_own_folder_and_nothing_is_overwritten() {
+    let (_d, root) = setup();
+    let store = InstanceStore::new(&root);
+    let mut places = BTreeSet::new();
+    for n in 0..3 {
+        // The same name, so the same id, three times over.
+        let inst = store.create(vanilla("Again"), n).unwrap();
+        fs::write(
+            store.dirs(&inst.id).game_dir().join(format!("f{n}.txt")),
+            b"x",
+        )
+        .unwrap();
+        places.insert(store.retire(&inst.id).unwrap());
+    }
+    assert_eq!(places.len(), 3);
+    for (n, p) in places.iter().enumerate() {
+        assert!(p.join("instance.json").is_file(), "{n}");
+    }
+    let files: BTreeSet<String> = places
+        .iter()
+        .flat_map(|p| tree(p).into_keys().filter(|k| k.starts_with("game/f")))
+        .collect();
+    assert_eq!(files.len(), 3, "each removed copy kept its own file");
+    assert!(store.list().unwrap().instances.is_empty());
+}
+
+#[test]
+fn retiring_refuses_what_is_not_a_clade_profile_and_changes_nothing() {
+    let (_d, root) = setup();
+    let store = InstanceStore::new(&root);
+    // unknown id, a folder without a manifest, a damaged manifest
+    assert!(store.retire(&InstanceId::new("nope").unwrap()).is_err());
+    fs::create_dir(root.instances_dir().join("not-ours")).unwrap();
+    fs::write(
+        root.instances_dir().join("not-ours").join("precious.txt"),
+        b"x",
+    )
+    .unwrap();
+    assert!(store.retire(&InstanceId::new("not-ours").unwrap()).is_err());
+    let inst = store.create(vanilla("Broken"), 1).unwrap();
+    fs::write(store.dirs(&inst.id).manifest_file(), b"{ not json").unwrap();
+    assert!(store.retire(&inst.id).is_err());
+    assert!(root
+        .instances_dir()
+        .join("not-ours")
+        .join("precious.txt")
+        .exists());
+    assert!(store.dirs(&inst.id).manifest_file().exists());
+    assert!(!root
+        .instances_dir()
+        .join(RETAINED_DIR)
+        .join("not-ours")
+        .exists());
+}
+
+#[test]
+fn a_failed_move_leaves_the_profile_exactly_where_it_was() {
+    let (_d, root) = setup();
+    let store = InstanceStore::new(&root);
+    let inst = store.create(vanilla("Stay"), 1).unwrap();
+    fs::write(store.dirs(&inst.id).game_dir().join("save.dat"), b"data").unwrap();
+    let before = tree(store.dirs(&inst.id).root());
+    // The retained folder cannot be made: a plain file sits where it must be.
+    fs::write(root.instances_dir().join(RETAINED_DIR), b"in the way").unwrap();
+    assert!(store.retire(&inst.id).is_err());
+    assert_eq!(tree(store.dirs(&inst.id).root()), before);
+    assert_eq!(store.list().unwrap().instances.len(), 1);
+}

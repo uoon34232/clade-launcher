@@ -288,6 +288,11 @@ impl NewInstance {
     }
 }
 
+/// Folder inside `instances/` that keeps profiles removed from Clade, whole and untouched. It is
+/// not a valid instance id (ids cannot start with a dot), so it can never be an instance, and
+/// [`InstanceStore::list`] skips it.
+pub const RETAINED_DIR: &str = ".removed";
+
 #[derive(Debug, Default)]
 pub struct Listing {
     pub instances: Vec<Instance>,
@@ -535,6 +540,9 @@ impl<'a> InstanceStore<'a> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if name == RETAINED_DIR {
+                continue; // removed profiles kept for the user: never an active profile, never a "problem"
+            }
             match InstanceId::new(&name).and_then(|id| self.get(&id)) {
                 Ok(i) => out.instances.push(i),
                 Err(e) => out.problems.push((name, e.to_string())),
@@ -560,8 +568,46 @@ impl<'a> InstanceStore<'a> {
         Ok(inst)
     }
 
-    /// Deletes one instance and everything in it (saves included; the UI must confirm first).
-    /// Other instances and all shared data are untouched. Callers must ensure it is not running.
+    /// Takes one profile out of Clade without deleting anything: its whole folder is renamed
+    /// (moved, atomically, on the same volume) to `instances/.removed/<id>-<time>-<random>/`, where
+    /// nothing lists or launches it and every file stays as it was (worlds, mods, config,
+    /// screenshots, logs, `home/`, `playtime.json`, unknown files). Returns the new location.
+    ///
+    /// Nothing is read, copied or deleted inside the profile. If the folder is not a real, readable
+    /// Clade instance, is a link, or cannot be renamed (for example a file inside is open), the
+    /// profile stays exactly where it was and an error is returned; there is deliberately no
+    /// copy-and-delete fallback. Callers must ensure the profile is not running or being prepared.
+    pub fn retire(&self, id: &InstanceId) -> Result<PathBuf, InstanceError> {
+        self.get(id)?; // proves it is a real instance of ours, not an arbitrary folder
+        let dirs = self.dirs(id);
+        if is_link(dirs.root())? {
+            return Err(InstanceError::Link(dirs.root().display().to_string()));
+        }
+        let retained = self.root.instances_dir().join(RETAINED_DIR);
+        fs::create_dir_all(&retained)?;
+        if is_link(&retained)? || !retained.is_dir() {
+            return Err(InstanceError::Link(retained.display().to_string()));
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        for _ in 0..8 {
+            let mut nonce = [0u8; 4];
+            getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+            let dest = retained.join(format!("{}-{stamp}-{}", id.as_str(), hex::encode(nonce)));
+            if dest.exists() {
+                continue; // a name collision: try another suffix, never overwrite
+            }
+            fs::rename(dirs.root(), &dest)?;
+            return Ok(dest);
+        }
+        Err(io::Error::other("no free name in the retained folder").into())
+    }
+
+    /// Deletes one instance and everything in it (saves included). Not part of the product: no
+    /// command or screen may erase a profile's files, so this exists only for tests; removing a
+    /// profile from the launcher is [`Self::retire`], which keeps every file.
+    #[cfg(test)]
     pub fn delete(&self, id: &InstanceId) -> Result<(), InstanceError> {
         self.get(id)?; // proves it is a real instance of ours, not an arbitrary folder
         let dirs = self.dirs(id);
@@ -1018,3 +1064,6 @@ mod tests {
             .exists());
     }
 }
+
+#[cfg(test)]
+mod retire_tests;

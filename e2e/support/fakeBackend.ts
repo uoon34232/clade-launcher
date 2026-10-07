@@ -190,6 +190,16 @@ function install(cfg: BackendConfig): void {
       case "select_profile":
         state.selected = args.id as string;
         return null;
+      // "Remove from Clade": the real command moves the folder to instances/.removed/ and deletes
+      // nothing. Here the profile just leaves the list, with a valid selection (the next one, or none).
+      case "remove_profile": {
+        const id = args.id as string;
+        if (!state.profiles.some((p) => p.id === id)) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        state.profiles = state.profiles.filter((p) => p.id !== id);
+        state.selected = state.profiles[0]?.id ?? null;
+        return profilesSnapshot();
+      }
       case "get_version_catalog":
         return clone(cfg.catalog);
       case "get_loader_options": {

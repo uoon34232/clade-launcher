@@ -72,6 +72,12 @@ export const en = {
   "profile.trigger": "Profile: {label}. Change profile",
   "profile.create": "+ Create profile",
   "profile.verify": "Verify files",
+  "profile.remove": "Remove from Clade…",
+  "removeProfile.title": "Remove “{profile}” from Clade?",
+  "removeProfile.body":
+    "The profile will disappear from Clade, but its worlds, mods, settings, screenshots and other files will be kept inside the Clade folder. Nothing will be permanently deleted.",
+  "removeProfile.confirm": "Remove from Clade",
+  "removeProfile.working": "Removing…",
   "profile.vanilla": "Vanilla",
   "profile.modded": "Modded",
 
@@ -383,6 +389,11 @@ export const en = {
     "{loader} {version} is not a compatible version for Minecraft {minecraft}.",
   "error.profile.invalid_name": "That name can't be used.",
   "error.profile.storage": "Could not save the profile.",
+  "error.profile.remove_failed":
+    "The profile could not be moved. Close anything that uses its folder (Explorer, an editor) and try again. Nothing was changed.",
+  "error.profile.remove_refused": "This profile can't be removed from here. Nothing was changed.",
+  "error.profile.already_running": "This profile is starting or running. Close the game first.",
+  "error.profile.busy": "This profile is being set up. Wait for it to finish.",
 
   "error.catalog.unknown": "Could not load the version list.",
 } satisfies Record<string, Message>;

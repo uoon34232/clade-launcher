@@ -58,6 +58,7 @@ function makeProfiles(initial: ProfilesSnapshot) {
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("no"))),
     prepare: vi.fn<ProfilesApi["prepare"]>(() => new Promise<ProfilesSnapshot>(() => undefined)),
     cancelPrepare: vi.fn<ProfilesApi["cancelPrepare"]>(() => Promise.resolve()),
+    remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),
     onPrepareProgress: vi.fn<ProfilesApi["onPrepareProgress"]>(() =>
       Promise.resolve(() => undefined),
     ),

@@ -16,8 +16,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::accounts::AccountsFile;
 use crate::accounts_api::AccountsState;
+use crate::coded_error::CodedError;
 use crate::download::{Cancel, Progress};
-use crate::instances::InstanceId;
+use crate::instances::{InstanceError, InstanceId, InstanceStore};
 use crate::loader_install::SystemEnv;
 use crate::loader_prepare::ProcessRunner;
 use crate::net::HttpFetcher;
@@ -290,6 +291,66 @@ async fn run(
     result
 }
 
+/// Releases the profile claim taken for a removal, whatever happens.
+struct Held<'a>(&'a ProfileLocks, &'a str);
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.0.release(self.1);
+    }
+}
+
+/// Takes a profile out of Clade while keeping every file (see `InstanceStore::retire`). It refuses
+/// a profile whose game is starting or running and one that is being prepared or verified, and it
+/// does so before anything is moved: the profile is claimed in the same registry preparing and
+/// launching use, so nothing can start on it halfway through.
+pub(crate) fn remove_from_clade(state: &PrepareState, id: &str) -> Result<(), CodedError> {
+    let iid = InstanceId::new(id).map_err(|_| CodedError::new("not_found", "no such profile"))?;
+    match state.locks.claim(iid.as_str(), Activity::Preparing) {
+        Ok(()) => {}
+        Err(Activity::Launching) => {
+            return Err(CodedError::new(
+                "already_running",
+                "This profile is starting or running.",
+            ))
+        }
+        Err(Activity::Preparing) => {
+            return Err(CodedError::new("busy", "This profile is being set up."))
+        }
+    }
+    let _held = Held(&state.locks, iid.as_str());
+    InstanceStore::new(&state.root)
+        .retire(&iid)
+        .map_err(|e| match e {
+            InstanceError::NotFound(_) | InstanceError::BadId(_) => {
+                CodedError::new("not_found", e.to_string())
+            }
+            InstanceError::Io(_) => CodedError::new("remove_failed", e.to_string()),
+            _ => CodedError::new("remove_refused", e.to_string()),
+        })?;
+    lock(&state.failed).remove(id);
+    Ok(())
+}
+
+/// "Remove from Clade": the profile leaves the list and its folder moves, whole, to
+/// `instances/.removed/`. Nothing is deleted. Returns the new list with a sane selection.
+#[tauri::command]
+pub fn remove_profile(
+    state: State<'_, PrepareState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+) -> Result<ProfilesDto, CodedError> {
+    remove_from_clade(&state, &id)?;
+    let selected = settings.last_instance().filter(|s| s.as_str() != id);
+    let dto = snapshot(&state.root, selected).map_err(CodedError::storage)?;
+    // Remember the selection that is shown now (the next profile, or none after the last one).
+    let shown = dto
+        .selected
+        .as_deref()
+        .and_then(|s| InstanceId::new(s).ok());
+    let _ = settings.set_last_instance(shown);
+    Ok(dto)
+}
+
 #[tauri::command]
 pub fn cancel_prepare(state: State<'_, PrepareState>) {
     if let Some((_, cancel)) = lock(&state.running).as_ref() {
@@ -473,3 +534,6 @@ mod tests {
         assert!(json.contains("not_found"));
     }
 }
+
+#[cfg(test)]
+mod remove_tests;

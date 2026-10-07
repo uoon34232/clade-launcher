@@ -81,6 +81,7 @@ function apis(snapshot: ProfilesSnapshot, accounts: AccountsSnapshot = ACCOUNTS)
     ),
     prepare: vi.fn<ProfilesApi["prepare"]>(() => new Promise<ProfilesSnapshot>(() => undefined)),
     cancelPrepare: vi.fn<ProfilesApi["cancelPrepare"]>(() => Promise.resolve()),
+    remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),
     onPrepareProgress: vi.fn<ProfilesApi["onPrepareProgress"]>(() =>
       Promise.resolve(() => undefined),
     ),

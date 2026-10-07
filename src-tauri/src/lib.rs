@@ -294,6 +294,7 @@ pub fn run() {
             auth::cancel_sign_in,
             auth::refresh_account,
             prepare_cmd::prepare_profile,
+            prepare_cmd::remove_profile,
             prepare_cmd::cancel_prepare,
             prepare_cmd::prepare_status,
             launch_cmd::launch_profile,

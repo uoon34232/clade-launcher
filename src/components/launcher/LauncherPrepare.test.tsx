@@ -62,6 +62,7 @@ function makeApi(initial: ProfilesSnapshot) {
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("no"))),
     prepare,
     cancelPrepare,
+    remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),
     onPrepareProgress,
     emit: (p: Partial<PrepareProgress>) =>
       act(() =>

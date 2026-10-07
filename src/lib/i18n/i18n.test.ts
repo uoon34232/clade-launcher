@@ -330,6 +330,11 @@ describe("structured backend errors are worded in the current language", () => {
         "unsupported_value",
         "invalid_memory",
         "diagnostics_failed",
+        // removing a profile from Clade
+        "already_running",
+        "busy",
+        "remove_failed",
+        "remove_refused",
       ],
       ...["passphrase_mismatch", "passphrase_too_short", "vault_exists", "vault_unreadable"],
     ]);
@@ -342,6 +347,10 @@ describe("structured backend errors are worded in the current language", () => {
       "no_compatible_loader",
       "loader_version_not_offered",
       "invalid_name",
+      "already_running",
+      "busy",
+      "remove_failed",
+      "remove_refused",
     ];
     expect(wanted("profile", profileCodes)).toEqual([]);
     expect(

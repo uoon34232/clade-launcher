@@ -20,6 +20,7 @@ import { LauncherDock } from "./LauncherDock";
 import { OnboardingDialog, type OnboardingExit } from "./OnboardingDialog";
 import type { PlayState } from "./PlayButton";
 import { PrepareDialog } from "./PrepareDialog";
+import { RemoveProfileDialog } from "./RemoveProfileDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { SignInDialog } from "./SignInDialog";
 import { WindowChrome } from "./WindowChrome";
@@ -39,6 +40,7 @@ type Surface =
   | { kind: "create-profile" }
   | { kind: "settings" }
   | { kind: "prepare"; id: string; verify?: boolean }
+  | { kind: "remove-profile"; id: string }
   | { kind: "sign-in"; accountId: string | null }
   | { kind: "account"; id: string };
 
@@ -199,6 +201,10 @@ export function LauncherHome({
   const preparing = prepareSurface
     ? (snapshot.profiles.find((p) => p.id === prepareSurface.id) ?? null)
     : null;
+  const removing =
+    surface.kind === "remove-profile"
+      ? (snapshot.profiles.find((p) => p.id === surface.id) ?? null)
+      : null;
   const run = selectedProfile ? runs[selectedProfile.id] : undefined;
   const playState: PlayState =
     run ??
@@ -248,6 +254,10 @@ export function LauncherHome({
             selectedProfile && setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
           }
           verifyDisabled={run !== undefined || !accountReady}
+          removeDisabled={run !== undefined}
+          onRemoveProfile={() =>
+            selectedProfile && setSurface({ kind: "remove-profile", id: selectedProfile.id })
+          }
           onPlay={play}
           playState={playState}
           onOpenSettings={() => setSurface({ kind: "settings" })}
@@ -265,6 +275,15 @@ export function LauncherHome({
           verify={prepareSurface?.verify === true}
           onClose={close}
           onPrepared={setSnapshot}
+          api={api}
+        />
+        <RemoveProfileDialog
+          profile={removing}
+          onClose={close}
+          onRemoved={(next) => {
+            setSnapshot(next); // the backend's list and a valid selection; no restart needed
+            close();
+          }}
           api={api}
         />
         <LaunchProblemDialog

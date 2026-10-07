@@ -70,6 +70,12 @@ export const ru: Record<MessageKey, Message> = {
   "profile.trigger": "Профиль: {label}. Сменить профиль",
   "profile.create": "+ Создать профиль",
   "profile.verify": "Проверить файлы",
+  "profile.remove": "Убрать из Clade…",
+  "removeProfile.title": "Убрать «{profile}» из Clade?",
+  "removeProfile.body":
+    "Профиль исчезнет из Clade, но его миры, моды, настройки, скриншоты и другие файлы останутся сохранены в папке Clade. Ничего не будет удалено безвозвратно.",
+  "removeProfile.confirm": "Убрать из Clade",
+  "removeProfile.working": "Убираем…",
   "profile.vanilla": "Ванильный",
   "profile.modded": "С модами",
 
@@ -387,6 +393,11 @@ export const ru: Record<MessageKey, Message> = {
     "{loader} {version} не подходит для Minecraft {minecraft}.",
   "error.profile.invalid_name": "Такое название использовать нельзя.",
   "error.profile.storage": "Не удалось сохранить профиль.",
+  "error.profile.remove_failed":
+    "Не удалось переместить профиль. Закрой всё, что использует его папку (Проводник, редактор), и попробуй снова. Ничего не изменилось.",
+  "error.profile.remove_refused": "Этот профиль нельзя убрать отсюда. Ничего не изменилось.",
+  "error.profile.already_running": "Этот профиль запускается или уже запущен. Сначала закрой игру.",
+  "error.profile.busy": "Этот профиль сейчас готовится. Дождись завершения.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",
 };

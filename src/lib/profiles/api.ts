@@ -263,6 +263,13 @@ export const profilesApi = {
   cancelPrepare: async (): Promise<void> => {
     await call("cancel_prepare");
   },
+  /**
+   * Removes a profile from Clade WITHOUT deleting anything: its whole folder (worlds, mods,
+   * settings, screenshots, everything) is moved to `instances/.removed/` inside the Clade folder.
+   * Resolves with the updated list and a valid selection. Rejects with a `BackendError` whose code
+   * says why not (the profile is running or being set up, or the folder could not be moved).
+   */
+  remove: async (id: string) => parseProfiles(await call("remove_profile", { id })),
   /** Progress events of a running preparation. Returns a function that stops listening. */
   onPrepareProgress: async (callback: (p: PrepareProgress) => void): Promise<() => void> => {
     if (!inTauri()) return () => undefined;
