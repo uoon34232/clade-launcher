@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod accounts_api;
+pub mod appearance_cmd;
 pub mod auth;
 pub mod coded_error;
 pub mod diagnostics;
@@ -287,6 +288,10 @@ pub fn run() {
             accounts_api::list_accounts,
             accounts_api::select_account,
             accounts_api::remove_account,
+            appearance_cmd::account_appearance,
+            appearance_cmd::set_account_skin,
+            appearance_cmd::reset_account_skin,
+            appearance_cmd::set_account_cape,
             auth::vault_status,
             auth::create_vault,
             auth::unlock_vault,

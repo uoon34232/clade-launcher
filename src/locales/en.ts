@@ -217,10 +217,21 @@ export const en = {
   "accountModal.skinSlim": "Slim",
   "accountModal.choosePng": "Choose PNG…",
   "accountModal.restoreDefault": "Restore default",
-  "accountModal.skinUnavailable": "Skin management isn’t available in Clade yet.",
+  "accountModal.uploading": "Uploading…",
+  "accountModal.resetConfirm":
+    "Restore the default skin? Your current custom skin will be removed from this Minecraft account.",
+  "accountModal.keepSkin": "Keep current skin",
+  "accountModal.restoring": "Restoring…",
+  "accountModal.skinModelNote": "The model applies to the PNG you choose next.",
   "accountModal.capeAvailable": "Choose one of the capes this account owns, or turn the cape off.",
-  "accountModal.capeUnavailable":
-    "Cape management isn’t available in Clade yet. Capes can only be equipped, never uploaded.",
+  "appearance.loading": "Loading…",
+  "appearance.noCapes": "No capes available for this account.",
+  "appearance.capeUnnamed": "Cape {n}",
+  "appearance.equip": "Equip",
+  "appearance.equipped": "Equipped",
+  "appearance.equipNamed": "Equip {name}",
+  "appearance.hideCape": "Hide cape",
+  "appearance.needsSignIn": "Sign in again to change your Minecraft appearance.",
   "accountModal.confirmRemove":
     "Remove {name}? Your profiles, worlds and playtime stay as they are.",
   "accountModal.keep": "Keep account",
@@ -375,6 +386,24 @@ export const en = {
 
   "error.account.unknown": "Could not remove the account.",
   "error.account.unknown_account": "That account no longer exists.",
+
+  "error.appearance.unknown": "That change didn’t go through.",
+  "error.appearance.invalid_skin": "Choose a 64×64 or 64×32 PNG skin.",
+  "error.appearance.needs_sign_in": "Sign in again to change your Minecraft appearance.",
+  "error.appearance.vault_locked": "Unlock your accounts to change your Minecraft appearance.",
+  "error.appearance.offline": "Connect to the internet to change your Minecraft appearance.",
+  "error.appearance.rate_limited": "Too many skin changes. Try again later.",
+  "error.appearance.unauthorized":
+    "Minecraft didn’t accept your sign-in. Sign in again, then retry.",
+  "error.appearance.forbidden": "Minecraft refused this change for this account.",
+  "error.appearance.cape_not_owned": "This account doesn’t own that cape.",
+  "error.appearance.service_unavailable":
+    "Minecraft services aren’t available right now. Try again later.",
+  "error.appearance.no_profile": "This account has no Minecraft: Java Edition profile.",
+  "error.appearance.bad_response": "Minecraft sent an unexpected answer. Try again later.",
+  "error.appearance.storage": "Your accounts could not be read.",
+  "error.appearance.busy": "Another change is still running.",
+  "error.appearance.unknown_account": "That account no longer exists.",
 
   "error.profile.unknown": "Could not create the profile.",
   "error.profile.duplicate_name": "A profile named “{name}” already exists.",

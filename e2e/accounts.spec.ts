@@ -93,7 +93,7 @@ test.describe("account management", () => {
     return dialog;
   };
 
-  test("shows the account's details, with skin and cape changes unavailable", async ({
+  test("shows the account's details, with the skin and cape controls ready", async ({
     page,
     openApp,
   }) => {
@@ -102,10 +102,9 @@ test.describe("account management", () => {
     await expect(dialog.getByText(text("accountModal.description"))).toBeVisible();
     await expect(dialog.getByText(BLAKE.uuid)).toBeVisible();
     await expect(dialog.getByText(text("accountModal.statusSignedIn"))).toBeVisible();
-    await expect(dialog.getByText(text("accountModal.skinUnavailable"))).toBeVisible();
     await expect(
       dialog.getByRole("button", { name: text("accountModal.choosePng") }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     // Initial focus never lands on the destructive control.
     await expect(
       dialog.getByRole("button", { name: text("accountModal.signOutRemove") }),

@@ -226,7 +226,7 @@ Sign-in follows the flow documented by Microsoft and the community Minecraft doc
 
 **Error codes.** The UI distinguishes `cancelled`, `timed_out`, `browser_unavailable`, `offline`, `oauth`, `needs_sign_in`, `no_xbox_account`, `xbox_region`, `adult_verification`, `child_account`, `xbox_banned`, `xsts`, `approval_required`, `no_java_profile`, `bad_response`, `vault_locked`, `storage` and `wrong_account`.
 
-**Skin and cape changes** are not built yet. When they are, they will use only Mojang's authenticated Minecraft services, so one profile looks the same in the game, the official launcher and account pages. There will be no launcher-local cosmetic overrides and no third-party skin services.
+**Skin and cape changes** go through Mojang's authenticated Minecraft services only (`profile_service.rs`, commands in `appearance_cmd.rs`), so one profile looks the same in the game, the official launcher and account pages. There are no launcher-local cosmetic overrides and no third-party skin services. The account dialog can upload a 64x64 or 64x32 PNG as the skin (Classic or Slim), restore the default skin, equip one of the capes the account owns and hide the cape; capes cannot be uploaded. Every call names one account, which must exist and be `Ready` (another account is never substituted), takes its Minecraft token from the vault through the normal refresh path, and sends it only to `api.minecraftservices.com`, never following a redirect and never retrying a change. The token stays in Rust: the frontend sends an account id, a model, PNG bytes or an owned cape id. The backend validates the PNG (size bound, signature, dimensions) and re-reads the profile to confirm the account owns a cape before equipping it; after a change the cached avatar is refreshed (best effort, a failed texture download never undoes an accepted change). Mojang publishes no formal specification for these endpoints, so they are kept behind the `ProfileService` trait. This is verified with test doubles only; it has not yet been exercised against a real account.
 
 ## 11. The encrypted credential vault
 
@@ -359,7 +359,7 @@ The runtime's redistribution terms, the unsigned executable, the lack of automat
 - The launcher is not fully hermetic: Java may touch the registry for its preferences, and mods can write wherever they choose.
 - A profile whose `instance.json` is damaged is left untouched and does not appear in the profile list; healthy profiles are unaffected. The reason is written to the log and to the diagnostics summary, but the interface has no warning surface for it yet.
 - "Verify files" can only check a Java runtime against a list that Mojang's manifest provides: the list recorded at install time, or the current manifest when it describes the same version. An older runtime whose version Mojang no longer lists is covered only by its `java.exe` hash.
-- Self-update and changing the skin or managing capes are not implemented yet (the account's current skin is only displayed).
+- Self-update is not implemented yet. Skin and cape changes are implemented but have not yet been exercised against a real account.
 
 ## 20. Settings, first-run introduction and diagnostics
 

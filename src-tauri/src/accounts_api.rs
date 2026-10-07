@@ -4,8 +4,8 @@
 //! or its playtime. The active account is one global convenience value (`accounts.json`).
 //! Metadata only; tokens live in the encrypted vault and never reach this module.
 //!
-//! Signing in lives in `auth.rs`; skin and cape changes are not implemented yet, and the
-//! capabilities say so.
+//! Signing in lives in `auth.rs`; skin and cape changes live in `appearance_cmd.rs` on top of
+//! `profile_service.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,8 @@ pub struct AccountsState {
     skins: Option<(SkinCache, Result<HttpFetcher, String>)>,
     /// A background round of skin downloads is running.
     syncing: AtomicBool,
+    /// A skin or cape change is being sent. Changes are sent one at a time and never repeated.
+    appearance_busy: AtomicBool,
 }
 
 impl AccountsState {
@@ -44,7 +46,13 @@ impl AccountsState {
             gate: Mutex::new(()),
             skins: None,
             syncing: AtomicBool::new(false),
+            appearance_busy: AtomicBool::new(false),
         }
+    }
+
+    /// Claims the right to send one skin or cape change; `None` while another one is running.
+    pub fn begin_appearance_change(&self) -> Option<AppearanceChange<'_>> {
+        (!self.appearance_busy.swap(true, Ordering::AcqRel)).then_some(AppearanceChange(self))
     }
 
     /// Enables account avatars: skins are cached in `cache` and fetched with `http` (the global
@@ -147,6 +155,15 @@ impl AccountsState {
     }
 }
 
+/// Held while a skin or cape change is in flight; dropping it frees the next one.
+pub struct AppearanceChange<'a>(&'a AccountsState);
+
+impl Drop for AppearanceChange<'_> {
+    fn drop(&mut self) {
+        self.0.appearance_busy.store(false, Ordering::Release);
+    }
+}
+
 /// What this build can do, so the UI never offers what would fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,10 +173,12 @@ pub struct Capabilities {
     pub cape: bool,
 }
 
+/// Skin and cape changes are real: `appearance_cmd.rs` talks to Minecraft services through
+/// `profile_service::MinecraftServices`.
 pub const CAPABILITIES: Capabilities = Capabilities {
     sign_in: true,
-    skin: false,
-    cape: false,
+    skin: true,
+    cape: true,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -468,7 +487,7 @@ mod tests {
         let (_d, p) = seeded();
         let json = serde_json::to_string(&list(&p).unwrap()).unwrap();
         assert!(json.contains("\"needsSignIn\":false"));
-        assert!(json.contains("\"capabilities\":{\"signIn\":true,\"skin\":false,\"cape\":false}"));
+        assert!(json.contains("\"capabilities\":{\"signIn\":true,\"skin\":true,\"cape\":true}"));
         assert!(!json.to_lowercase().contains("token"));
     }
 }

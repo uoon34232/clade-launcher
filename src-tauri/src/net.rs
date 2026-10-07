@@ -60,6 +60,8 @@ pub trait Fetcher: Send + Sync {
 pub enum Method {
     Get,
     Post,
+    Put,
+    Delete,
 }
 
 /// A request that may carry credentials. `Debug` is redacted: headers and bodies can hold tokens,
@@ -241,6 +243,8 @@ impl Transport for HttpFetcher {
             let mut builder = match request.method {
                 Method::Get => client.get(request.url.clone()),
                 Method::Post => client.post(request.url.clone()).body(request.body),
+                Method::Put => client.put(request.url.clone()).body(request.body),
+                Method::Delete => client.delete(request.url.clone()),
             };
             for (name, value) in &request.headers {
                 builder = builder.header(*name, value);

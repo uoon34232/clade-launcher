@@ -21,6 +21,12 @@ export interface FixtureAccount {
   skin: string | null;
 }
 
+/** What an account's (synthetic) Minecraft profile says about its look. */
+export interface FixtureAppearance {
+  skinModel: "classic" | "slim" | null;
+  capes: { id: string; alias: string | null; active: boolean }[];
+}
+
 export interface FixtureUiSettings {
   soundEnabled: boolean;
   soundVolume: number;
@@ -66,6 +72,8 @@ export interface BackendConfig {
   selected: string | null;
   accounts: FixtureAccount[];
   active: string | null;
+  /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
+  appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;
   catalog: FixtureCatalog;
   /** Loader offers by Minecraft version; a version not listed offers every loader. */
@@ -192,6 +200,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
   selected: "survival",
   accounts: [ALEX, BLAKE],
   active: ALEX.id,
+  appearance: {},
   ui: {
     soundEnabled: true,
     soundVolume: 0.5,

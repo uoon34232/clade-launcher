@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BASE_PHRASES, phraseText } from "@/features/launcher/phrases";
 import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
+import { appearanceStubs } from "@/lib/accounts/testAccounts";
 import { getLocale, resolveLocale, setLocale } from "@/lib/i18n";
 import { chooseLanguage } from "@/lib/i18n/language";
 import { BackendError } from "@/lib/ipc";
@@ -90,6 +91,7 @@ function apis(snapshot: ProfilesSnapshot, accounts: AccountsSnapshot = ACCOUNTS)
     list: vi.fn<AccountsApi["list"]>(() => Promise.resolve(accounts)),
     select: vi.fn<AccountsApi["select"]>(() => Promise.resolve(accounts)),
     remove: vi.fn<AccountsApi["remove"]>(() => Promise.resolve(accounts)),
+    ...appearanceStubs(),
     vaultStatus: vi.fn<AccountsApi["vaultStatus"]>(() =>
       Promise.resolve({ exists: false, unlocked: false }),
     ),
