@@ -33,7 +33,7 @@ of any kind, may be in the package.** The validator enforces that (section 6).
 | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | A pinned WebView2 Fixed Version: exact version, download URL, SHA-256 of the CAB, who accepted the redistribution terms | `scripts/release/webview2-runtime.json`                                                                     | **Pinned (154.0.4258.53). Approval fields empty: a person must record who accepted the terms.** |
 | A version that agrees everywhere, and a `## [X.Y.Z]` entry in `CHANGELOG.md`                                            | `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.lock`, `CHANGELOG.md` | Checked automatically                                                                           |
-| Mojang's approval of the Microsoft application ID, and a real-account launch verified by hand                           | external                                                                                                    | **Pending.** The README promises no public build before it.                                     |
+| Mojang's approval of the Microsoft application ID, and a real-account launch verified by hand                           | external                                                                                                    | **Done.** Approved; verified on a development PC.                                               |
 | A completed clean-machine validation (section 9)                                                                        | external                                                                                                    | Not done yet                                                                                    |
 
 ### The WebView2 pin
@@ -236,7 +236,7 @@ Checks:
 - [ ] A second start while Clade is running brings the first window forward.
 - [ ] Minimum window size 960×600 and the 100%, 125%, 150% and 200% display scalings, on 1080p, 1440p and 4K.
 - [ ] The log shows the bundled WebView2; the folder has no files outside what Clade created.
-- [ ] A real sign-in and launch with a Microsoft account (blocked until Mojang approves the application ID).
+- [ ] A real sign-in and launch with a Microsoft account, on the clean machine, from the release package.
 
 ## 10. Known limits
 

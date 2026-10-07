@@ -11,9 +11,11 @@ Related: [RELEASE.md](RELEASE.md) (how the ZIP is built), [`qa/windows-sandbox/`
 1. **Test on a clean machine.** Prefer Windows Sandbox (offline / online / online-gpu configurations) or a
    VM with a snapshot. Your daily PC has a system WebView2, maybe Java, a real `.minecraft` and real
    accounts, which weakens every "clean machine" claim.
-2. **Never use real credentials.** Real Microsoft/Xbox/Minecraft sign-in is BLOCKED until Mojang approves
-   the application ID; mark those rows `BLOCKED (AppID)`, never `PASS`. A development fixture identity only
-   proves the launch pipeline, not authentication.
+2. **Credentials are typed by a person, never scripted.** Real Microsoft sign-in works (Mojang approved the
+   application ID) and is tested by hand: the person enters the passphrase, the password and any MFA code
+   themselves; a script or an assistant never types, reads or captures them, and no screenshot is taken while a
+   sign-in page or its callback address is visible. A development fixture identity only proves the launch
+   pipeline, not authentication, and a fixture launch must be labelled as one.
 3. **Never change the host's display, GPU, resolution, DPI or driver as part of a test**, and never script
    native window resizing. Resize by dragging the window edge by hand. (An earlier automation bug that
    requested a 976x65535 window crashed the Desktop Window Manager and the GPU driver had to be reset by
@@ -90,7 +92,7 @@ row asks for one. Copy the table below into the test notes and fill the last col
 | B4 | Legacy Java 8 | `1.12.2` profile | Opens on `jre-legacy` | window screenshot; java path in the session log header | |
 | B5 | Fabric / B6 Forge / B7 NeoForge / B8 Quilt | One 1.21.x profile per loader | Prepare then start the JVM on the managed Java; Forge/NeoForge installers run inside the sandboxed staging | profile Ready; game starts; no change outside the root (audit) | |
 | B9 | Offline prepared launch | Prepared profile; network off (offline sandbox) | Launches without network (needs a launch-ready account state) | launch result; log has no network error | |
-| B10 | Real sign-in and launch | Real Microsoft account | **BLOCKED (AppID approval pending)** | not run | |
+| B10 | Real sign-in and launch | A Microsoft account that owns Minecraft, signed in by hand (see rule 2) | Sign-in completes, the account and its skin avatar appear, the account survives a restart without a new sign-in, and a prepared profile reaches the title screen | account card; `logs\clade.log` (no tokens); title-screen screenshot | |
 
 ### C. Settings, diagnostics, recovery
 
@@ -134,6 +136,15 @@ row asks for one. Copy the table below into the test notes and fill the last col
   reboot; do not try to repair the driver from test scripts.
 * Windows may write MuiCache / app-compat entries for every `Clade.exe` path it has seen; the audit lists
   them as INFO, they are not Clade's.
+* **Smart App Control blocks an unsigned `Clade.exe`.** Windows Sandbox runs it in enforcement mode, so an
+  unsigned development or release package fails to start there ("An Application Control policy has blocked
+  this file"; CodeIntegrity events 3033, 3077 and 3118). Do not disable Smart App Control, change the policy or
+  work around it from a test script. Run the tests that need a started Clade on a machine or VM whose Smart
+  App Control state allows it, and record the Sandbox rows as `BLOCKED (Smart App Control: unsigned build)`
+  until Clade is code-signed (not implemented yet). Smart App Control also checks the DLLs a game loads, which
+  signing Clade does not change.
+* Windows Sandbox runs one instance at a time: close the old window (its contents are discarded) before
+  starting another run, and copy results out first.
 * Antivirus or SmartScreen may block an unsigned `Clade.exe`; that is a documented limitation.
 
 ## 6. References

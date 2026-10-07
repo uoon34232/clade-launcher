@@ -55,6 +55,12 @@ accounts.json
 *.pem
 *.pfx
 *.p12
+# signing material (never commit a private key, a key store or a certificate with its key)
+*.key
+*.pvk
+*.snk
+*.jks
+*.keystore
 
 # ---- Release artefacts
 *.zip

@@ -337,7 +337,20 @@ describe("the runbook", () => {
     ])
       expect(doc, row).toContain(row);
   });
-  it("marks the authenticated launch as blocked, not passing", () => {
-    expect(doc).toMatch(/BLOCKED \(AppID/);
+  it("keeps real sign-in a manual row whose credentials are never scripted", () => {
+    expect(doc).toMatch(/B10 \| Real sign-in and launch/);
+    expect(doc).toMatch(/typed by a person, never scripted/);
+    expect(doc).not.toMatch(/BLOCKED \(AppID/);
+  });
+  it("records that Smart App Control blocks an unsigned Clade.exe and must not be bypassed", () => {
+    expect(doc).toMatch(/Smart App Control blocks an unsigned `Clade\.exe`/);
+    expect(doc).toMatch(/Do not disable Smart App Control/);
+    expect(doc).toMatch(/code-signed \(not implemented yet\)/);
+  });
+  it("keeps the display, GPU and window-geometry safety rules and the one-Sandbox rule", () => {
+    expect(doc).toMatch(/Never change the host's display, GPU, resolution, DPI or driver/);
+    expect(doc).toMatch(/976x65535/);
+    expect(doc).toMatch(/no window-geometry helper/);
+    expect(doc).toMatch(/one instance at a time/);
   });
 });
