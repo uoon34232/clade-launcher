@@ -15,19 +15,20 @@
 //! launcher folder.
 //!
 //! Defence in depth, in the order it is applied:
-//! 1. [`StageSession`]: a fresh staging tree `cache/loader-install/<id>/{mc,home,tmp}` with the
-//!    stub `launcher_profiles.json` installers insist on. The installer's target is `mc/`.
+//! 1. [`StageSession`]: a fresh staging tree `cache/loader-install/<id>/{home,tmp}` whose
+//!    stand-in `AppData\Roaming\.minecraft` holds the stub `launcher_profiles.json` installers
+//!    insist on, unifying `--installClient` and `%APPDATA%` onto one stage-local directory.
 //! 2. [`build_installer_command`]: scrubbed env + JVM flags + a target inside the stage; refuses
 //!    Fabric/Quilt (they need no process at all) and never passes `--mirror`.
 //! 3. [`verify_command`]: re-checks the finished command (program, working directory, every
 //!    argument and environment value that looks like a path) and fails closed on anything
 //!    outside the launcher root, except the read-only Windows system directory.
-//! 4. [`Tripwire`]: snapshots the real global `.minecraft` locations before the run and fails
-//!    loudly if any of them changed (it cannot undo a write, but it makes a leak impossible to miss).
+//! 4. [`Tripwire`]: snapshots `versions/` and `launcher_profiles.json` in the real global
+//!    Minecraft locations before the run and fails loudly if any of them changed.
 //! 5. [`merge_stage_into_shared`]: only `libraries/` and `versions/` are taken from the stage,
-//!    into the shared immutable stores, with strict path validation and a refusal to overwrite
-//!    existing files with different content. Everything else the installer produced is discarded
-//!    with the stage.
+//!    into the shared immutable stores, with strict path validation and quarantine-before-replace
+//!    if an existing destination file was damaged. Everything else the installer produced is
+//!    discarded with the stage.
 //!
 //! Fabric and Quilt run no installer: [`library_relpath`] derives where each library from the
 //! (untrusted) version profile goes under `libraries/`, safely.
@@ -101,12 +102,12 @@ pub fn is_inside(base: &Path, p: &Path) -> bool {
     }
 }
 
-/// Does this string look like an absolute filesystem path (Windows drive/UNC, or POSIX)?
+/// Does this string look like an absolute, drive-qualified, or root-relative filesystem path?
 fn looks_absolute(s: &str) -> bool {
     let b = s.as_bytes();
-    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
-        || s.starts_with("\\\\")
-        || (s.starts_with('/') && s.len() > 1)
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        || s.starts_with('\\')
+        || s.starts_with('/')
 }
 
 /// Pulls a path out of `-Dkey=value`, `--flag=value`, or a bare value.
@@ -143,7 +144,11 @@ pub struct StageSession {
 impl StageSession {
     pub fn create(root: &PortableRoot) -> Result<Self, InstallError> {
         let parent = root.cache_dir().join(STAGE_PARENT);
+        crate::portable::fsutil::reject_links_between(root.path(), &parent)
+            .map_err(|e| violation(e.to_string()))?;
         fs::create_dir_all(&parent)?;
+        crate::portable::fsutil::reject_links_between(root.path(), &parent)
+            .map_err(|e| violation(e.to_string()))?;
         let mut nonce = [0u8; 6];
         getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
         let base = parent.join(hex::encode(nonce));
@@ -168,9 +173,10 @@ impl StageSession {
     pub fn base(&self) -> &Path {
         &self.base
     }
-    /// The installer's target ("the .minecraft"): stage-local, never the global one.
+    /// The installer's target: stage-local under `%APPDATA%`, never the host's folder.
     pub fn minecraft_dir(&self) -> PathBuf {
-        self.base.join("mc")
+        // portability-allow: stage-local stand-in under cache/loader-install, never the host's .minecraft
+        self.appdata_dir().join(".minecraft")
     }
     /// Stands in for the user profile (`USERPROFILE`, `HOME`, `user.home`).
     pub fn home_dir(&self) -> PathBuf {
@@ -207,16 +213,25 @@ impl StageSession {
         Ok(())
     }
 
+    pub(crate) fn cleanup_dir(&self) -> io::Result<()> {
+        crate::portable::fsutil::remove_dir_all_with_retry(&self.base)
+    }
+
     pub fn cleanup(self) -> io::Result<()> {
-        fs::remove_dir_all(&self.base)
+        self.cleanup_dir()
     }
 }
 
 /// Removes staging trees left behind by a crash. Safe to call at every start.
 pub fn sweep_stale(root: &PortableRoot) -> io::Result<usize> {
     let parent = root.cache_dir().join(STAGE_PARENT);
-    let Ok(rd) = fs::read_dir(&parent) else {
-        return Ok(0);
+    if parent.exists() || is_link(&parent).unwrap_or(false) {
+        crate::portable::fsutil::reject_links_between(root.path(), &parent)?;
+    }
+    let rd = match fs::read_dir(&parent) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     };
     let mut n = 0;
     for e in rd.flatten() {
@@ -224,9 +239,23 @@ pub fn sweep_stale(root: &PortableRoot) -> io::Result<usize> {
         if is_link(&p).unwrap_or(true) {
             continue; // never follow or delete through a link
         }
-        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            fs::remove_dir_all(&p)?;
-            n += 1;
+        let Ok(ft) = e.file_type() else {
+            continue;
+        };
+        let res = if ft.is_dir() {
+            crate::portable::fsutil::remove_dir_all_with_retry(&p)
+        } else {
+            crate::portable::fsutil::remove_file_with_retry(&p)
+        };
+        match res {
+            Ok(()) => n += 1,
+            Err(err) => {
+                tracing::warn!(
+                    entry = ?e.file_name(),
+                    error = %err,
+                    "could not remove stale loader staging entry"
+                );
+            }
         }
     }
     Ok(n)
@@ -301,8 +330,15 @@ pub fn build_installer_command(
     let home = path_str(&session.home_dir())?;
     let target = path_str(&session.minecraft_dir())?;
     let sys_root = path_str(&sys.system_root)?;
+    let flags = client_install_flags(kind, &target)?;
+    let program =
+        crate::runtimes::resolve_cli_java_exe(root, java).map_err(|e| violation(e.to_string()))?;
 
     let mut args = vec![
+        "-Xms128M".to_owned(),
+        "-Xmx768M".to_owned(),
+        "-XX:+UseSerialGC".to_owned(),
+        "-XX:TieredStopAtLevel=1".to_owned(),
         format!("-Djava.io.tmpdir={tmp}"),
         format!("-Duser.home={home}"),
         "-Dfile.encoding=UTF-8".to_owned(),
@@ -310,7 +346,7 @@ pub fn build_installer_command(
         "-jar".to_owned(),
         path_str(installer_jar)?,
     ];
-    args.extend(client_install_flags(kind, &target)?);
+    args.extend(flags);
 
     let mut env = BTreeMap::new();
     for (k, v) in [
@@ -329,7 +365,7 @@ pub fn build_installer_command(
     }
 
     let cmd = InstallerCommand {
-        program: java.exe.clone(),
+        program,
         args,
         cwd: session.base().to_path_buf(),
         env,
@@ -369,7 +405,7 @@ pub fn verify_command(
                 "argument points outside the launcher folder: {a}"
             )));
         }
-        if a.contains("..") && candidate.contains(['/', '\\']) {
+        if candidate == ".." || (a.contains("..") && candidate.contains(['/', '\\'])) {
             return Err(violation(format!(
                 "argument contains a parent-directory reference: {a}"
             )));
@@ -457,7 +493,7 @@ struct Snapshot {
 
 fn snapshot(path: &Path) -> Snapshot {
     let mut snap = Snapshot {
-        exists: path.exists(),
+        exists: fs::symlink_metadata(path).is_ok(),
         entries: 0,
         total_len: 0,
         newest: None,
@@ -487,7 +523,7 @@ fn snapshot(path: &Path) -> Snapshot {
     snap
 }
 
-/// Watches directories the launcher must never write to.
+/// Watches directories and files the launcher must never write to.
 #[derive(Debug)]
 pub struct Tripwire {
     watched: Vec<(PathBuf, Snapshot)>,
@@ -500,14 +536,17 @@ impl Tripwire {
         }
     }
 
-    /// The real global Minecraft directories on this PC. This is the only place the launcher
-    /// reads machine-specific locations, and it only *observes* them.
+    /// The real global Minecraft version stores and launcher profile manifests on this PC.
+    /// Scoped so background game writes to `logs/` or `saves/` in a global folder never
+    /// false-trip an installation and snapshots stay fast.
     pub fn global_minecraft_dirs() -> Vec<PathBuf> {
         let mut v = Vec::new();
-        // portability-allow: read-only tripwire; these paths are never written, stored or used
         for var in ["APPDATA", "USERPROFILE"] {
+            // portability-allow: read-only tripwire; these paths are never written, stored or used
             if let Some(base) = std::env::var_os(var) {
-                v.push(PathBuf::from(base).join(".minecraft"));
+                let mc = PathBuf::from(base).join(".minecraft");
+                v.push(mc.join("versions"));
+                v.push(mc.join("launcher_profiles.json"));
             }
         }
         v
@@ -548,6 +587,7 @@ struct Planned {
     src: PathBuf,
     dst: PathBuf,
     present: bool,
+    replace_corrupt: bool,
 }
 
 fn walk_files(
@@ -591,7 +631,9 @@ fn walk_files(
 }
 
 /// Moves `libraries/` and `versions/` from the stage into the shared stores. Two passes: all
-/// paths and conflicts are validated first, so a bad installer result changes nothing.
+/// paths and destinations are validated first, so a bad installer result changes nothing; any
+/// pre-existing damaged destination file whose hash differs is quarantined aside (`.corrupt*`)
+/// before moving the verified staged file into place.
 pub fn merge_stage_into_shared(
     session: &StageSession,
     root: &PortableRoot,
@@ -607,6 +649,7 @@ pub fn merge_stage_into_shared(
             dst: rel.to_path(&root.libraries_dir()),
             src,
             present: false,
+            replace_corrupt: false,
         });
     }
 
@@ -623,24 +666,44 @@ pub fn merge_stage_into_shared(
             dst: rel.to_path(&shared_versions),
             src,
             present: false,
+            replace_corrupt: false,
         });
     }
 
-    // Pass 1: nothing may be overwritten with different bytes, and no destination may sit behind a link.
+    // Pass 1: validate every destination before moving anything. No destination may sit behind a
+    // link or collide with a directory; identical files are reused, while damaged files with
+    // differing bytes are scheduled for quarantine-and-replace.
     for p in &mut plan {
         crate::portable::fsutil::reject_links_between(root.path(), &p.dst)
             .map_err(|e| violation(e.to_string()))?;
-        if p.dst.exists() {
-            if sha256_hex(&p.src)? != sha256_hex(&p.dst)? {
-                return Err(InstallError::Conflict(p.dst.display().to_string()));
+        match fs::symlink_metadata(&p.dst) {
+            Ok(md) => {
+                if is_link(&p.dst)? {
+                    return Err(violation(format!(
+                        "destination is a link: {}",
+                        p.dst.display()
+                    )));
+                }
+                if md.is_dir() {
+                    return Err(violation(format!(
+                        "destination is a directory: {}",
+                        p.dst.display()
+                    )));
+                }
+                if sha256_hex(&p.src)? == sha256_hex(&p.dst)? {
+                    p.present = true;
+                } else {
+                    p.replace_corrupt = true;
+                }
             }
-            p.present = true;
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
     }
 
-    // Pass 2: move into place (same volume: both are inside the root).
+    // Pass 2: quarantine any damaged copy, then move into place (same volume: both are inside root).
     let mut report = MergeReport {
-        new_versions: new_versions.into_iter().collect(),
+        new_versions,
         ..Default::default()
     };
     for p in plan {
@@ -651,8 +714,23 @@ pub fn merge_stage_into_shared(
         if let Some(parent) = p.dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        if fs::rename(&p.src, &p.dst).is_err() {
-            fs::copy(&p.src, &p.dst)?;
+        if p.replace_corrupt {
+            crate::portable::fsutil::quarantine_corrupt(&p.dst)?;
+        }
+        if crate::portable::fsutil::rename_with_retry(&p.src, &p.dst).is_err() {
+            let mut nonce = [0u8; 6];
+            getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+            let mut tmp_name = p.dst.file_name().unwrap_or_default().to_os_string();
+            tmp_name.push(format!(".{}.tmp", hex::encode(nonce)));
+            let tmp = p.dst.with_file_name(tmp_name);
+            let copy_res = (|| -> io::Result<()> {
+                fs::copy(&p.src, &tmp)?;
+                crate::portable::fsutil::rename_with_retry(&tmp, &p.dst)
+            })();
+            if let Err(e) = copy_res {
+                let _ = crate::portable::fsutil::remove_file_with_retry(&tmp);
+                return Err(e.into());
+            }
         }
         if p.dst.starts_with(root.libraries_dir()) {
             report.libraries_added += 1;
@@ -766,6 +844,11 @@ mod tests {
                 p.display()
             );
         }
+        assert_eq!(
+            s.minecraft_dir(),
+            s.appdata_dir().join(".minecraft"),
+            "stage target and APPDATA/.minecraft are unified"
+        );
         assert!(s.minecraft_dir().join("launcher_profiles.json").is_file());
         // Two sessions never share a directory.
         assert_ne!(StageSession::create(&root).unwrap().base(), s.base());
@@ -780,6 +863,20 @@ mod tests {
                 is_inside(&root.java_runtimes_dir(), &cmd.program),
                 "always the launcher-managed Java"
             );
+            let jar_pos = cmd.args.iter().position(|a| a == "-jar").unwrap();
+            for flag in [
+                "-Xms128M",
+                "-Xmx768M",
+                "-XX:+UseSerialGC",
+                "-XX:TieredStopAtLevel=1",
+            ] {
+                let pos = cmd
+                    .args
+                    .iter()
+                    .position(|a| a == flag)
+                    .unwrap_or_else(|| panic!("missing {flag}"));
+                assert!(pos < jar_pos, "{flag} must precede -jar");
+            }
             assert!(cmd
                 .args
                 .contains(&format!("-Djava.io.tmpdir={}", session.tmp_dir().display())));
@@ -790,6 +887,11 @@ mod tests {
             assert_eq!(
                 cmd.args.last().unwrap(),
                 &session.minecraft_dir().display().to_string()
+            );
+            assert_eq!(
+                Path::new(&cmd.env["APPDATA"]).join(".minecraft"),
+                session.minecraft_dir(),
+                "processors reading %APPDATA%\\.minecraft hit the exact same stage folder"
             );
             assert!(cmd.args.iter().any(|a| a == "--installClient"));
             assert!(!cmd.args.iter().any(|a| a.contains("--mirror")));
@@ -872,15 +974,28 @@ mod tests {
                 "{k}"
             );
         }
-        // Targets outside the root, parent-directory tricks, mirrors, wrong working directory.
+        // Targets outside the root, drive-relative / root-relative tricks, parent-directory tricks, mirrors, wrong working directory.
         assert!(mutate(&|c| *c.args.last_mut().unwrap() =
             r"C:\Users\someone\AppData\Roaming\.minecraft".into()));
         assert!(mutate(&|c| c.args.push(r"-Dsome.dir=D:\elsewhere".into())));
+        assert!(mutate(&|c| c.args.push("D:outside".into())));
+        assert!(mutate(&|c| c.args.push("D:".into())));
+        assert!(mutate(&|c| c.args.push("C:outside".into())));
+        assert!(mutate(&|c| c.args.push("-Dsome.dir=D:outside".into())));
+        assert!(mutate(&|c| c.args.push(r"\Users\x".into())));
+        assert!(mutate(&|c| c.args.push("/".into())));
+        assert!(mutate(&|c| {
+            c.env.insert("TEMP".into(), "D:outside".into());
+        }));
+        assert!(mutate(&|c| {
+            c.env.insert("TEMP".into(), r"\Temp".into());
+        }));
         assert!(mutate(&|c| c
             .args
             .push("--mirror=https://example.org/".into())));
         assert!(mutate(&|c| c.args.push("--mirror".into())));
         assert!(mutate(&|c| c.args.push("../../escape".into())));
+        assert!(mutate(&|c| c.args.push("..".into())));
         assert!(mutate(&|c| c.cwd = root.path().to_path_buf()));
         assert!(mutate(&|c| c.cwd = PathBuf::from(r"C:\Windows\System32")));
         // Dropping a redirection is also a failure.
@@ -1043,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_is_idempotent_and_never_overwrites_different_content() {
+    fn merge_is_idempotent_and_quarantines_corrupt_destinations_without_data_loss() {
         let (_d, root, _j, _s) = setup();
         merge_stage_into_shared(&stage_with_outputs(&root), &root).unwrap();
         // Same content again: fine, nothing changes.
@@ -1057,18 +1172,34 @@ mod tests {
             (0, 2, 0)
         );
 
-        // A different file at an existing path is a conflict, and nothing else is moved.
-        let s = stage_with_outputs(&root);
-        fs::write(
-            s.minecraft_dir()
-                .join("libraries/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14.jar"),
-            b"TAMPERED",
-        )
-        .unwrap();
+        // A damaged file at an existing destination is quarantined to `.corrupt` and replaced cleanly.
+        let shared_jar = root
+            .libraries_dir()
+            .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14.jar");
+        fs::write(&shared_jar, b"CORRUPTED-ON-DISK").unwrap();
+        let repaired = merge_stage_into_shared(&stage_with_outputs(&root), &root).unwrap();
+        assert_eq!(repaired.libraries_added, 1);
+        assert_eq!(repaired.files_already_present, 1);
+        assert_eq!(fs::read(&shared_jar).unwrap(), b"forge-jar");
+        let backup = root
+            .libraries_dir()
+            .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14.jar.corrupt");
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            b"CORRUPTED-ON-DISK",
+            "damaged bytes are quarantined, never silently deleted"
+        );
+
+        // A directory colliding with a file destination fails closed in Pass 1 before anything moves.
+        let collision = root.libraries_dir().join("dir-collision.jar");
+        fs::create_dir_all(&collision).unwrap();
+        let s = StageSession::create(&root).unwrap();
+        fs::create_dir_all(s.minecraft_dir().join("libraries")).unwrap();
+        fs::write(s.minecraft_dir().join("libraries/dir-collision.jar"), b"x").unwrap();
         fs::write(s.minecraft_dir().join("libraries/extra.jar"), b"extra").unwrap();
         assert!(matches!(
             merge_stage_into_shared(&s, &root),
-            Err(InstallError::Conflict(_))
+            Err(InstallError::Violation(_))
         ));
         assert!(
             !root.libraries_dir().join("extra.jar").exists(),
@@ -1183,5 +1314,101 @@ mod tests {
         ] {
             assert!(DIRS.contains(&needed), "{needed}");
         }
+    }
+
+    #[test]
+    fn build_installer_command_prefers_verified_console_java_over_javaw() {
+        use sha2::{Digest, Sha256};
+
+        let (_d, root, _j, sys) = setup();
+        let id = "java-runtime-delta--21.0.7--windows-x64";
+        let home = root.java_runtimes_dir().join(id);
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let javaw_bytes = b"MZ gui javaw";
+        let java_cli_bytes = b"MZ cli java";
+        fs::write(home.join("bin").join("javaw.exe"), javaw_bytes).unwrap();
+        fs::write(home.join("bin").join("java.exe"), java_cli_bytes).unwrap();
+        crate::runtimes::write_manifest(
+            &root,
+            &crate::runtimes::RuntimeManifest {
+                schema: 1,
+                id: id.into(),
+                vendor: "mojang".into(),
+                java_major: 21,
+                arch: "x64".into(),
+                java_exe: RelPath::new("bin/javaw.exe").unwrap(),
+                java_exe_sha256: hex::encode(Sha256::digest(javaw_bytes)),
+                java_cli_exe: Some(RelPath::new("bin/java.exe").unwrap()),
+                java_cli_exe_sha256: Some(hex::encode(Sha256::digest(java_cli_bytes))),
+            },
+        )
+        .unwrap();
+        let managed = crate::runtimes::resolve_java(&root, id).unwrap();
+        assert!(managed.exe.ends_with("javaw.exe"));
+
+        let (_session, cmd) = build(&root, &managed, &sys, LoaderKind::Forge);
+        assert_eq!(cmd.program, home.join("bin").join("java.exe"));
+    }
+
+    #[test]
+    fn tripwire_scopes_global_checks_to_versions_and_launcher_profiles() {
+        let global = Tripwire::global_minecraft_dirs();
+        for p in &global {
+            let name = p.file_name().unwrap().to_string_lossy();
+            assert!(
+                name == "versions" || name == "launcher_profiles.json",
+                "unexpected global tripwire target: {}",
+                p.display()
+            );
+        }
+
+        // Simulate a global .minecraft where a background game writes to logs/ and saves/.
+        let d = tempfile::tempdir().unwrap();
+        let fake_mc = d.path().join(".minecraft");
+        fs::create_dir_all(fake_mc.join("versions/1.21.4")).unwrap();
+        fs::create_dir_all(fake_mc.join("logs")).unwrap();
+        fs::create_dir_all(fake_mc.join("saves/World")).unwrap();
+        fs::write(fake_mc.join("launcher_profiles.json"), b"{}").unwrap();
+        let scoped = [
+            fake_mc.join("versions"),
+            fake_mc.join("launcher_profiles.json"),
+        ];
+        let trip = Tripwire::arm(&scoped);
+        fs::write(fake_mc.join("logs/latest.log"), b"[INFO] background game").unwrap();
+        fs::write(fake_mc.join("saves/World/level.dat"), b"save").unwrap();
+        assert!(
+            trip.check().is_ok(),
+            "background writes to logs/ or saves/ must not false-trip"
+        );
+
+        fs::write(fake_mc.join("launcher_profiles.json"), b"{\"p\":1}").unwrap();
+        assert!(trip.check().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sweep_stale_continues_past_a_locked_session_and_cleans_siblings() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_d, root, _j, _s) = setup();
+        let locked = StageSession::create(&root).unwrap();
+        let unlocked = StageSession::create(&root).unwrap();
+        let locked_file = locked.tmp_dir().join("held.jar");
+        let guard = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .share_mode(0) // exclusive lock: cannot be deleted while open
+            .open(&locked_file)
+            .unwrap();
+
+        let removed = sweep_stale(&root).unwrap();
+        assert_eq!(removed, 1, "healthy sibling session was still swept");
+        assert!(!unlocked.base().exists());
+        assert!(locked.base().exists());
+
+        drop(guard);
+        assert_eq!(sweep_stale(&root).unwrap(), 1);
+        assert!(!locked.base().exists());
     }
 }

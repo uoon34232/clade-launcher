@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::loaders::{self, LoaderKind, OfferedVersion};
 use crate::mc_catalog::Origin;
 use crate::net::Fetcher;
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, read_bounded, remove_file_with_retry};
 use crate::versions::{LoaderVersion, McVersion};
 
 const SCHEMA: u32 = 1;
@@ -83,18 +83,14 @@ fn cache_name(kind: LoaderKind, mc: &McVersion) -> String {
 }
 
 fn read_cache(path: &Path) -> Option<CachedOffers> {
-    if fs::metadata(path).ok()?.len() > MAX_CACHE_BYTES {
-        return None;
-    }
-    let c: CachedOffers = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let bytes = read_bounded(path, MAX_CACHE_BYTES).ok()?;
+    let c: CachedOffers = serde_json::from_slice(&bytes).ok()?;
     (c.schema == SCHEMA).then_some(c)
 }
 
 fn read_raw(path: &Path) -> Option<CachedRaw> {
-    if fs::metadata(path).ok()?.len() > MAX_CACHE_BYTES {
-        return None;
-    }
-    let c: CachedRaw = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let bytes = read_bounded(path, MAX_CACHE_BYTES).ok()?;
+    let c: CachedRaw = serde_json::from_slice(&bytes).ok()?;
     (c.schema == SCHEMA).then_some(c)
 }
 
@@ -108,7 +104,7 @@ fn prune(dir: &Path, prefix: &str, keep: usize) {
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.0));
     for (_, p) in files.into_iter().skip(keep) {
-        let _ = fs::remove_file(p);
+        let _ = remove_file_with_retry(&p);
     }
 }
 
@@ -148,31 +144,43 @@ pub async fn options_for<F: Fetcher>(
             Ok(body) => match loaders::parse_catalog(kind, mc, &body) {
                 Ok(offers) => {
                     // Validated: now (and only now) save. Saving never fails the request.
-                    if is_global(kind) {
-                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
-                            if let Ok(bytes) = serde_json::to_vec(&CachedRaw {
-                                schema: SCHEMA,
-                                fetched_at: now,
-                                body: value,
-                            }) {
-                                let _ = atomic_write(&path, &bytes);
+                    let serialized = if is_global(kind) {
+                        serde_json::from_slice::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|value| {
+                                serde_json::to_vec(&CachedRaw {
+                                    schema: SCHEMA,
+                                    fetched_at: now,
+                                    body: value,
+                                })
+                                .ok()
+                            })
+                    } else {
+                        serde_json::to_vec(&CachedOffers {
+                            schema: SCHEMA,
+                            fetched_at: now,
+                            offers: offers.clone(),
+                        })
+                        .ok()
+                    };
+                    if let Some(bytes) = serialized {
+                        let write_path = path.clone();
+                        let prune_dir = cache_dir.to_path_buf();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = atomic_write(&write_path, &bytes);
+                            if !is_global(kind) {
+                                prune(
+                                    &prune_dir,
+                                    if kind == LoaderKind::Fabric {
+                                        "loader-fabric--"
+                                    } else {
+                                        "loader-quilt--"
+                                    },
+                                    KEEP_PER_MC_FILES,
+                                );
                             }
-                        }
-                    } else if let Ok(bytes) = serde_json::to_vec(&CachedOffers {
-                        schema: SCHEMA,
-                        fetched_at: now,
-                        offers: offers.clone(),
-                    }) {
-                        let _ = atomic_write(&path, &bytes);
-                        prune(
-                            cache_dir,
-                            if kind == LoaderKind::Fabric {
-                                "loader-fabric--"
-                            } else {
-                                "loader-quilt--"
-                            },
-                            KEEP_PER_MC_FILES,
-                        );
+                        })
+                        .await;
                     }
                     return build(kind, offers, Origin::Network, None);
                 }
@@ -182,14 +190,20 @@ pub async fn options_for<F: Fetcher>(
         },
     };
 
-    let saved: Option<Vec<OfferedVersion>> = if is_global(kind) {
-        // Filter the saved catalog for THIS Minecraft version, exactly as a live answer would be.
-        read_raw(&path)
-            .and_then(|c| serde_json::to_vec(&c.body).ok())
-            .and_then(|bytes| loaders::parse_catalog(kind, mc, &bytes).ok())
-    } else {
-        read_cache(&path).map(|c| c.offers)
-    };
+    let mc_clone = mc.clone();
+    let saved: Option<Vec<OfferedVersion>> = tokio::task::spawn_blocking(move || {
+        if is_global(kind) {
+            // Filter the saved catalog for THIS Minecraft version, exactly as a live answer would be.
+            read_raw(&path)
+                .and_then(|c| serde_json::to_vec(&c.body).ok())
+                .and_then(|bytes| loaders::parse_catalog(kind, &mc_clone, &bytes).ok())
+        } else {
+            read_cache(&path).map(|c| c.offers)
+        }
+    })
+    .await
+    .ok()
+    .flatten();
     match saved {
         Some(offers) => build(kind, offers, Origin::CacheStale, Some(failure)),
         None => LoaderOptions {
@@ -500,5 +514,27 @@ mod tests {
             Status::Ok,
             "the URL is percent-encoded, not rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_cache_files_are_rejected_without_reading_past_the_limit() {
+        let (_d, cache) = dir();
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join("loader-fabric--1.21.4.json"),
+            vec![b' '; (MAX_CACHE_BYTES as usize) + 16],
+        )
+        .unwrap();
+        fs::write(
+            cache.join("loader-forge.json"),
+            vec![b' '; (MAX_CACHE_BYTES as usize) + 16],
+        )
+        .unwrap();
+        let f = FakeFetcher::new();
+        f.fail_all();
+        let fab = options_for(&f, &cache, LoaderKind::Fabric, &mc("1.21.4"), 1).await;
+        let frg = options_for(&f, &cache, LoaderKind::Forge, &mc("1.21.4"), 1).await;
+        assert_eq!(fab.status, Status::Unavailable);
+        assert_eq!(frg.status, Status::Unavailable);
     }
 }

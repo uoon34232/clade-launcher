@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::accounts::AccountsFile;
 use crate::accounts_api::AccountsState;
@@ -22,8 +22,8 @@ use crate::instances::{InstanceError, InstanceId, InstanceStore};
 use crate::loader_install::SystemEnv;
 use crate::loader_prepare::ProcessRunner;
 use crate::net::HttpFetcher;
-use crate::portable::PortableRoot;
-use crate::prepare::{prepare_instance, Ctx, PrepareError, Tracker};
+use crate::portable::{fsutil, PortableRoot};
+use crate::prepare::{prepare_instance, Ctx, PrepareError, PrepareProgress, Tracker};
 use crate::profile_lock::{Activity, ProfileLocks};
 use crate::profiles::{now_unix, snapshot, ProfilesDto};
 use crate::ui_settings::SettingsState;
@@ -120,23 +120,40 @@ impl From<&PrepareError> for PrepareFailure {
     }
 }
 
-/// Clears scratch space a crashed run may have left (`cache/tmp`). Verified files and `.part`
-/// files are kept on purpose: they are what makes the next attempt resume.
+/// Clears preparation scratch space a crashed run may have left (`cache/tmp/prepare`). Verified
+/// files, `.part` files, and `cache/tmp/game` (isolated for running games) are kept untouched.
 pub fn sweep_scratch(root: &PortableRoot) -> std::io::Result<usize> {
-    let mut removed = 0;
-    let Ok(rd) = std::fs::read_dir(root.tmp_dir()) else {
-        return Ok(0);
+    let tmp = root.prepare_tmp_dir();
+    fsutil::reject_links_between(root.path(), &tmp)?;
+    let rd = match std::fs::read_dir(&tmp) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     };
+    let mut removed = 0;
     for e in rd.flatten() {
         let p = e.path();
+        if fsutil::is_link(&p).unwrap_or(true) {
+            continue;
+        }
         let ok = if e.file_type().is_ok_and(|t| t.is_dir()) {
-            std::fs::remove_dir_all(&p).is_ok()
+            fsutil::remove_dir_all_with_retry(&p).is_ok()
         } else {
-            std::fs::remove_file(&p).is_ok()
+            fsutil::remove_file_with_retry(&p).is_ok()
         };
         removed += usize::from(ok);
     }
     Ok(removed)
+}
+
+/// Suppresses identical consecutive `PrepareProgress` ticks so an idle 150ms ticker (for example
+/// while waiting on a sandboxed loader installer) does not flood IPC with duplicate payloads.
+fn should_emit(last: &mut Option<PrepareProgress>, next: &PrepareProgress) -> bool {
+    if last.as_ref() == Some(next) {
+        return false;
+    }
+    *last = Some(next.clone());
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,14 +217,22 @@ pub async fn prepare_profile(
     app: AppHandle,
     state: State<'_, PrepareState>,
     settings: State<'_, SettingsState>,
-    accounts: State<'_, AccountsState>,
     id: String,
     verify: Option<bool>,
 ) -> Result<ProfilesDto, PrepareFailure> {
     let instance =
         InstanceId::new(&id).map_err(|_| PrepareFailure::from(&PrepareError::NotFound))?;
     // Not a failed preparation: nothing is claimed, nothing is fetched, no failure is remembered.
-    require_ready_account(&accounts).map_err(|e| PrepareFailure::from(&e))?;
+    {
+        let gate_app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            let accounts = gate_app.state::<AccountsState>();
+            require_ready_account(&accounts)
+        })
+        .await
+        .map_err(|e| PrepareFailure::from(&PrepareError::Storage(e.to_string())))?
+        .map_err(|e| PrepareFailure::from(&e))?;
+    }
     let cancel = Cancel::new();
     if let Err(refused) = state.begin(&instance, &cancel) {
         return Err((&refused).into());
@@ -225,8 +250,14 @@ pub async fn prepare_profile(
     )
     .await;
     match outcome {
-        Ok(()) => snapshot(&state.root, settings.last_instance())
-            .map_err(|e| PrepareFailure::from(&PrepareError::Storage(e.to_string()))),
+        Ok(()) => {
+            let root = state.root.clone();
+            let selected = settings.last_instance();
+            tokio::task::spawn_blocking(move || snapshot(&root, selected))
+                .await
+                .map_err(|e| PrepareFailure::from(&PrepareError::Storage(e.to_string())))?
+                .map_err(|e| PrepareFailure::from(&PrepareError::Storage(e.to_string())))
+        }
         Err(e) => {
             let failure = PrepareFailure::from(&e);
             tracing::info!(code = e.code(), "profile preparation did not complete");
@@ -247,11 +278,18 @@ async fn run(
     verify: bool,
 ) -> Result<(), PrepareError> {
     let sink_app = app.clone();
+    let last_emitted: Mutex<Option<PrepareProgress>> = Mutex::new(None);
     let tracker = Arc::new(Tracker::new(
         id,
         Progress::new(),
         Box::new(move |p| {
-            let _ = sink_app.emit(PROGRESS_EVENT, p);
+            let emit_now = {
+                let mut prev = lock(&last_emitted);
+                should_emit(&mut prev, &p)
+            };
+            if emit_now {
+                let _ = sink_app.emit(PROGRESS_EVENT, p);
+            }
         }),
     ));
     let stop = Arc::new(AtomicBool::new(false));
@@ -332,23 +370,25 @@ pub(crate) fn remove_from_clade(state: &PrepareState, id: &str) -> Result<(), Co
 }
 
 /// "Remove from Clade": the profile leaves the list and its folder moves, whole, to
-/// `instances/.removed/`. Nothing is deleted. Returns the new list with a sane selection.
+/// `instances/.removed/`. Nothing is erased. Returns the new list with a sane selection.
 #[tauri::command]
-pub fn remove_profile(
-    state: State<'_, PrepareState>,
-    settings: State<'_, SettingsState>,
-    id: String,
-) -> Result<ProfilesDto, CodedError> {
-    remove_from_clade(&state, &id)?;
-    let selected = settings.last_instance().filter(|s| s.as_str() != id);
-    let dto = snapshot(&state.root, selected).map_err(CodedError::storage)?;
-    // Remember the selection that is shown now (the next profile, or none after the last one).
-    let shown = dto
-        .selected
-        .as_deref()
-        .and_then(|s| InstanceId::new(s).ok());
-    let _ = settings.set_last_instance(shown);
-    Ok(dto)
+pub async fn remove_profile(app: AppHandle, id: String) -> Result<ProfilesDto, CodedError> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<PrepareState>();
+        let settings = app.state::<SettingsState>();
+        remove_from_clade(&state, &id)?;
+        let selected = settings.last_instance().filter(|s| s.as_str() != id);
+        let dto = snapshot(&state.root, selected).map_err(CodedError::storage)?;
+        // Remember the selection that is shown now (the next profile, or none after the last one).
+        let shown = dto
+            .selected
+            .as_deref()
+            .and_then(|s| InstanceId::new(s).ok());
+        let _ = settings.set_last_instance(shown);
+        Ok(dto)
+    })
+    .await
+    .map_err(|e| CodedError::new("remove_failed", e.to_string()))?
 }
 
 #[tauri::command]
@@ -366,6 +406,7 @@ pub fn prepare_status(state: State<'_, PrepareState>, id: String) -> PrepareStat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prepare::Stage;
 
     fn state(root: PortableRoot) -> PrepareState {
         let no = || Err("tests do not use the network".to_owned());
@@ -507,15 +548,76 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = PortableRoot::at(d.path());
         root.ensure_layout().unwrap();
-        std::fs::create_dir_all(root.tmp_dir().join("natives-abc/out")).unwrap();
-        std::fs::write(root.tmp_dir().join("junk.bin"), b"x").unwrap();
+        std::fs::create_dir_all(root.prepare_tmp_dir().join("natives-abc/out")).unwrap();
+        std::fs::write(root.prepare_tmp_dir().join("junk.bin"), b"x").unwrap();
+        // Isolated game temp files (`cache/tmp/game`) belong to running games and must never be swept.
+        std::fs::create_dir_all(root.game_tmp_dir().join("survival")).unwrap();
+        std::fs::write(root.game_tmp_dir().join("survival/jna-123.dll"), b"live").unwrap();
         std::fs::create_dir_all(root.libraries_dir()).unwrap();
         std::fs::write(root.libraries_dir().join("kept.jar"), b"ok").unwrap();
         std::fs::write(root.libraries_dir().join("half.jar.part"), b"par").unwrap();
+
         assert_eq!(sweep_scratch(&root).unwrap(), 2);
-        assert_eq!(std::fs::read_dir(root.tmp_dir()).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(root.prepare_tmp_dir()).unwrap().count(),
+            0
+        );
+        assert!(
+            root.game_tmp_dir().join("survival/jna-123.dll").is_file(),
+            "game_tmp_dir must remain untouched by sweep_scratch"
+        );
         assert!(root.libraries_dir().join("kept.jar").is_file());
         assert!(root.libraries_dir().join("half.jar.part").is_file());
+
+        // Missing prepare_tmp_dir is a clean no-op.
+        std::fs::remove_dir_all(root.prepare_tmp_dir()).unwrap();
+        assert_eq!(sweep_scratch(&root).unwrap(), 0);
+    }
+
+    #[test]
+    fn should_emit_deduplicates_identical_consecutive_progress_snapshots() {
+        let mut last = None;
+        let base = PrepareProgress {
+            instance_id: "survival".into(),
+            stage: Stage::Loader,
+            label: "Installing Forge".into(),
+            items_done: None,
+            items_total: None,
+            bytes_done: None,
+            bytes_total: None,
+            overall: None,
+        };
+        assert!(should_emit(&mut last, &base), "first snapshot emits");
+        assert!(
+            !should_emit(&mut last, &base),
+            "identical 150ms ticker snapshot is suppressed"
+        );
+        assert!(
+            !should_emit(&mut last, &base.clone()),
+            "repeated identical ticks stay suppressed"
+        );
+
+        let mut downloading = PrepareProgress {
+            stage: Stage::Assets,
+            label: "Downloading assets".into(),
+            items_done: Some(1),
+            items_total: Some(10),
+            bytes_done: Some(100),
+            bytes_total: Some(1000),
+            overall: Some(0.1),
+            ..base
+        };
+        assert!(should_emit(&mut last, &downloading), "stage change emits");
+        assert!(
+            !should_emit(&mut last, &downloading),
+            "stalled download tick is suppressed"
+        );
+        downloading.bytes_done = Some(250);
+        downloading.overall = Some(0.25);
+        assert!(
+            should_emit(&mut last, &downloading),
+            "byte progress change emits immediately"
+        );
     }
 
     #[test]

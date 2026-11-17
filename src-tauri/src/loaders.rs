@@ -275,9 +275,51 @@ pub fn parse_catalog(
             }
         }
     }
-    offers.sort_by(|a, b| cmp_versions(b.version.as_str(), a.version.as_str()));
-    offers.dedup_by(|a, b| a.version == b.version);
-    offers.truncate(MAX_OFFERS);
+    offers.sort_by(|a, b| {
+        cmp_versions(b.version.as_str(), a.version.as_str())
+            .then_with(|| a.channel.cmp(&b.channel))
+            .then_with(|| b.version.as_str().cmp(a.version.as_str()))
+    });
+    offers.dedup_by(|next, kept| {
+        if next.version == kept.version {
+            kept.channel = kept.channel.min(next.channel);
+            true
+        } else {
+            false
+        }
+    });
+    if offers.len() > MAX_OFFERS {
+        let rec_idx = offers
+            .iter()
+            .position(|o| o.channel == Channel::Recommended);
+        let stable_idx = offers.iter().position(|o| o.channel == Channel::Stable);
+        let mut extra: Vec<usize> = [rec_idx, stable_idx]
+            .into_iter()
+            .flatten()
+            .filter(|&i| i >= MAX_OFFERS)
+            .collect();
+        extra.sort_unstable();
+        extra.dedup();
+        if extra.is_empty() {
+            offers.truncate(MAX_OFFERS);
+        } else {
+            let mut head: Vec<OfferedVersion> = offers.iter().take(MAX_OFFERS).cloned().collect();
+            let mut to_drop = extra.len();
+            for idx in (0..head.len()).rev() {
+                if to_drop == 0 {
+                    break;
+                }
+                if Some(idx) != rec_idx && Some(idx) != stable_idx {
+                    head.remove(idx);
+                    to_drop -= 1;
+                }
+            }
+            for idx in extra {
+                head.push(offers[idx].clone());
+            }
+            offers = head;
+        }
+    }
     Ok(offers)
 }
 
@@ -308,12 +350,36 @@ fn parse_meta_list(
     Ok(out)
 }
 
+/// True when `mc` uses the modern v2+ Forge installer CLI (`--installClient <dir>`), starting at
+/// Minecraft 1.12.2 (and 26.x+). Pre-1.12.2 v1 installers lack working headless target redirection.
+fn forge_installer_supported(mc: &McVersion) -> bool {
+    let core = mc.as_str().split('-').next().unwrap_or("");
+    let Some(nums) = core
+        .split('.')
+        .map(|p| p.parse::<u32>().ok())
+        .collect::<Option<Vec<u32>>>()
+    else {
+        return false;
+    };
+    match nums.as_slice() {
+        [1, minor, rest @ ..] if rest.len() <= 1 => {
+            let patch = rest.first().copied().unwrap_or(0);
+            *minor > 12 || (*minor == 12 && patch >= 2)
+        }
+        [major, _, rest @ ..] if *major >= 26 && rest.len() <= 1 => true,
+        _ => false,
+    }
+}
+
 /// Forge: `{ "promos": { "1.21.4-recommended": "54.1.14", "1.21.4-latest": "54.1.18", ... } }`.
 fn parse_forge(json: &Value, mc: &McVersion) -> Result<Vec<OfferedVersion>, LoaderError> {
     let promos = json
         .get("promos")
         .and_then(Value::as_object)
         .ok_or(LoaderError::BadFormat("missing promos"))?;
+    if !forge_installer_supported(mc) {
+        return Ok(Vec::new());
+    }
     let get = |suffix: &str| {
         promos
             .get(&format!("{mc}-{suffix}"))
@@ -457,7 +523,7 @@ mod tests {
       {"loader":{"version":"0.20.0-beta.8","build":8}}
     ]"#;
     const FORGE: &str = r#"{"homepage":"https://files.minecraftforge.net/net/minecraftforge/forge/","promos":{
-      "1.21.4-latest":"54.1.18","1.21.4-recommended":"54.1.14","1.21.5-latest":"55.1.14","1.20.1-recommended":"47.4.10","1.20.1-latest":"47.4.26","1.7.10-latest":"10.13.4.1614","1.7.10-recommended":"10.13.4.1614"}}"#;
+      "1.21.4-latest":"54.1.18","1.21.4-recommended":"54.1.14","1.21.5-latest":"55.1.14","1.20.1-recommended":"47.4.10","1.20.1-latest":"47.4.26","1.12.2-latest":"14.23.5.2860","1.12.2-recommended":"14.23.5.2860","1.12.1-latest":"14.22.1.2485","1.8.9-recommended":"11.15.1.2318","1.7.10-latest":"10.13.4.1614","1.7.10-recommended":"10.13.4.1614"}}"#;
     const NEOFORGE: &str = r#"{"isSnapshot":false,"versions":["0.25w14craftmine.3-beta","20.2.3-beta","20.4.237","21.0.2-beta","21.0.167","21.1.172","21.4.0-beta","21.4.9-beta","21.4.10","21.4.158","21.40.1","26.1.2.7","26.1.2.10-beta","26.3.0.9-beta","26.3.0.48-beta"]}"#;
 
     #[test]
@@ -525,9 +591,19 @@ mod tests {
         // Only a "latest" exists: it is still chosen (nothing better available).
         let o = parse_catalog(LoaderKind::Forge, &mc("1.21.5"), FORGE.as_bytes()).unwrap();
         assert_eq!((o.len(), o[0].channel), (1, Channel::Latest));
-        // Recommended == latest collapses to one entry; an old release works too.
-        let o = parse_catalog(LoaderKind::Forge, &mc("1.7.10"), FORGE.as_bytes()).unwrap();
+        // Recommended == latest collapses to one entry; 1.12.2 is the oldest supported v2 installer.
+        let o = parse_catalog(LoaderKind::Forge, &mc("1.12.2"), FORGE.as_bytes()).unwrap();
         assert_eq!((o.len(), o[0].channel), (1, Channel::Recommended));
+        assert_eq!(o[0].version.as_str(), "14.23.5.2860");
+        // Pre-1.12.2 legacy v1 installers lack working headless `--installClient <dir>` CLI.
+        for legacy in ["1.7.10", "1.8.9", "1.12", "1.12.1", "b1.7.3"] {
+            assert!(
+                parse_catalog(LoaderKind::Forge, &mc(legacy), FORGE.as_bytes())
+                    .unwrap()
+                    .is_empty(),
+                "{legacy}"
+            );
+        }
         // Unknown Minecraft version: no compatible loader, not an error.
         assert!(
             parse_catalog(LoaderKind::Forge, &mc("1.2.3"), FORGE.as_bytes())
@@ -716,5 +792,40 @@ mod tests {
                 .as_str(),
             "neoforge-21.4.158"
         );
+    }
+
+    #[test]
+    fn truncation_never_drops_the_newest_stable_release_behind_many_betas() {
+        let mut versions_list = vec!["21.4.10".to_owned()];
+        for i in 1..=50 {
+            versions_list.push(format!("21.4.{}-beta", 100 + i));
+        }
+        let body = serde_json::json!({ "versions": versions_list }).to_string();
+        let o = parse_catalog(LoaderKind::NeoForge, &mc("1.21.4"), body.as_bytes()).unwrap();
+        assert_eq!(o.len(), MAX_OFFERS);
+        assert_eq!(o[0].version.as_str(), "21.4.150-beta");
+        assert_eq!(o.last().unwrap().version.as_str(), "21.4.10");
+        assert_eq!(o.last().unwrap().channel, Channel::Stable);
+        assert_eq!(
+            choose_auto(&o).unwrap().version.as_str(),
+            "21.4.10",
+            "50 newer betas must not push out the newest Stable release"
+        );
+        for pair in o.windows(2) {
+            assert_eq!(
+                cmp_versions(pair[0].version.as_str(), pair[1].version.as_str()),
+                Ordering::Greater,
+                "newest-first order is preserved"
+            );
+        }
+
+        // Duplicate versions in Fabric catalog keep the best (Stable) channel regardless of input order.
+        let dup = r#"[
+          {"loader":{"version":"0.19.5","stable":false}},
+          {"loader":{"version":"0.19.5","stable":true}}
+        ]"#;
+        let d = parse_catalog(LoaderKind::Fabric, &mc("1.21.4"), dup.as_bytes()).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].channel, Channel::Stable);
     }
 }

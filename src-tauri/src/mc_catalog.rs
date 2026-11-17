@@ -16,7 +16,7 @@
 //!   destroy a good cache because nothing is written until validation has passed.
 //! - With neither network nor cache there is an explicit error; versions are never invented.
 
-use std::fs;
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::net::{FetchError, Fetcher};
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, read_bounded};
 use crate::versions::McVersion;
 
 pub const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -113,6 +113,7 @@ pub fn parse_manifest(body: &[u8], now: i64) -> Result<Parsed, CatalogError> {
         .ok_or(CatalogError::BadFormat("missing versions"))?;
 
     let mut entries: Vec<CatalogEntry> = Vec::with_capacity(versions.len());
+    let mut seen: HashSet<McVersion> = HashSet::with_capacity(versions.len());
     let mut skipped = 0;
     for v in versions {
         let parsed = (|| {
@@ -136,7 +137,7 @@ pub fn parse_manifest(body: &[u8], now: i64) -> Result<Parsed, CatalogError> {
             })
         })();
         match parsed {
-            Some(e) if !entries.iter().any(|x| x.id == e.id) => entries.push(e),
+            Some(e) if seen.insert(e.id.clone()) => entries.push(e),
             Some(_) => {} // duplicate id: the first (newest) wins
             None => skipped += 1,
         }
@@ -146,7 +147,7 @@ pub fn parse_manifest(body: &[u8], now: i64) -> Result<Parsed, CatalogError> {
     }
     let pick = |key: &str| {
         let id = McVersion::new(json.get("latest")?.get(key)?.as_str()?).ok()?;
-        entries.iter().any(|e| e.id == id).then_some(id)
+        seen.contains(&id).then_some(id)
     };
     let (latest_release, latest_snapshot) = (pick("release"), pick("snapshot"));
     Ok(Parsed {
@@ -163,17 +164,15 @@ pub fn parse_manifest(body: &[u8], now: i64) -> Result<Parsed, CatalogError> {
 
 /// Reads the cache. Anything unreadable or inconsistent counts as "no cache" and is left alone.
 pub fn load_cache(path: &Path) -> Option<VersionCatalog> {
-    if fs::metadata(path).ok()?.len() > MAX_CACHE_BYTES {
-        return None;
-    }
-    let c: VersionCatalog = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let bytes = read_bounded(path, MAX_CACHE_BYTES).ok()?;
+    let c: VersionCatalog = serde_json::from_slice(&bytes).ok()?;
     (c.schema == SCHEMA && c.entries.iter().any(|e| e.kind == VersionKind::Release)).then_some(c)
 }
 
 /// Mojang only ever adds versions, so a "new" catalog that lost a tenth or more of what we
 /// already hold is treated as a truncated or tampered response.
-fn plausible_update(cached: &VersionCatalog, new: &VersionCatalog) -> bool {
-    new.entries.len() * 10 >= cached.entries.len() * 9
+fn plausible_update(cached_len: usize, new: &VersionCatalog) -> bool {
+    new.entries.len() * 10 >= cached_len * 9
 }
 
 /// Where the returned catalog came from.
@@ -214,7 +213,11 @@ pub async fn load<F: Fetcher>(
     now: i64,
     force: bool,
 ) -> Result<CatalogResult, CatalogError> {
-    let cached = load_cache(cache_path);
+    let cache_in = cache_path.to_path_buf();
+    let cached = tokio::task::spawn_blocking(move || load_cache(&cache_in))
+        .await
+        .ok()
+        .flatten();
 
     if !force {
         if let Some(c) = &cached {
@@ -231,25 +234,36 @@ pub async fn load<F: Fetcher>(
 
     let url = Url::parse(MANIFEST_URL).map_err(|_| CatalogError::BadFormat("bad manifest url"))?;
     let failure: String = match fetcher.get(&url, MAX_MANIFEST_BYTES).await {
-        Ok(body) => match parse_manifest(&body, now) {
-            Ok(p)
-                if cached
-                    .as_ref()
-                    .is_none_or(|c| plausible_update(c, &p.catalog)) =>
-            {
-                // Validated: only now may the cache change. A failed write does not fail the request.
-                if let Ok(bytes) = serde_json::to_vec(&p.catalog) {
-                    let _ = atomic_write(cache_path, &bytes);
+        Ok(body) => {
+            let cache_out = cache_path.to_path_buf();
+            let cached_len = cached.as_ref().map(|c| c.entries.len());
+            let outcome = tokio::task::spawn_blocking(
+                move || -> Result<Option<VersionCatalog>, CatalogError> {
+                    let p = parse_manifest(&body, now)?;
+                    if cached_len.is_some_and(|old_len| !plausible_update(old_len, &p.catalog)) {
+                        return Ok(None);
+                    }
+                    // Validated: only now may the cache change. A failed write does not fail the request.
+                    if let Ok(bytes) = serde_json::to_vec(&p.catalog) {
+                        let _ = atomic_write(&cache_out, &bytes);
+                    }
+                    Ok(Some(p.catalog))
+                },
+            )
+            .await;
+
+            match outcome {
+                Ok(Ok(Some(catalog))) => {
+                    return Ok(CatalogResult {
+                        catalog,
+                        origin: Origin::Network,
+                        network_error: None,
+                    });
                 }
-                return Ok(CatalogResult {
-                    catalog: p.catalog,
-                    origin: Origin::Network,
-                    network_error: None,
-                });
+                Ok(Ok(None)) => "Mojang's answer looked incomplete".to_owned(),
+                Ok(Err(_)) | Err(_) => "Mojang's answer was not understood".to_owned(),
             }
-            Ok(_) => "Mojang's answer looked incomplete".to_owned(),
-            Err(_) => "Mojang's answer was not understood".to_owned(),
-        },
+        }
         Err(e) => why(&e),
     };
 
@@ -269,6 +283,7 @@ pub async fn load<F: Fetcher>(
 mod tests {
     use super::*;
     use crate::net::testing::FakeFetcher;
+    use std::fs;
 
     // Trimmed from the real manifest, including its awkward ids and every type.
     const MANIFEST: &str = r#"{
@@ -487,5 +502,42 @@ mod tests {
         let r = load(&f, &cache_path(&d), 99_999, false).await.unwrap();
         assert_eq!(r.origin, Origin::Network);
         assert!(r.catalog.contains(&id("26.5")));
+    }
+
+    #[test]
+    fn duplicate_entries_keep_first_occurrence_without_incrementing_skipped() {
+        let body = r#"{
+          "latest": {"release": "1.21.4", "snapshot": "24w10a"},
+          "versions": [
+            {"id":"1.21.4","type":"release","releaseTime":"2024-12-03T10:12:57+00:00","url":"https://piston-meta.mojang.com/first.json"},
+            {"id":"24w10a","type":"snapshot","releaseTime":"2024-03-06T12:00:00+00:00","url":"https://piston-meta.mojang.com/snap-new.json"},
+            {"id":"1.21.4","type":"release","releaseTime":"2020-01-01T00:00:00+00:00","url":"https://piston-meta.mojang.com/older-dup.json"},
+            {"id":"24w10a","type":"snapshot","releaseTime":"2020-01-01T00:00:00+00:00","url":"https://piston-meta.mojang.com/snap-dup.json"}
+          ]
+        }"#;
+        let parsed = parse_manifest(body.as_bytes(), 42).unwrap();
+        assert_eq!(parsed.skipped, 0);
+        assert_eq!(parsed.catalog.entries.len(), 2);
+        assert_eq!(
+            parsed.catalog.entries[0].url.as_deref(),
+            Some("https://piston-meta.mojang.com/first.json")
+        );
+        assert_eq!(
+            parsed.catalog.entries[1].url.as_deref(),
+            Some("https://piston-meta.mojang.com/snap-new.json")
+        );
+        assert_eq!(parsed.catalog.latest_release, Some(id("1.21.4")));
+        assert_eq!(parsed.catalog.latest_snapshot, Some(id("24w10a")));
+    }
+
+    #[test]
+    fn load_cache_rejects_files_exceeding_max_cache_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let p = cache_path(&d);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let f = fs::File::create(&p).unwrap();
+        f.set_len(MAX_CACHE_BYTES + 1).unwrap();
+        drop(f);
+        assert!(load_cache(&p).is_none());
     }
 }
