@@ -591,3 +591,232 @@ fn archived_vaults_are_never_candidates_for_the_export() {
         assert!(!content.contains("retired-vaults"), "{name}");
     }
 }
+
+#[test]
+fn json_escaped_and_url_user_folders_are_redacted() {
+    let d = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            r"C:\Users\Alice\AppData\Roaming",
+            r"C:\Users\<user>\AppData\Roaming",
+        ),
+        (
+            r#"{"path":"C:\\Users\\Alice\\AppData\\Local"}"#,
+            r#"{"path":"C:\\Users\\<user>\\AppData\\Local"}"#,
+        ),
+        (
+            r"escaped C:\\\\Users\\\\Alice\\\\AppData\\\\Local",
+            r"escaped C:\\\\Users\\\\<user>\\\\AppData\\\\Local",
+        ),
+        ("/Users/bob/x", "/Users/<user>/x"),
+        (
+            "file:///C:/Users/Alice%20Smith/x",
+            "file:///C:/Users/<user>/x",
+        ),
+    ];
+    for (input, expected) in cases {
+        let out = redact(d.path(), input);
+        assert_eq!(out, expected, "input={input}");
+        assert!(!out.contains("Alice") && !out.contains("bob"), "{out}");
+    }
+}
+
+#[test]
+fn json_escaped_and_url_forms_of_root_with_spaces_become_placeholders_and_keep_newlines() {
+    let r = Path::new(r"D:\Games\Clade Launcher");
+    let text = concat!(
+        "plain D:\\Games\\Clade Launcher\\logs\n",
+        "json D:\\\\Games\\\\Clade Launcher\\\\logs\n",
+        "quad D:\\\\\\\\Games\\\\\\\\Clade Launcher\\\\\\\\logs\n",
+        "slash D:/Games/Clade Launcher/logs\n",
+        "pct D:/Games/Clade%20Launcher/logs\n",
+        "url file:///D:/Games/Clade%20Launcher/logs/clade.log\n",
+    );
+    let out = redact(r, text);
+    assert!(out.ends_with('\n'), "trailing newline must be preserved");
+    assert!(
+        !out.contains("Clade Launcher") && !out.contains("Clade%20Launcher"),
+        "{out}"
+    );
+    assert!(out.contains("plain <clade>\\logs\n"), "{out}");
+    assert!(out.contains("json <clade>\\\\logs\n"), "{out}");
+    assert!(out.contains("quad <clade>\\\\\\\\logs\n"), "{out}");
+    assert!(out.contains("slash <clade>/logs\n"), "{out}");
+    assert!(out.contains("pct <clade>/logs\n"), "{out}");
+    assert!(
+        out.contains("url file:///<clade>/logs/clade.log\n"),
+        "{out}"
+    );
+
+    // Non-drive relative paths with percent-encoded spaces are also redacted.
+    let rel = Path::new("portable/Clade Launcher");
+    let rel_out = redact(rel, "see portable/Clade%20Launcher/logs");
+    assert_eq!(rel_out, "see <clade>/logs");
+}
+
+#[test]
+fn non_ascii_characters_whose_lowercase_changes_byte_length_never_bypass_name_redaction() {
+    let known = vec!["FixtureAlex".to_owned()];
+    // 'İ' (U+0130, 2 UTF-8 bytes) lowercases in Unicode to "i\u{307}" (3 UTF-8 bytes).
+    let log = "[Chat] İstanbul server — player FixtureAlex (fixturealex) joined 🚀 Привет!\n";
+    let out = redact_identities(log, &known);
+    assert!(
+        !out.to_ascii_lowercase().contains("fixturealex"),
+        "username bypassed redaction when 'İ' was present: {out:?}"
+    );
+    assert_eq!(
+        out,
+        "[Chat] İstanbul server — player <mc-name> (<mc-name>) joined 🚀 Привет!\n"
+    );
+}
+
+#[test]
+fn msa_tokens_with_base64_and_rps_punctuation_jwe_and_xbl3_opaque_tokens_are_redacted() {
+    let d = tempfile::tempdir().unwrap();
+    let msa_ew = concat!(
+        "EwBYA8l6BAAUfake+part/with=pad==!bang*star$dollar",
+        "0123456789abcdef0123456789abcdefTAILSECRET",
+    );
+    let msa_m = "M.C507_BAY.0.U.-CiFake+Refresh/Val=1!bang*star$TAILSECRET";
+    let msa_0a = "0.AXEAfakeRefresh+Value/With=Pad!bang*star$TAILSECRET";
+    let jwe_dir = concat!(
+        "ewogImFsZyI6ICJkaXIiIH0..iv_part_01234567.",
+        "ciphertext_0123456789.authtag_0123456789",
+    );
+    let jwe_kw = concat!(
+        "ewogImFsZyI6ICJSU0EtT0FFUCIgfQ.encryptedKeyPart1234.",
+        "iv_part_01234567.ciphertext_0123456789.authtag_0123456789",
+    );
+    let xbl_opaque = "OPAQUE_XSTS_SECRET_AFTER_SEMICOLON";
+
+    for line in [
+        format!("rps ticket d={msa_ew} failed"),
+        format!("bare refresh ({msa_m}) rejected"),
+        format!("bare oauth {msa_0a}&state=ok"),
+        format!("decrypt error on {jwe_dir} in auth"),
+        format!("decrypt error on {jwe_kw} in auth"),
+        format!("header XBL3.0 x=1234567890;{xbl_opaque} end"),
+        format!(r#"{{"identityToken":"XBL3.0 x=1234567890;{xbl_opaque}"}}"#),
+    ] {
+        let out = redact(d.path(), &line);
+        for leaked in [
+            "TAILSECRET",
+            "bang",
+            "star",
+            "dollar",
+            "ciphertext_0123456789",
+            "authtag_0123456789",
+            "encryptedKeyPart1234",
+            xbl_opaque,
+        ] {
+            assert!(
+                !out.contains(leaked),
+                "{leaked} survived in {out:?} (from {line:?})"
+            );
+        }
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+}
+
+#[test]
+fn profile_summary_redacts_known_identities_and_personal_paths() {
+    use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let uuid = "00000000-0000-4000-8000-0000000000bb";
+    let mut accounts = AccountsFile::default();
+    accounts.accounts.push(AccountMeta {
+        id: "acc1".into(),
+        username: "FixtureAlex".into(),
+        minecraft_uuid: uuid.into(),
+        added_at: 0,
+        last_used_at: None,
+        status: AccountStatus::Ready,
+    });
+    accounts.save(&r.accounts_file()).unwrap();
+
+    // A profile whose id/folder names the player, and a broken profile folder naming a user path/UUID.
+    let broken_name = format!("FixtureAlex-{uuid}");
+    let broken = r.instances_dir().join(&broken_name);
+    fs::create_dir_all(&broken).unwrap();
+    let root_str = r.path().display();
+    fs::write(
+        broken.join("instance.json"),
+        format!(r#"{{"bad": "C:\\Users\\Alice\\x and {root_str}"}}"#),
+    )
+    .unwrap();
+
+    let collected = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    let summary = &collected
+        .iter()
+        .find(|(n, _)| *n == "profile-summary.txt")
+        .unwrap()
+        .1;
+    assert!(
+        !summary.to_ascii_lowercase().contains("fixturealex"),
+        "known username leaked in profile-summary.txt: {summary}"
+    );
+    assert!(
+        !summary.contains(uuid),
+        "known UUID leaked in profile-summary.txt: {summary}"
+    );
+    assert!(
+        summary.contains("<mc-name>-<mc-uuid>"),
+        "expected redacted placeholders in {summary}"
+    );
+}
+
+#[test]
+fn clade_old_log_tail_is_prepended_only_when_current_log_is_below_budget() {
+    use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let mut accounts = AccountsFile::default();
+    accounts.accounts.push(AccountMeta {
+        id: "acc1".into(),
+        username: "FixtureAlex".into(),
+        minecraft_uuid: "00000000-0000-4000-8000-0000000000cc".into(),
+        added_at: 0,
+        last_used_at: None,
+        status: AccountStatus::Ready,
+    });
+    accounts.save(&r.accounts_file()).unwrap();
+
+    // 1. Small clade.log -> clade.old.log is prepended (with newline boundary) and redacted.
+    fs::write(
+        r.logs_dir().join("clade.old.log"),
+        "old-entry user FixtureAlex token=SECRET_OLD_TOKEN",
+    )
+    .unwrap();
+    fs::write(
+        r.logs_dir().join("clade.log"),
+        "current-entry user FixtureAlex\n",
+    )
+    .unwrap();
+    let collected = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    let log = &collected
+        .iter()
+        .find(|(n, _)| *n == "logs/clade.log")
+        .unwrap()
+        .1;
+    assert!(
+        log.contains("old-entry user <mc-name> token=<redacted>\ncurrent-entry user <mc-name>\n"),
+        "unexpected combined log: {log:?}"
+    );
+    assert!(!log.contains("SECRET_OLD_TOKEN") && !log.contains("FixtureAlex"));
+
+    // 2. clade.log >= LOG_TAIL_BYTES -> clade.old.log is NOT prepended.
+    let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc\n";
+    let repeats = (LOG_TAIL_BYTES as usize / line.len()) + 32;
+    fs::write(r.logs_dir().join("clade.log"), line.repeat(repeats)).unwrap();
+    let collected_full = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    let log_full = &collected_full
+        .iter()
+        .find(|(n, _)| *n == "logs/clade.log")
+        .unwrap()
+        .1;
+    assert!(
+        !log_full.contains("old-entry"),
+        "clade.old.log must not be prepended when clade.log >= LOG_TAIL_BYTES"
+    );
+}

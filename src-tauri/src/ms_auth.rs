@@ -432,6 +432,13 @@ fn xsts_error(code: u64) -> AuthError {
     }
 }
 
+fn user_hash<'a>(v: &'a Value, missing: &'static str) -> Result<&'a str, AuthError> {
+    v.pointer("/DisplayClaims/xui/0/uhs")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .ok_or(AuthError::BadResponse(missing))
+}
+
 /// Microsoft access token -> Minecraft services access token.
 pub async fn minecraft_login<T: Transport>(
     t: &T,
@@ -453,11 +460,15 @@ pub async fn minecraft_login<T: Transport>(
         Vec::new(),
     )
     .await?;
+    if r.status >= 500 || r.status == 429 {
+        return Err(AuthError::Offline);
+    }
     if r.status != 200 {
         return Err(AuthError::BadResponse("Xbox Live refused the sign-in"));
     }
     let v = json_of(&r)?;
     let xbl = Secret::new(str_at(&v, "Token", "no Xbox token")?.to_owned());
+    let xbl_uhs = user_hash(&v, "no Xbox user hash")?.to_owned();
 
     // 3. XSTS token for the Minecraft services
     let r = post_json(
@@ -471,6 +482,9 @@ pub async fn minecraft_login<T: Transport>(
         Vec::new(),
     )
     .await?;
+    if r.status >= 500 || r.status == 429 {
+        return Err(AuthError::Offline);
+    }
     let v = json_of(&r).unwrap_or(Value::Null);
     if r.status == 401 {
         return Err(match v.get("XErr").and_then(Value::as_u64) {
@@ -482,11 +496,10 @@ pub async fn minecraft_login<T: Transport>(
         return Err(AuthError::BadResponse("XSTS refused the sign-in"));
     }
     let xsts = Secret::new(str_at(&v, "Token", "no XSTS token")?.to_owned());
-    let uhs = v
-        .pointer("/DisplayClaims/xui/0/uhs")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-        .ok_or(AuthError::BadResponse("no user hash"))?;
+    let uhs = user_hash(&v, "no user hash")?;
+    if uhs != xbl_uhs {
+        return Err(AuthError::BadResponse("Xbox user hash mismatch"));
+    }
 
     // 4. Minecraft services (needs Mojang's approval of the client id)
     let identity = Secret::new(format!("XBL3.0 x={uhs};{}", xsts.expose()));
@@ -497,6 +510,9 @@ pub async fn minecraft_login<T: Transport>(
         Vec::new(),
     )
     .await?;
+    if r.status >= 500 || r.status == 429 {
+        return Err(AuthError::Offline);
+    }
     if r.status == 403 {
         return Err(AuthError::ApprovalRequired);
     }
@@ -508,7 +524,11 @@ pub async fn minecraft_login<T: Transport>(
     let v = json_of(&r)?;
     Ok(McSession {
         access_token: Secret::new(str_at(&v, "access_token", "no Minecraft token")?.to_owned()),
-        expires_in: v.get("expires_in").and_then(Value::as_u64).unwrap_or(3600),
+        expires_in: v
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .unwrap_or(3600)
+            .min(86_400),
     })
 }
 
@@ -932,5 +952,109 @@ mod tests {
         ] {
             assert!(!e.to_string().contains("TOP-SECRET"));
         }
+    }
+
+    #[tokio::test]
+    async fn rate_limits_and_server_outages_across_xbox_and_minecraft_login_map_to_offline() {
+        let ms = Secret::new("MS".into());
+        for status in [429u16, 500, 502, 503] {
+            let t = FakeTransport::new();
+            t.reply(XBL_AUTH, status, "busy");
+            assert!(
+                matches!(minecraft_login(&t, &ms).await, Err(AuthError::Offline)),
+                "XBL status {status}"
+            );
+
+            let t = FakeTransport::new();
+            t.reply(
+                XBL_AUTH,
+                200,
+                r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+            );
+            t.reply(XSTS_AUTH, status, "busy");
+            assert!(
+                matches!(minecraft_login(&t, &ms).await, Err(AuthError::Offline)),
+                "XSTS status {status}"
+            );
+
+            let t = FakeTransport::new();
+            t.reply(
+                XBL_AUTH,
+                200,
+                r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+            );
+            t.reply(
+                XSTS_AUTH,
+                200,
+                r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+            );
+            t.reply(MC_LOGIN, status, "busy");
+            assert!(
+                matches!(minecraft_login(&t, &ms).await, Err(AuthError::Offline)),
+                "MC_LOGIN status {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn xbox_user_hash_must_be_present_valid_and_identical_across_xbl_and_xsts() {
+        let ms = Secret::new("MS".into());
+        for bad_xbl in [
+            r#"{"Token":"XBL"}"#,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{}]}}"#,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":""}]}}"#,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"bad;inject"}]}}"#,
+        ] {
+            let t = FakeTransport::new();
+            t.reply(XBL_AUTH, 200, bad_xbl);
+            assert!(
+                matches!(
+                    minecraft_login(&t, &ms).await,
+                    Err(AuthError::BadResponse("no Xbox user hash"))
+                ),
+                "{bad_xbl}"
+            );
+        }
+
+        let t = FakeTransport::new();
+        t.reply(
+            XBL_AUTH,
+            200,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"111"}]}}"#,
+        );
+        t.reply(
+            XSTS_AUTH,
+            200,
+            r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"222"}]}}"#,
+        );
+        assert!(matches!(
+            minecraft_login(&t, &ms).await,
+            Err(AuthError::BadResponse("Xbox user hash mismatch"))
+        ));
+        assert!(!t.urls().iter().any(|u| u == MC_LOGIN));
+    }
+
+    #[tokio::test]
+    async fn minecraft_login_caps_excessive_expires_in_to_one_day() {
+        let t = FakeTransport::new();
+        t.reply(
+            XBL_AUTH,
+            200,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            XSTS_AUTH,
+            200,
+            r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            MC_LOGIN,
+            200,
+            format!(r#"{{"access_token":"MC-TOKEN","expires_in":{}}}"#, u64::MAX),
+        );
+        let session = minecraft_login(&t, &Secret::new("MS".into()))
+            .await
+            .unwrap();
+        assert_eq!(session.expires_in, 86_400);
     }
 }

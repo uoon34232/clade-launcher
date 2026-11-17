@@ -13,10 +13,11 @@
 //! - **Never deleting** an account because its credentials expired: refresh failure only marks it
 //!   "needs sign in again".
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -42,6 +43,15 @@ use crate::vault::{AccountSecrets, Vault, VaultError};
 pub const SIGN_IN_WAIT: Duration = Duration::from_secs(5 * 60);
 /// A cached Minecraft token this close to expiry is refreshed instead of used.
 const TOKEN_MARGIN_SECS: i64 = 300;
+/// Longest lifetime accepted for a cached or newly issued Minecraft access token (24 hours).
+const MAX_TOKEN_LIFETIME_SECS: u64 = 86_400;
+/// Clock-skew allowance above [`MAX_TOKEN_LIFETIME_SECS`] before a cached expiry is treated as bogus.
+const CLOCK_SKEW_MARGIN_SECS: i64 = 14_400;
+const MAX_CACHED_TTL_SECS: i64 = (MAX_TOKEN_LIFETIME_SECS as i64) + CLOCK_SKEW_MARGIN_SECS;
+/// Per-connection deadline to read the HTTP callback headers (and send the reply) on loopback.
+const CALLBACK_CONN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum simultaneous loopback connections serviced at once.
+const MAX_LOOPBACK_CONNS: usize = 16;
 /// How long sign-in or a refresh waits for a decorative avatar download before answering without it.
 const SKIN_WAIT: Duration = Duration::from_secs(3);
 pub const PROGRESS_EVENT: &str = "sign-in-progress";
@@ -67,20 +77,28 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// Validates the first lines of an HTTP request against the sign-in in progress.
 pub fn parse_callback(head: &str, port: u16, expected_state: &str) -> Callback {
-    let mut lines = head.split("\r\n");
+    let Some((header_block, _)) = head.split_once("\r\n\r\n") else {
+        return Callback::Ignore;
+    };
+    let mut lines = header_block.split("\r\n");
     let request = lines.next().unwrap_or("");
     let mut parts = request.split(' ');
     let (Some("GET"), Some(target)) = (parts.next(), parts.next()) else {
         return Callback::Ignore;
     };
-    let host_ok = lines.any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.strip_prefix("host:").is_some_and(|h| {
+    let mut host_count = 0usize;
+    let mut host_ok = false;
+    for l in lines {
+        let lower = l.to_ascii_lowercase();
+        if let Some(h) = lower.strip_prefix("host:") {
+            host_count += 1;
             let h = h.trim();
-            h == format!("localhost:{port}") || h == format!("127.0.0.1:{port}")
-        })
-    });
-    if !host_ok {
+            host_ok = h == format!("localhost:{port}")
+                || h == format!("127.0.0.1:{port}")
+                || h == format!("[::1]:{port}");
+        }
+    }
+    if host_count != 1 || !host_ok {
         return Callback::Ignore;
     }
     let Ok(url) = Url::parse(&format!("http://localhost:{port}{target}")) else {
@@ -118,7 +136,7 @@ const PAGE_STOPPED: &str = "<!doctype html><meta charset=utf-8><title>Sign-in st
 
 async fn respond(stream: &mut TcpStream, status: &str, page: &str) {
     let out = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nConnection: close\r\n\r\n{page}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n{page}",
         page.len()
     );
     let _ = stream.write_all(out.as_bytes()).await;
@@ -131,32 +149,197 @@ async fn read_head(stream: &mut TcpStream) -> Option<String> {
     while buf.len() < 8192 {
         let n = stream.read(&mut chunk).await.ok()?;
         if n == 0 {
-            break;
+            return None;
         }
-        buf.extend_from_slice(&chunk[..n]);
+        let room = 8192 - buf.len();
+        buf.extend_from_slice(&chunk[..n.min(room)]);
         if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+            return Some(String::from_utf8_lossy(&buf).into_owned());
         }
     }
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    None
 }
 
-/// The one-shot listener for the browser's redirect.
+#[cfg(windows)]
+fn set_exclusive_addr_use(sock: &socket2::Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        setsockopt, SOCKET, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+    };
+    let on: i32 = 1;
+    // SAFETY: `sock` is an open Winsock handle and `on` is a valid 4-byte integer for the call.
+    let rc = unsafe {
+        setsockopt(
+            sock.as_raw_socket() as SOCKET,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            std::ptr::from_ref(&on).cast(),
+            std::mem::size_of_val(&on) as i32,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn bind_v4_exclusive(port: u16) -> std::io::Result<TcpListener> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    #[cfg(windows)]
+    set_exclusive_addr_use(&sock)?;
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    sock.bind(&addr.into())?;
+    sock.listen(128)?;
+    sock.set_nonblocking(true)?;
+    let std_listener: std::net::TcpListener = sock.into();
+    TcpListener::from_std(std_listener)
+}
+
+fn bind_v6_exclusive(port: u16) -> std::io::Result<TcpListener> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    sock.set_only_v6(true)?;
+    #[cfg(windows)]
+    set_exclusive_addr_use(&sock)?;
+    let addr = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    sock.bind(&addr.into())?;
+    sock.listen(128)?;
+    sock.set_nonblocking(true)?;
+    let std_listener: std::net::TcpListener = sock.into();
+    TcpListener::from_std(std_listener)
+}
+
+fn ipv6_unavailable(e: &std::io::Error) -> bool {
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+    ) {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(e.raw_os_error(), Some(10043 | 10047 | 10049)) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(e.raw_os_error(), Some(93 | 97 | 99)) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if matches!(e.raw_os_error(), Some(43 | 47 | 49)) {
+        return true;
+    }
+    false
+}
+
+fn is_transient_accept(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+    )
+}
+
+async fn accept_opt(
+    listener: Option<&TcpListener>,
+) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+    match listener {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn spawn_callback_conn(
+    tasks: &mut tokio::task::JoinSet<()>,
+    mut stream: TcpStream,
+    port: u16,
+    expected: Arc<str>,
+    tx: tokio::sync::mpsc::Sender<Result<Secret, AuthError>>,
+) {
+    tasks.spawn(async move {
+        let Ok(Some(head)) = timeout(CALLBACK_CONN_TIMEOUT, read_head(&mut stream)).await else {
+            return;
+        };
+        match parse_callback(&head, port, &expected) {
+            Callback::Code(code) => {
+                let _ = timeout(
+                    CALLBACK_CONN_TIMEOUT,
+                    respond(&mut stream, "200 OK", PAGE_DONE),
+                )
+                .await;
+                let _ = tx.send(Ok(code)).await;
+            }
+            Callback::Denied(error) => {
+                let _ = timeout(
+                    CALLBACK_CONN_TIMEOUT,
+                    respond(&mut stream, "200 OK", PAGE_STOPPED),
+                )
+                .await;
+                let err = if error == "access_denied" {
+                    AuthError::Cancelled
+                } else {
+                    AuthError::OAuth(error.chars().take(40).collect())
+                };
+                let _ = tx.send(Err(err)).await;
+            }
+            Callback::Ignore => {
+                let _ = timeout(
+                    CALLBACK_CONN_TIMEOUT,
+                    respond(&mut stream, "404 Not Found", "Not found"),
+                )
+                .await;
+            }
+        }
+    });
+}
+
+fn bind_loopback_with(
+    mut next_v4: impl FnMut() -> std::io::Result<TcpListener>,
+) -> Result<Loopback, AuthError> {
+    let mut rejected = Vec::new();
+    for _ in 0..8 {
+        let v4 = next_v4().map_err(|_| AuthError::BrowserUnavailable)?;
+        let port = v4
+            .local_addr()
+            .map_err(|_| AuthError::BrowserUnavailable)?
+            .port();
+        match bind_v6_exclusive(port) {
+            Ok(v6) => {
+                return Ok(Loopback {
+                    v4,
+                    v6: Some(v6),
+                    port,
+                })
+            }
+            Err(e) if ipv6_unavailable(&e) => return Ok(Loopback { v4, v6: None, port }),
+            Err(_) => {
+                // Keep `v4` held until the loop finishes so the OS picks a distinct port next.
+                rejected.push(v4);
+            }
+        }
+    }
+    Err(AuthError::BrowserUnavailable)
+}
+
+/// The one-shot listener for the browser's redirect (`127.0.0.1` and `[::1]` on the same port).
 pub struct Loopback {
-    listener: TcpListener,
+    v4: TcpListener,
+    v6: Option<TcpListener>,
     port: u16,
 }
 
 impl Loopback {
     pub async fn bind() -> Result<Self, AuthError> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .map_err(|_| AuthError::BrowserUnavailable)?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| AuthError::BrowserUnavailable)?
-            .port();
-        Ok(Self { listener, port })
+        bind_loopback_with(|| bind_v4_exclusive(0))
     }
 
     pub fn port(&self) -> u16 {
@@ -169,34 +352,31 @@ impl Loopback {
     }
 
     pub async fn wait_for_code(&self, state: &str, wait: Duration) -> Result<Secret, AuthError> {
-        let deadline = Instant::now() + wait;
+        let deadline = tokio::time::Instant::now() + wait;
+        let expected: Arc<str> = Arc::from(state);
+        let port = self.port;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Secret, AuthError>>(1);
+        let mut tasks = tokio::task::JoinSet::new();
+
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(AuthError::TimedOut);
-            }
-            let (mut stream, _) = timeout(remaining, self.listener.accept())
-                .await
-                .map_err(|_| AuthError::TimedOut)?
-                .map_err(|_| AuthError::BrowserUnavailable)?;
-            let Ok(Some(head)) = timeout(Duration::from_secs(3), read_head(&mut stream)).await
-            else {
-                continue;
-            };
-            match parse_callback(&head, self.port, state) {
-                Callback::Code(code) => {
-                    respond(&mut stream, "200 OK", PAGE_DONE).await;
-                    return Ok(code);
+            let accept_enabled = tasks.len() < MAX_LOOPBACK_CONNS;
+            tokio::select! {
+                biased;
+                Some(outcome) = rx.recv() => return outcome,
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+                () = tokio::time::sleep_until(deadline) => return Err(AuthError::TimedOut),
+                res = self.v4.accept(), if accept_enabled => match res {
+                    Ok((stream, _)) => {
+                        spawn_callback_conn(&mut tasks, stream, port, expected.clone(), tx.clone());
+                    }
+                    Err(e) if is_transient_accept(&e) => {}
+                    Err(_) => return Err(AuthError::BrowserUnavailable),
+                },
+                res = accept_opt(self.v6.as_ref()), if accept_enabled => {
+                    if let Ok((stream, _)) = res {
+                        spawn_callback_conn(&mut tasks, stream, port, expected.clone(), tx.clone());
+                    }
                 }
-                Callback::Denied(error) => {
-                    respond(&mut stream, "200 OK", PAGE_STOPPED).await;
-                    return Err(if error == "access_denied" {
-                        AuthError::Cancelled
-                    } else {
-                        AuthError::OAuth(error.chars().take(40).collect())
-                    });
-                }
-                Callback::Ignore => respond(&mut stream, "404 Not Found", "Not found").await,
             }
         }
     }
@@ -274,10 +454,11 @@ fn new_account_id() -> Result<String, AuthError> {
 }
 
 fn secrets_for(refresh: &Secret, session: &McSession, now: i64) -> AccountSecrets {
+    let ttl = i64::try_from(session.expires_in.min(MAX_TOKEN_LIFETIME_SECS)).unwrap_or(3600);
     AccountSecrets {
         ms_refresh_token: Some(refresh.expose().to_owned()),
         minecraft_access_token: Some(session.access_token.expose().to_owned()),
-        minecraft_token_expires_at: Some(now + i64::try_from(session.expires_in).unwrap_or(3600)),
+        minecraft_token_expires_at: Some(now.saturating_add(ttl)),
     }
 }
 
@@ -343,6 +524,26 @@ pub fn persist(
         .and_then(|r| r)
 }
 
+type RefreshLockKey = (usize, String);
+type RefreshLockMap = HashMap<RefreshLockKey, Weak<tokio::sync::Mutex<()>>>;
+
+static REFRESH_LOCKS: OnceLock<Mutex<RefreshLockMap>> = OnceLock::new();
+
+fn refresh_lock_for(vault: &Mutex<Option<Vault>>, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let map = REFRESH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = lock(map);
+    let key = (std::ptr::from_ref(vault) as usize, id.to_owned());
+    if let Some(existing) = guard.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    if guard.len() > 64 {
+        guard.retain(|_, v| v.strong_count() > 0);
+    }
+    let created = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key, Arc::downgrade(&created));
+    created
+}
+
 /// Makes sure an account has a usable Minecraft access token (for a launch that is about to
 /// happen): returns the cached one while it is fresh, otherwise refreshes the Microsoft token
 /// and repeats the chain. A refresh the user must fix marks the account "needs sign in again"
@@ -354,6 +555,32 @@ pub async fn ensure_fresh<T: Transport>(
     id: &str,
     now: i64,
 ) -> Result<Secret, AuthError> {
+    ensure_fresh_inner(t, vault, accounts, id, now, false).await
+}
+
+/// Forces a credential refresh even when the cached Minecraft access token has not expired yet
+/// (used by explicit account refresh and single-shot `401` recovery).
+pub async fn ensure_fresh_forced<T: Transport>(
+    t: &T,
+    vault: &Mutex<Option<Vault>>,
+    accounts: &AccountsState,
+    id: &str,
+    now: i64,
+) -> Result<Secret, AuthError> {
+    ensure_fresh_inner(t, vault, accounts, id, now, true).await
+}
+
+async fn ensure_fresh_inner<T: Transport>(
+    t: &T,
+    vault: &Mutex<Option<Vault>>,
+    accounts: &AccountsState,
+    id: &str,
+    now: i64,
+    force: bool,
+) -> Result<Secret, AuthError> {
+    let acct_lock = refresh_lock_for(vault, id);
+    let _acct_guard = acct_lock.lock().await;
+
     // Which vault this refresh belongs to. The network steps below take a while; if the vault is
     // replaced meanwhile (it was archived by "Start fresh" and a new one created), the results of this
     // refresh must not be written into it.
@@ -362,6 +589,15 @@ pub async fn ensure_fresh<T: Transport>(
         let v = guard.as_ref().ok_or(AuthError::VaultLocked)?;
         (v.account(id).cloned(), v.generation())
     };
+    let expected_uuid = accounts
+        .load()
+        .map_err(storage)?
+        .accounts
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or(AuthError::UnknownAccount)?
+        .minecraft_uuid;
+
     let mark = |reason: ReauthReason| {
         let _ = accounts.update(|f| f.mark_needs_reauth(id, reason, now));
     };
@@ -369,19 +605,27 @@ pub async fn ensure_fresh<T: Transport>(
         mark(ReauthReason::Unknown); // e.g. the vault came from another folder
         return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
     };
-    if let (Some(token), Some(expires)) = (
-        &secrets.minecraft_access_token,
-        secrets.minecraft_token_expires_at,
-    ) {
-        if expires > now + TOKEN_MARGIN_SECS {
-            return Ok(Secret::new(token.clone()));
+    if !force {
+        if let (Some(token), Some(expires)) = (
+            &secrets.minecraft_access_token,
+            secrets.minecraft_token_expires_at,
+        ) {
+            if expires > now.saturating_add(TOKEN_MARGIN_SECS)
+                && expires <= now.saturating_add(MAX_CACHED_TTL_SECS)
+            {
+                return Ok(Secret::new(token.clone()));
+            }
         }
     }
-    let Some(old_refresh) = &secrets.ms_refresh_token else {
+    let Some(old_refresh) = secrets
+        .ms_refresh_token
+        .as_ref()
+        .map(|s| Secret::new(s.clone()))
+    else {
         mark(ReauthReason::Unknown);
         return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
     };
-    let tokens = match refresh_ms(t, &Secret::new(old_refresh.clone())).await {
+    let tokens = match refresh_ms(t, &old_refresh).await {
         Ok(tokens) => tokens,
         Err(AuthError::NeedsSignIn(reason)) => {
             mark(reason);
@@ -392,28 +636,49 @@ pub async fn ensure_fresh<T: Transport>(
     // Microsoft rotates refresh tokens, and the old one may stop working once it has been used. So
     // the new one is saved to the vault right now, before the Xbox and Minecraft steps: if one of
     // them fails (an outage, a rate limit), the account still holds a refresh token that works. Only
-    // the refresh token is written here; the short-lived Minecraft token and its expiry stay as they
-    // were until the whole chain has succeeded.
+    // the refresh token is written here, and only if the account was not removed meanwhile.
     if let Some(new_refresh) = &tokens.refresh {
         let mut guard = lock(vault);
         let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
         if v.generation() != generation {
             return Err(AuthError::VaultLocked);
         }
+        if v.account(id).is_none() {
+            return Err(AuthError::UnknownAccount);
+        }
+        let still_present = accounts
+            .load()
+            .map_err(storage)?
+            .accounts
+            .iter()
+            .any(|a| a.id == id && same_uuid(&a.minecraft_uuid, &expected_uuid));
+        if !still_present {
+            return Err(AuthError::UnknownAccount);
+        }
         let mut updated = secrets.clone();
         updated.ms_refresh_token = Some(new_refresh.expose().to_owned());
         v.set_account(id, updated).map_err(storage)?;
     }
     let (session, profile) = complete_chain(t, &tokens.access).await?;
+    if !same_uuid(&expected_uuid, &profile.uuid) {
+        return Err(AuthError::WrongAccount);
+    }
     // The refresh token to keep: the new one, or the old one if none came back.
-    let refresh = tokens
-        .refresh
-        .unwrap_or_else(|| Secret::new(old_refresh.clone()));
+    let refresh = tokens.refresh.unwrap_or(old_refresh);
     {
         let mut guard = lock(vault);
         let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
         if v.generation() != generation {
             return Err(AuthError::VaultLocked); // the vault changed: nothing of this refresh is kept
+        }
+        if v.account(id).is_none() {
+            return Err(AuthError::UnknownAccount);
+        }
+        let current = accounts.load().map_err(storage)?;
+        match current.accounts.iter().find(|a| a.id == id) {
+            Some(a) if same_uuid(&a.minecraft_uuid, &profile.uuid) => {}
+            Some(_) => return Err(AuthError::WrongAccount),
+            None => return Err(AuthError::UnknownAccount),
         }
         v.set_account(id, secrets_for(&refresh, &session, now))
             .map_err(storage)?;
@@ -442,7 +707,9 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct AuthState {
     pub vault_path: std::path::PathBuf,
     pub vault: Mutex<Option<Vault>>,
+    pub(crate) kdf_gate: tokio::sync::Mutex<()>,
     pub(crate) running: Mutex<Option<Arc<Notify>>>,
+    pub(crate) sign_in_cancelled: AtomicBool,
     /// Bumped by "Start fresh" (`vault_recovery`). An unlock or create that began before it must not
     /// install its vault afterwards: that vault's file has been archived.
     pub(crate) epoch: AtomicU64,
@@ -454,7 +721,9 @@ impl AuthState {
         Self {
             vault_path,
             vault: Mutex::new(None),
+            kdf_gate: tokio::sync::Mutex::new(()),
             running: Mutex::new(None),
+            sign_in_cancelled: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             http,
         }
@@ -475,6 +744,9 @@ impl AuthState {
                 "vault_missing",
                 "the vault was archived while it was being opened",
             ));
+        }
+        if slot.is_some() {
+            return Err(CodedError::new("vault_exists", "a vault is already open"));
         }
         after(&mut vault);
         *slot = Some(vault);
@@ -531,6 +803,7 @@ pub(crate) fn vault_error(e: &VaultError) -> CodedError {
     match e {
         VaultError::Authentication => CodedError::new("passphrase_mismatch", "passphrase rejected"),
         VaultError::PassphraseTooShort => CodedError::new("passphrase_too_short", e.to_string()),
+        VaultError::PassphraseTooLong => CodedError::new("passphrase_too_long", e.to_string()),
         VaultError::AlreadyExists => CodedError::new("vault_exists", "a vault already exists"),
         VaultError::Missing => CodedError::new("vault_missing", "there is no vault file"),
         _ => CodedError::new("vault_unreadable", e.to_string()),
@@ -545,40 +818,49 @@ pub fn vault_status(auth: State<'_, AuthState>) -> VaultStatusDto {
     }
 }
 
+fn finish_create_vault(auth: &AuthState, vault: Vault, started: u64) -> Result<(), CodedError> {
+    let mut slot = lock(&auth.vault);
+    if auth.epoch.load(Ordering::SeqCst) != started {
+        return Err(CodedError::new(
+            "vault_missing",
+            "the vault was archived while it was being created",
+        ));
+    }
+    if slot.is_some() {
+        return Err(CodedError::new("vault_exists", "a vault already exists"));
+    }
+    vault.persist_new().map_err(|e| vault_error(&e))?;
+    *slot = Some(vault);
+    Ok(())
+}
+
+pub(crate) async fn create_vault_with(
+    auth: &AuthState,
+    passphrase: String,
+) -> Result<(), CodedError> {
+    let _kdf = auth.kdf_gate.lock().await;
+    if lock(&auth.vault).is_some() {
+        return Err(CodedError::new("vault_exists", "a vault already exists"));
+    }
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    let path = auth.vault_path.clone();
+    let started = auth.epoch.load(Ordering::SeqCst);
+    let vault = tokio::task::spawn_blocking(move || Vault::derive_empty(&path, &passphrase))
+        .await
+        .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
+        .map_err(|e| vault_error(&e))?;
+    finish_create_vault(auth, vault, started)
+}
+
 #[tauri::command]
 pub async fn create_vault(
     auth: State<'_, AuthState>,
     passphrase: String,
 ) -> Result<(), CodedError> {
-    let passphrase = zeroize::Zeroizing::new(passphrase);
-    let path = auth.vault_path.clone();
-    let started = auth.epoch.load(Ordering::SeqCst);
-    let vault = tokio::task::spawn_blocking(move || Vault::create(&path, &passphrase))
-        .await
-        .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
-        .map_err(|e| vault_error(&e))?;
-    auth.install_vault(vault, started, |_| ())
+    create_vault_with(&auth, passphrase).await
 }
 
-/// Drops the vault entries of accounts that were removed while the vault was locked.
-///
-/// This deletes credentials, so it only runs against an account list that is known to be
-/// authoritative: `accounts.json` must exist and parse. A missing file (a copied `vault.bin`, a
-/// restored backup, a deleted list) or a damaged one proves nothing about which accounts are gone,
-/// so the vault is left exactly as it is. A file that parses and really lists no accounts is a real
-/// empty list. Returns how many entries were removed.
-pub(crate) fn purge_orphans(vault: &mut Vault, accounts_path: &Path) -> usize {
-    let file = match crate::accounts::AccountsFile::load_authoritative(accounts_path) {
-        Ok(Some(file)) => file,
-        Ok(None) => {
-            tracing::info!("accounts.json is missing; the vault was left untouched");
-            return 0;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "accounts.json could not be read; the vault was left untouched");
-            return 0;
-        }
-    };
+fn purge_orphans_against(vault: &mut Vault, file: &crate::accounts::AccountsFile) -> usize {
     let orphans: Vec<String> = vault
         .account_ids()
         .filter(|id| !file.accounts.iter().any(|a| a.id == *id))
@@ -594,12 +876,51 @@ pub(crate) fn purge_orphans(vault: &mut Vault, accounts_path: &Path) -> usize {
     removed
 }
 
-#[tauri::command]
-pub async fn unlock_vault(
-    auth: State<'_, AuthState>,
-    accounts: State<'_, AccountsState>,
+/// Drops the vault entries of accounts that were removed while the vault was locked.
+///
+/// This deletes credentials, so it only runs against an account list that is known to be
+/// authoritative: `accounts.json` must exist and parse. A missing file (a copied `vault.bin`, a
+/// restored backup, a deleted list) or a damaged one proves nothing about which accounts are gone,
+/// so the vault is left exactly as it is. A file that parses and really lists no accounts is a real
+/// empty list. Returns how many entries were removed.
+#[cfg(test)]
+pub(crate) fn purge_orphans(vault: &mut Vault, accounts_path: &Path) -> usize {
+    match crate::accounts::AccountsFile::load_authoritative(accounts_path) {
+        Ok(Some(file)) => purge_orphans_against(vault, &file),
+        Ok(None) => {
+            tracing::info!("accounts.json is missing; the vault was left untouched");
+            0
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "accounts.json could not be read; the vault was left untouched");
+            0
+        }
+    }
+}
+
+fn purge_orphans_locked(vault: &mut Vault, accounts: &AccountsState) -> usize {
+    match accounts.load_authoritative() {
+        Ok(Some(file)) => purge_orphans_against(vault, &file),
+        Ok(None) => {
+            tracing::info!("accounts.json is missing; the vault was left untouched");
+            0
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "accounts.json could not be read; the vault was left untouched");
+            0
+        }
+    }
+}
+
+pub(crate) async fn unlock_vault_with(
+    auth: &AuthState,
+    accounts: &AccountsState,
     passphrase: String,
 ) -> Result<(), CodedError> {
+    let _kdf = auth.kdf_gate.lock().await;
+    if lock(&auth.vault).is_some() {
+        return Ok(());
+    }
     let passphrase = zeroize::Zeroizing::new(passphrase);
     let path = auth.vault_path.clone();
     let started = auth.epoch.load(Ordering::SeqCst);
@@ -608,8 +929,17 @@ pub async fn unlock_vault(
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
         .map_err(|e| vault_error(&e))?;
     auth.install_vault(vault, started, |v| {
-        purge_orphans(v, accounts.path());
+        purge_orphans_locked(v, accounts);
     })
+}
+
+#[tauri::command]
+pub async fn unlock_vault(
+    auth: State<'_, AuthState>,
+    accounts: State<'_, AccountsState>,
+    passphrase: String,
+) -> Result<(), CodedError> {
+    unlock_vault_with(&auth, &accounts, passphrase).await
 }
 
 fn transport(auth: &AuthState) -> Result<&HttpFetcher, AuthError> {
@@ -633,6 +963,29 @@ pub async fn begin_sign_in(
         })
 }
 
+fn persist_signed_in(
+    auth: &AuthState,
+    accounts: &AccountsState,
+    signed: &SignedIn,
+    reauth_for: Option<&str>,
+    now: i64,
+) -> Result<String, AuthError> {
+    let mut guard = lock(&auth.vault);
+    if auth.sign_in_cancelled.load(Ordering::SeqCst) {
+        return Err(AuthError::Cancelled);
+    }
+    let vault = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+    persist(vault, accounts, signed, reauth_for, now)
+}
+
+pub(crate) fn cancel_sign_in_with(auth: &AuthState) {
+    let running = lock(&auth.running);
+    auth.sign_in_cancelled.store(true, Ordering::SeqCst);
+    if let Some(n) = running.as_ref() {
+        n.notify_one();
+    }
+}
+
 async fn run_sign_in(
     app: &AppHandle,
     auth: &AuthState,
@@ -648,6 +1001,7 @@ async fn run_sign_in(
         if running.is_some() {
             return Err(AuthError::InProgress);
         }
+        auth.sign_in_cancelled.store(false, Ordering::SeqCst);
         *running = Some(cancel.clone());
     }
     let _guard = RunGuard(&auth.running);
@@ -672,11 +1026,7 @@ async fn run_sign_in(
     }
     let signed = signed?;
 
-    {
-        let mut guard = lock(&auth.vault);
-        let vault = guard.as_mut().ok_or(AuthError::VaultLocked)?;
-        persist(vault, accounts, &signed, reauth_for.as_deref(), now_unix())?;
-    }
+    persist_signed_in(auth, accounts, &signed, reauth_for.as_deref(), now_unix())?;
     tracing::info!("signed in a Minecraft Java account");
     // The avatar is cosmetic: noting and fetching the skin can never fail the sign-in.
     accounts.record_skin(&signed.profile.uuid, signed.profile.skin_url.as_deref());
@@ -688,12 +1038,10 @@ async fn run_sign_in(
 
 #[tauri::command]
 pub fn cancel_sign_in(auth: State<'_, AuthState>) {
-    if let Some(n) = lock(&auth.running).as_ref() {
-        n.notify_one();
-    }
+    cancel_sign_in_with(&auth);
 }
 
-/// Refreshes one account's credentials now (the same step that will run before a launch).
+/// Refreshes one account's credentials now (forcing a fresh token exchange).
 #[tauri::command]
 pub async fn refresh_account(
     auth: State<'_, AuthState>,
@@ -702,7 +1050,7 @@ pub async fn refresh_account(
 ) -> Result<AccountsDto, SignInError> {
     let result = async {
         let t = transport(&auth)?;
-        ensure_fresh(t, &auth.vault, &accounts, &id, now_unix()).await?;
+        ensure_fresh_forced(t, &auth.vault, &accounts, &id, now_unix()).await?;
         Ok(())
     }
     .await;
@@ -1538,5 +1886,460 @@ mod tests {
         let missing = e.dir.path().join("not-there.bin");
         let err = Vault::unlock(&missing, "whatever passphrase").unwrap_err();
         assert_eq!(vault_error(&err).code, "vault_missing");
+    }
+
+    #[tokio::test]
+    async fn callback_requires_terminated_headers_accepts_ipv6_host_and_sets_security_headers() {
+        let v6_ok = "GET /?code=abc&state=S HTTP/1.1\r\nHost: [::1]:5000\r\n\r\n";
+        assert!(
+            matches!(parse_callback(v6_ok, 5000, "S"), Callback::Code(c) if c.expose() == "abc")
+        );
+        let upper_ok = "GET /?code=abc&state=S HTTP/1.1\r\nHOST: LOCALHOST:5000\r\n\r\n";
+        assert!(matches!(
+            parse_callback(upper_ok, 5000, "S"),
+            Callback::Code(_)
+        ));
+        for bad in [
+            "GET /?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000\r\n",
+            "GET /?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000",
+            "GET /?code=abc&state=S HTTP/1.1\r\nHost: evil.example:5000\r\nHost: localhost:5000\r\n\r\n",
+            "GET /?code=abc&state=S HTTP/1.1\r\nX-Pad: 1\r\n\r\nHost: localhost:5000\r\n\r\n",
+        ] {
+            assert!(
+                matches!(parse_callback(bad, 5000, "S"), Callback::Ignore),
+                "{bad}"
+            );
+        }
+
+        let lb = Loopback::bind().await.unwrap();
+        let port = lb.port();
+        let reply_handle = tokio::spawn(async move {
+            // 1. Truncated stream closed before `\r\n\r\n` must be ignored
+            let mut half = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let partial = format!("GET /?code=BAD&state=S HTTP/1.1\r\nHost: localhost:{port}\r\n");
+            half.write_all(partial.as_bytes()).await.unwrap();
+            let _ = half.shutdown().await;
+            drop(half);
+
+            // 2. Real callback receives hardened response headers
+            let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            s.write_all(
+                format!("GET /?code=GOOD&state=S HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+            let mut raw = Vec::new();
+            s.read_to_end(&mut raw).await.unwrap();
+            String::from_utf8_lossy(&raw).into_owned()
+        });
+        let code = lb.wait_for_code("S", Duration::from_secs(5)).await.unwrap();
+        assert_eq!(code.expose(), "GOOD");
+        let resp = reply_handle.await.unwrap();
+        let lower = resp.to_ascii_lowercase();
+        assert!(lower.contains("x-content-type-options: nosniff"), "{resp}");
+        assert!(lower.contains("frame-ancestors 'none'"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn loopback_handles_idle_preconnects_ipv6_and_port_collisions() {
+        #[cfg(windows)]
+        {
+            let v4 = bind_v4_exclusive(0).unwrap();
+            let p = v4.local_addr().unwrap().port();
+            let hijack = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )
+            .unwrap();
+            let _ = hijack.set_reuse_address(true);
+            let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, p));
+            assert!(
+                hijack.bind(&addr.into()).is_err(),
+                "SO_EXCLUSIVEADDRUSE must block SO_REUSEADDR hijacking"
+            );
+        }
+
+        // If IPv6 loopback is supported on this host, occupying `[::1]:occupied` forces a retry.
+        if let Ok(occupied_v6) = bind_v6_exclusive(0) {
+            let occupied_port = occupied_v6.local_addr().unwrap().port();
+            let mut first = true;
+            let lb = bind_loopback_with(|| {
+                if first {
+                    first = false;
+                    bind_v4_exclusive(occupied_port)
+                } else {
+                    bind_v4_exclusive(0)
+                }
+            })
+            .unwrap();
+            assert_ne!(lb.port(), occupied_port);
+            assert!(lb.v6.is_some());
+            drop(occupied_v6);
+        }
+
+        // Idle preconnect sockets must never block a real callback on either 127.0.0.1 or [::1].
+        let lb = Loopback::bind().await.unwrap();
+        let port = lb.port();
+        let has_v6 = lb.v6.is_some();
+        let t0 = tokio::time::Instant::now();
+        let _idle_v4 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _idle_v6 = if has_v6 {
+            Some(TcpStream::connect(("::1", port)).await.unwrap())
+        } else {
+            None
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if has_v6 {
+                let mut s = TcpStream::connect(("::1", port)).await.unwrap();
+                s.write_all(
+                    format!("GET /?code=V6-CODE&state=S HTTP/1.1\r\nHost: [::1]:{port}\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+                let mut out = Vec::new();
+                let _ = s.read_to_end(&mut out).await;
+            } else {
+                let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                s.write_all(
+                    format!(
+                        "GET /?code=V6-CODE&state=S HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+                let mut out = Vec::new();
+                let _ = s.read_to_end(&mut out).await;
+            }
+        });
+        let code = lb.wait_for_code("S", Duration::from_secs(5)).await.unwrap();
+        assert_eq!(code.expose(), "V6-CODE");
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "idle preconnect blocked callback: {:?}",
+            t0.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_creation_and_unlock_serialize_kdf_and_never_write_orphaned_vault_after_reset() {
+        assert_eq!(
+            vault_error(&VaultError::PassphraseTooLong).code,
+            "passphrase_too_long"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("vault.bin");
+        let auth = AuthState::new(vault_path.clone(), Err("no network".into()));
+        let accounts = AccountsState::new(dir.path().join("accounts.json"));
+
+        // Epoch bump during create_vault_with (after KDF derived in memory, before persist_new)
+        // must NOT write `vault.bin` to disk!
+        let started = auth.epoch.load(Ordering::SeqCst);
+        let derived = Vault::derive_empty_with(&vault_path, "correct horse battery", FAST).unwrap();
+        assert!(!vault_path.exists(), "derive_empty writes nothing to disk");
+        auth.epoch.fetch_add(1, Ordering::SeqCst);
+        let err = finish_create_vault(&auth, derived, started).unwrap_err();
+        assert_eq!(err.code, "vault_missing");
+        assert!(
+            !vault_path.exists(),
+            "no orphaned vault.bin written after epoch bump"
+        );
+        assert!(lock(&auth.vault).is_none());
+
+        // Real create_vault_with persists and installs cleanly, and rejects a duplicate create.
+        create_vault_with(&auth, "correct horse battery".into())
+            .await
+            .unwrap();
+        assert!(vault_path.exists());
+        assert!(lock(&auth.vault).is_some());
+        let dup = create_vault_with(&auth, "correct horse battery".into())
+            .await
+            .unwrap_err();
+        assert_eq!(dup.code, "vault_exists");
+
+        // `install_vault` also refuses to overwrite an already-open vault slot.
+        let extra =
+            Vault::derive_empty_with(&dir.path().join("other.bin"), "correct horse battery", FAST)
+                .unwrap();
+        let cur_epoch = auth.epoch.load(Ordering::SeqCst);
+        assert_eq!(
+            auth.install_vault(extra, cur_epoch, |_| panic!("must not run"))
+                .unwrap_err()
+                .code,
+            "vault_exists"
+        );
+
+        // Lock the vault, add an orphan + a valid account, and unlock via `unlock_vault_with`.
+        {
+            let mut g = lock(&auth.vault);
+            let v = g.as_mut().unwrap();
+            v.set_account("kept", AccountSecrets::default()).unwrap();
+            v.set_account("orphan", AccountSecrets::default()).unwrap();
+        }
+        *lock(&auth.vault) = None;
+        let mut af = AccountsFile::default();
+        af.accounts.push(AccountMeta {
+            id: "kept".into(),
+            username: "Steve".into(),
+            minecraft_uuid: UUID.into(),
+            added_at: 1,
+            last_used_at: None,
+            status: AccountStatus::Ready,
+        });
+        af.save(accounts.path()).unwrap();
+
+        unlock_vault_with(&auth, &accounts, "correct horse battery".into())
+            .await
+            .unwrap();
+        {
+            let g = lock(&auth.vault);
+            let v = g.as_ref().unwrap();
+            assert!(v.account("kept").is_some());
+            assert!(v.account("orphan").is_none());
+        }
+        // Already unlocked: returns Ok(()) immediately without re-running Argon2.
+        unlock_vault_with(&auth, &accounts, "ignored while unlocked".into())
+            .await
+            .unwrap();
+    }
+
+    struct SlowRefreshTransport {
+        inner: FakeTransport,
+    }
+
+    impl Transport for SlowRefreshTransport {
+        fn send(
+            &self,
+            request: crate::net::HttpRequest,
+        ) -> impl std::future::Future<
+            Output = Result<crate::net::HttpResponse, crate::net::FetchError>,
+        > + Send {
+            let fut = self.inner.send(request);
+            async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                fut.await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn token_expiry_bounds_forced_refresh_and_concurrent_single_flight_refresh() {
+        let s = secrets_for(
+            &Secret::new("R".into()),
+            &McSession {
+                access_token: Secret::new("M".into()),
+                expires_in: 999_999,
+            },
+            1000,
+        );
+        assert_eq!(s.minecraft_token_expires_at, Some(1000 + 86_400));
+
+        // 1. `now + 100_000` (within 86_400 + 14_400 skew margin) is reused without network calls
+        let e = env();
+        let id = seeded(&e, 1000 + 100_000);
+        let t = FakeTransport::new();
+        let tok = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000)
+            .await
+            .unwrap();
+        assert_eq!(tok.expose(), "MC-ACCESS");
+        assert!(t.calls().is_empty());
+
+        // 2. Bogus far-future expiry (`now + 200_000` or `i64::MAX`) is rejected and refreshed
+        for bogus in [1000 + 200_000, i64::MAX] {
+            let e = env();
+            let id = seeded(&e, bogus);
+            let t = FakeTransport::new();
+            script_ok(&t, "NEW-R", "Steve_01", UUID_RAW);
+            let tok = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000)
+                .await
+                .unwrap();
+            assert_eq!(tok.expose(), "MC-ACCESS");
+            assert_eq!(
+                t.calls().iter().filter(|c| c.1 == TOKEN).count(),
+                1,
+                "bogus expiry {bogus} must force a refresh"
+            );
+        }
+
+        // 3. `ensure_fresh_forced` refreshes even when the cached token is completely fresh
+        let e = env();
+        let id = seeded(&e, 1000 + 3600);
+        let t = FakeTransport::new();
+        t.reply(
+            TOKEN,
+            200,
+            r#"{"access_token":"MS-ACCESS","refresh_token":"FORCED-R","expires_in":3600}"#,
+        );
+        t.reply(
+            XBL,
+            200,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            XSTS,
+            200,
+            r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            LOGIN,
+            200,
+            r#"{"access_token":"FORCED-MC","expires_in":86400}"#,
+        );
+        t.reply(
+            PROFILE,
+            200,
+            format!(r#"{{"id":"{UUID_RAW}","name":"Steve_01"}}"#),
+        );
+        let tok = ensure_fresh_forced(&t, &e.vault, &e.accounts, &id, 1000)
+            .await
+            .unwrap();
+        assert_eq!(tok.expose(), "FORCED-MC");
+
+        // 4. Concurrent `ensure_fresh` calls for the same account serialize so only ONE MS refresh runs
+        let e = env();
+        let id = seeded(&e, 50);
+        let slow = SlowRefreshTransport {
+            inner: FakeTransport::new(),
+        };
+        // Script only ONE refresh chain: if the second caller hit the network, it would fail!
+        script_ok(&slow.inner, "SINGLE-FLIGHT-R", "Steve_01", UUID_RAW);
+        let (r1, r2) = tokio::join!(
+            ensure_fresh(&slow, &e.vault, &e.accounts, &id, 1000),
+            ensure_fresh(&slow, &e.vault, &e.accounts, &id, 1000),
+        );
+        assert_eq!(r1.unwrap().expose(), "MC-ACCESS");
+        assert_eq!(r2.unwrap().expose(), "MC-ACCESS");
+        assert_eq!(
+            slow.inner.calls().iter().filter(|c| c.1 == TOKEN).count(),
+            1
+        );
+    }
+
+    /// Removes the account while the first network request is in flight (simulating sign-out).
+    struct SignsOutInFlight<'a> {
+        inner: FakeTransport,
+        vault: &'a Mutex<Option<Vault>>,
+        accounts: &'a AccountsState,
+        id: String,
+        fired: AtomicBool,
+    }
+
+    impl Transport for SignsOutInFlight<'_> {
+        fn send(
+            &self,
+            request: crate::net::HttpRequest,
+        ) -> impl std::future::Future<
+            Output = Result<crate::net::HttpResponse, crate::net::FetchError>,
+        > + Send {
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                if let Some(v) = lock(self.vault).as_mut() {
+                    let _ = v.remove_account(&self.id);
+                }
+                let _ = self.accounts.update(|f| {
+                    f.remove(&self.id);
+                });
+            }
+            self.inner.send(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_foreign_uuid_and_post_sign_out_zombies_before_touching_vault() {
+        // 1. Wrong UUID from profile endpoint must NOT overwrite the vault's Minecraft access token
+        let e = env();
+        let id = seeded(&e, 50);
+        {
+            let mut g = lock(&e.vault);
+            let v = g.as_mut().unwrap();
+            let mut s = v.account(&id).unwrap().clone();
+            s.minecraft_access_token = Some("ORIGINAL-TOKEN".into());
+            v.set_account(&id, s).unwrap();
+        }
+        let t = FakeTransport::new();
+        t.reply(
+            TOKEN,
+            200,
+            r#"{"access_token":"MS-ACCESS","refresh_token":"ROTATED-R","expires_in":3600}"#,
+        );
+        t.reply(
+            XBL,
+            200,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            XSTS,
+            200,
+            r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        t.reply(
+            LOGIN,
+            200,
+            r#"{"access_token":"FOREIGN-TOKEN","expires_in":86400}"#,
+        );
+        t.reply(
+            PROFILE,
+            200,
+            r#"{"id":"0000000000004000800000000000b002","name":"WrongPerson"}"#,
+        );
+        let res = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000).await;
+        assert!(matches!(res, Err(AuthError::WrongAccount)));
+        let stored_tok = lock(&e.vault)
+            .as_ref()
+            .unwrap()
+            .account(&id)
+            .unwrap()
+            .minecraft_access_token
+            .clone();
+        assert_eq!(
+            stored_tok.as_deref(),
+            Some("ORIGINAL-TOKEN"),
+            "foreign session token must never be saved to vault.bin"
+        );
+
+        // 2. Signing out while refresh is in flight must NOT resurrect a zombie vault entry
+        let e = env();
+        let id = seeded(&e, 50);
+        let t = SignsOutInFlight {
+            inner: FakeTransport::new(),
+            vault: &e.vault,
+            accounts: &e.accounts,
+            id: id.clone(),
+            fired: AtomicBool::new(false),
+        };
+        script_ok(&t.inner, "ZOMBIE-REFRESH", "Steve_01", UUID_RAW);
+        let res = ensure_fresh(&t, &e.vault, &e.accounts, &id, 1000).await;
+        assert!(matches!(res, Err(AuthError::UnknownAccount)));
+        assert!(
+            lock(&e.vault).as_ref().unwrap().account(&id).is_none(),
+            "signed-out account must stay removed from vault"
+        );
+    }
+
+    #[test]
+    fn cancelling_sign_in_blocks_late_persistence() {
+        let e = env();
+        let auth = AuthState::new(e.dir.path().join("vault.bin"), Err("no network".into()));
+        *lock(&auth.vault) = lock(&e.vault).take();
+        *lock(&auth.running) = Some(Arc::new(Notify::new()));
+        auth.sign_in_cancelled.store(false, Ordering::SeqCst);
+
+        cancel_sign_in_with(&auth);
+        assert!(auth.sign_in_cancelled.load(Ordering::SeqCst));
+
+        let res = persist_signed_in(
+            &auth,
+            &e.accounts,
+            &signed("R", "Steve_01", UUID),
+            None,
+            1000,
+        );
+        assert!(matches!(res, Err(AuthError::Cancelled)));
+        assert!(e.accounts.load().unwrap().accounts.is_empty());
+        assert_eq!(lock(&auth.vault).as_ref().unwrap().account_ids().count(), 0);
     }
 }

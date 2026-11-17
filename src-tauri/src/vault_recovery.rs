@@ -31,14 +31,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Notify;
 
-use crate::accounts::{AccountsFile, ReauthReason};
+use crate::accounts::ReauthReason;
 use crate::accounts_api::{AccountsDto, AccountsState, ACCOUNTS_CHANGED_EVENT};
 use crate::auth::{lock, AuthState, RunGuard};
 use crate::coded_error::CodedError;
 use crate::launch_cmd::LaunchState;
+use crate::portable::fsutil::{
+    is_link, move_new_no_replace, reject_links_between, rename_with_retry,
+};
 use crate::profiles::now_unix;
 
 /// Where retired vaults go, next to `vault.bin`.
@@ -103,6 +106,9 @@ fn is_save_temp(name: &str, vault_name: &str) -> bool {
 /// active vault where it was.
 fn credential_files(vault: &Path) -> Result<Vec<PathBuf>, ResetError> {
     let dir = vault.parent().ok_or(ResetError::ResetFailed)?;
+    if is_link(dir).unwrap_or(true) {
+        return Err(ResetError::ResetFailed);
+    }
     let name = vault
         .file_name()
         .and_then(|n| n.to_str())
@@ -110,7 +116,7 @@ fn credential_files(vault: &Path) -> Result<Vec<PathBuf>, ResetError> {
     let mut files = Vec::new();
     let mut take = |p: PathBuf| -> Result<(), ResetError> {
         match fs::symlink_metadata(&p) {
-            Ok(m) if m.is_file() => {
+            Ok(m) if m.is_file() && !is_link(&p).unwrap_or(true) => {
                 files.push(p);
                 Ok(())
             }
@@ -135,13 +141,18 @@ fn credential_files(vault: &Path) -> Result<Vec<PathBuf>, ResetError> {
 }
 
 fn unique_dir(root: &Path, now: i64) -> Result<PathBuf, ResetError> {
+    let base = root.parent().ok_or(ResetError::ResetFailed)?;
+    reject_links_between(base, root).map_err(|_| ResetError::ResetFailed)?;
     fs::create_dir_all(root).map_err(|_| ResetError::ResetFailed)?;
     for _ in 0..8 {
         let mut nonce = [0u8; 6];
         getrandom::fill(&mut nonce).map_err(|_| ResetError::ResetFailed)?;
         let dir = root.join(format!("{now}-{}", hex::encode(nonce)));
         match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
+            Ok(()) => {
+                reject_links_between(base, &dir).map_err(|_| ResetError::ResetFailed)?;
+                return Ok(dir);
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(_) => return Err(ResetError::ResetFailed),
         }
@@ -152,17 +163,19 @@ fn unique_dir(root: &Path, now: i64) -> Result<PathBuf, ResetError> {
 /// Moves `files` into one new folder under `root`. Does nothing, and creates nothing, for an empty
 /// list. If a rename fails, the files already moved are renamed back (never deleted).
 fn retire(files: &[PathBuf], root: &Path, now: i64) -> Result<(), ResetError> {
-    retire_with(files, root, now, &|from, to| fs::rename(from, to))
+    retire_with_ops(files, root, now, &move_new_no_replace, &rename_with_retry)
 }
 
-/// The rename used to move a file. A parameter only so that tests can make one fail.
+/// The rename used to move a file. A parameter so recovery uses non-replacing moves into the
+/// archive and retrying moves on rollback, while tests can inject failures.
 type Rename<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
 
-fn retire_with(
+fn retire_with_ops(
     files: &[PathBuf],
     root: &Path,
     now: i64,
-    rename: Rename<'_>,
+    move_into: Rename<'_>,
+    move_back: Rename<'_>,
 ) -> Result<(), ResetError> {
     if files.is_empty() {
         return Ok(());
@@ -171,12 +184,12 @@ fn retire_with(
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     for src in files {
         let Some(name) = src.file_name() else {
-            return rollback(&moved, &dir, rename);
+            return rollback(&moved, &dir, move_back);
         };
         let dst = dir.join(name);
-        match rename(src, &dst) {
+        match move_into(src, &dst) {
             Ok(()) => moved.push((src.clone(), dst)),
-            Err(_) => return rollback(&moved, &dir, rename),
+            Err(_) => return rollback(&moved, &dir, move_back),
         }
     }
     Ok(())
@@ -227,8 +240,9 @@ pub fn reset(
     }
 
     // Stage 2: the account list must be readable before anything is moved.
-    let list =
-        AccountsFile::load_authoritative(accounts.path()).map_err(|_| ResetError::Storage)?;
+    let list = accounts
+        .load_authoritative()
+        .map_err(|_| ResetError::Storage)?;
 
     // Stage 3: retire the old credentials.
     let files = credential_files(&auth.vault_path)?;
@@ -255,6 +269,10 @@ pub fn reset(
     Ok(())
 }
 
+fn should_emit_accounts_changed(result: &Result<(), ResetError>) -> bool {
+    matches!(result, Ok(()) | Err(ResetError::AccountsNotUpdated))
+}
+
 /// "Start fresh": archives the old vault and makes every account sign in again. Only allowed while
 /// the vault is locked, missing or unreadable.
 #[tauri::command]
@@ -264,15 +282,43 @@ pub async fn reset_vault(
     accounts: State<'_, AccountsState>,
     launch: State<'_, LaunchState>,
 ) -> Result<AccountsDto, CodedError> {
-    let result = reset(&auth, &accounts, &|| launch.any_starting(), now_unix());
+    let _ = (&auth, &accounts, &launch);
+    let app_for_work = app.clone();
+    let (result, dto) = tokio::task::spawn_blocking(move || {
+        let auth = app_for_work.state::<AuthState>();
+        let accounts = app_for_work.state::<AccountsState>();
+        let launch = app_for_work.state::<LaunchState>();
+        let result = reset(&auth, &accounts, &|| launch.any_starting(), now_unix());
+        let dto = if result.is_ok() {
+            Some(accounts.list().map_err(|e| e.coded()))
+        } else {
+            None
+        };
+        (result, dto)
+    })
+    .await
+    .map_err(|_| ResetError::ResetFailed.coded())?;
+
     match &result {
         Ok(()) => tracing::info!(op = "vault_reset", result = "ok", "recovery"),
         Err(e) => tracing::info!(op = "vault_reset", result = e.code(), "recovery"),
     }
-    // The account list may have changed even when the answer is an error (the vault was archived).
-    let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+    // Only emit when state actually changed (including when the vault was archived before list save).
+    if should_emit_accounts_changed(&result) {
+        let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+    }
     result.map_err(ResetError::coded)?;
-    accounts.list().map_err(|e| e.coded())
+    dto.unwrap_or_else(|| Err(ResetError::Storage.coded()))
+}
+
+#[cfg(test)]
+fn retire_with(
+    files: &[PathBuf],
+    root: &Path,
+    now: i64,
+    rename: Rename<'_>,
+) -> Result<(), ResetError> {
+    retire_with_ops(files, root, now, rename, rename)
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 use super::*;
 use crate::accounts::{AccountsFile, ReauthReason};
 use crate::download_policy::{DownloadPolicy, DEFAULT_ALLOWED_HOSTS};
+use crate::ms_auth::ENDPOINTS;
 use crate::net::testing_transport::FakeTransport;
 use crate::vault::{AccountSecrets, KdfParams};
 
@@ -24,10 +25,16 @@ const SKINS: &str = "https://api.minecraftservices.com/minecraft/profile/skins";
 const SKIN_ACTIVE: &str = "https://api.minecraftservices.com/minecraft/profile/skins/active";
 const CAPE_ACTIVE: &str = "https://api.minecraftservices.com/minecraft/profile/capes/active";
 
+const PNG_IEND: &[u8; 12] = b"\0\0\0\0IEND\xae\x42\x60\x82";
+
 fn png(w: u32, h: u32) -> Vec<u8> {
     let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     b.extend(w.to_be_bytes());
     b.extend(h.to_be_bytes());
+    // bit_depth=8, color_type=6 (RGBA), compression=0, filter=0, interlace=0, 4-byte CRC
+    b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b.extend_from_slice(b"\0\0\0\0IDAT\0\0\0\0");
+    b.extend_from_slice(PNG_IEND);
     b
 }
 
@@ -241,9 +248,51 @@ fn skin_files_are_checked_before_use() {
     let mut bad = png(64, 64);
     bad[8..12].copy_from_slice(&[0, 0, 0, 14]);
     assert!(SkinPng::validate(bad).is_err());
-    // the largest allowed size passes the size check (the header decides the rest)
+    // the minimal 45-byte PNG (8 sig + 25 IHDR + 12 IEND) passes; 44 bytes is rejected
+    let mut min_valid = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    min_valid.extend(64u32.to_be_bytes());
+    min_valid.extend(64u32.to_be_bytes());
+    min_valid.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    min_valid.extend_from_slice(PNG_IEND);
+    assert_eq!(min_valid.len(), 45);
+    assert!(SkinPng::validate(min_valid.clone()).is_ok());
+    assert_eq!(
+        SkinPng::validate(min_valid[..44].to_vec()).unwrap_err(),
+        ProfileServiceError::InvalidSkin(SkinProblem::NotPng)
+    );
+    // missing or damaged IEND trailer is rejected
+    let mut no_iend = png(64, 64);
+    *no_iend.last_mut().unwrap() ^= 0xff;
+    assert_eq!(
+        SkinPng::validate(no_iend).unwrap_err(),
+        ProfileServiceError::InvalidSkin(SkinProblem::NotPng)
+    );
+    // bad IHDR metadata fields (invalid bit depth/color type, compression, filter, interlace)
+    for (idx, val) in [
+        (24usize, 3u8), // invalid bit depth
+        (24, 16),       // 16-bit indexed color (color_type=3) is invalid
+        (25, 1),        // invalid color type
+        (26, 1),        // non-zero compression
+        (27, 1),        // non-zero filter
+        (28, 2),        // invalid interlace (> 1)
+    ] {
+        let mut corrupt = png(64, 64);
+        if idx == 24 && val == 16 {
+            corrupt[25] = 3; // indexed color cannot have 16-bit depth
+        }
+        corrupt[idx] = val;
+        assert_eq!(
+            SkinPng::validate(corrupt).unwrap_err(),
+            ProfileServiceError::InvalidSkin(SkinProblem::NotPng),
+            "field {idx}={val}"
+        );
+    }
+    // the largest allowed size passes the size check (with IEND preserved at the end)
     let mut max = png(64, 64);
-    max.resize(MAX_SKIN_FILE_BYTES, 0);
+    max.truncate(max.len() - PNG_IEND.len());
+    max.resize(MAX_SKIN_FILE_BYTES - PNG_IEND.len(), 0);
+    max.extend_from_slice(PNG_IEND);
+    assert_eq!(max.len(), MAX_SKIN_FILE_BYTES);
     assert!(SkinPng::validate(max).is_ok());
 }
 
@@ -446,10 +495,37 @@ async fn hiding_the_cape_is_one_delete_and_needs_no_cape_id() {
     assert_eq!(env.t.calls()[0].3, "");
 }
 
+fn script_refresh(t: &FakeTransport, fresh_mc_token: &str, raw_uuid: &str) {
+    t.reply(
+        ENDPOINTS[1],
+        200,
+        r#"{"access_token":"MS-ACCESS","refresh_token":"REFRESH-2","expires_in":3600}"#,
+    );
+    t.reply(
+        ENDPOINTS[2],
+        200,
+        r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+    );
+    t.reply(
+        ENDPOINTS[3],
+        200,
+        r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+    );
+    t.reply(
+        ENDPOINTS[4],
+        200,
+        format!(r#"{{"access_token":"{fresh_mc_token}","expires_in":86400}}"#),
+    );
+    t.reply(
+        ENDPOINTS[6],
+        200,
+        format!(r#"{{"id":"{raw_uuid}","name":"Alex_1"}}"#),
+    );
+}
+
 #[tokio::test]
 async fn failures_are_mapped_to_stable_codes_and_changes_are_never_retried() {
     for (status, code) in [
-        (401, "unauthorized"),
         (403, "forbidden"),
         (404, "no_profile"),
         (429, "rate_limited"),
@@ -483,6 +559,151 @@ async fn failures_are_mapped_to_stable_codes_and_changes_are_never_retried() {
         .await
         .unwrap_err();
     assert_eq!(e.code(), "invalid_skin");
+    assert_eq!(env.t.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_cached_token_forces_one_refresh_and_retries_once_with_the_fresh_token() {
+    // 1. Read (`profile`) gets 401 on cached token, refreshes once, succeeds with fresh token
+    let env = Env::new();
+    env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+    script_refresh(&env.t, "FRESH-MC-TOKEN", RAW_A);
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, &slim(), ""));
+    let p = env.service().profile("a").await.unwrap();
+    assert_eq!(p.skin_variant, Some(SkinVariant::Slim));
+    let profile_calls: Vec<_> = env
+        .t
+        .calls()
+        .into_iter()
+        .filter(|(_, u, _, _)| u == PROFILE)
+        .collect();
+    // 1st: initial 401 with cached TOKEN; 2nd: verify_java_profile inside ensure_fresh_forced; 3rd: retried read
+    assert_eq!(profile_calls.len(), 3);
+    assert!(profile_calls[0]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == &format!("Bearer {TOKEN}")));
+    assert!(profile_calls[2]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == "Bearer FRESH-MC-TOKEN"));
+
+    // 2. Change (`upload_skin`) gets 401 on cached token, refreshes once, succeeds with fresh token
+    let env = Env::new();
+    env.t.reply(SKINS, 401, r#"{"error":"expired"}"#);
+    script_refresh(&env.t, "FRESH-SKIN-TOKEN", RAW_A);
+    env.t.reply(SKINS, 200, profile_json(RAW_A, &slim(), ""));
+    let skin = SkinPng::validate(png(64, 64)).unwrap();
+    let p = env
+        .service()
+        .upload_skin("a", SkinVariant::Slim, skin)
+        .await
+        .unwrap();
+    assert_eq!(p.skin_variant, Some(SkinVariant::Slim));
+    let skin_calls: Vec<_> = env
+        .t
+        .calls()
+        .into_iter()
+        .filter(|(_, u, _, _)| u == SKINS)
+        .collect();
+    assert_eq!(skin_calls.len(), 2);
+    assert!(skin_calls[1]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == "Bearer FRESH-SKIN-TOKEN"));
+
+    // 3. When the fresh token ALSO gets 401, `Unauthorized` is returned and no second refresh runs
+    let env = Env::new();
+    env.t.reply(SKINS, 401, r#"{"error":"secret detail"}"#);
+    script_refresh(&env.t, "FRESH-STILL-401", RAW_A);
+    env.t.reply(SKINS, 401, r#"{"error":"secret detail"}"#);
+    let skin = SkinPng::validate(png(64, 64)).unwrap();
+    let e = env
+        .service()
+        .upload_skin("a", SkinVariant::Classic, skin)
+        .await
+        .unwrap_err();
+    assert_eq!(e, ProfileServiceError::Unauthorized);
+    assert_eq!(e.code(), "unauthorized");
+    assert!(!format!("{e:?} {e}").contains("secret detail"));
+    assert_eq!(
+        env.t
+            .calls()
+            .iter()
+            .filter(|(_, u, _, _)| u == SKINS)
+            .count(),
+        2,
+        "at most one retry after 401"
+    );
+    assert_eq!(
+        env.t
+            .calls()
+            .iter()
+            .filter(|(_, u, _, _)| u == ENDPOINTS[1])
+            .count(),
+        1,
+        "at most one refresh"
+    );
+}
+
+#[tokio::test]
+async fn a_non_empty_corrupt_or_foreign_200_on_change_fails_without_falling_back_to_read() {
+    // 200 with corrupt body -> BadResponse, no fallback GET /minecraft/profile
+    let env = Env::new();
+    env.t.reply(SKIN_ACTIVE, 200, "<html>corrupt</html>");
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", ""));
+    let e = env.service().reset_skin("a").await.unwrap_err();
+    assert!(matches!(e, ProfileServiceError::BadResponse(_)));
+    assert_eq!(env.calls(), vec![(Method::Delete, SKIN_ACTIVE.to_owned())]);
+
+    // 200 with another account's UUID -> BadResponse, no fallback GET /minecraft/profile
+    let env = Env::new();
+    env.t.reply(
+        SKIN_ACTIVE,
+        200,
+        profile_json("0000000000004000800000000000b002", "", ""),
+    );
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", ""));
+    let e = env.service().reset_skin("a").await.unwrap_err();
+    assert_eq!(
+        e,
+        ProfileServiceError::BadResponse("another profile answered")
+    );
+    assert_eq!(env.calls(), vec![(Method::Delete, SKIN_ACTIVE.to_owned())]);
+
+    // 200 with whitespace-only body -> treated as bare success and reads current profile once
+    let env = Env::new();
+    env.t.reply(SKIN_ACTIVE, 200, "  \r\n ");
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", ""));
+    let p = env.service().reset_skin("a").await.unwrap();
+    assert_eq!(p.skin_variant, None);
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Delete, SKIN_ACTIVE.to_owned()),
+            (Method::Get, PROFILE.to_owned())
+        ]
+    );
+}
+
+#[test]
+fn auth_errors_map_no_java_profile_and_unknown_account_accurately() {
+    assert_eq!(
+        auth_error(&AuthError::NoJavaProfile {
+            owns_minecraft: false
+        }),
+        ProfileServiceError::NoProfile
+    );
+    assert_eq!(
+        auth_error(&AuthError::NoJavaProfile {
+            owns_minecraft: true
+        }),
+        ProfileServiceError::NoProfile
+    );
+    assert_eq!(
+        auth_error(&AuthError::UnknownAccount),
+        ProfileServiceError::UnknownAccount
+    );
 }
 
 #[tokio::test]

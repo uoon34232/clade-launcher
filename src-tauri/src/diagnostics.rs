@@ -148,6 +148,12 @@ fn redact_key_values(line: &str) -> String {
                     // An Authorization header carries `Bearer <token>`: the whole rest of the line.
                     let value_len: usize = if key == "authorization" {
                         line[j..].len()
+                    } else if key == "xbl3.0" {
+                        line[j..]
+                            .chars()
+                            .take_while(|c| is_value_char(*c) || *c == ';')
+                            .map(char::len_utf8)
+                            .sum()
                     } else {
                         line[j..]
                             .chars()
@@ -246,10 +252,27 @@ fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
 }
 
+fn is_msa_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/' | '=' | '!' | '*' | '$')
+}
+
 /// The length of the credential at the start of `rest`, if what is there is recognisable by shape:
-/// a JWT (`eyJ...`, or three long base64url segments), a Microsoft access token (`Ew...`), a Microsoft
-/// refresh token (`M.` / `0.A`), or the development fixture token. Anything else is not a secret.
+/// a JWT (`eyJ...`, or three long base64url segments), a 5-segment JWE, a Microsoft access token
+/// (`Ew...`), a Microsoft refresh token (`M.` / `0.A`), or the development fixture token. Anything
+/// else is not a secret.
 fn secret_shape_len(rest: &str) -> Option<usize> {
+    if rest.starts_with("Ew") || rest.starts_with("M.") || rest.starts_with("0.A") {
+        let msa_run: usize = rest
+            .chars()
+            .take_while(|c| is_msa_token_char(*c))
+            .map(char::len_utf8)
+            .sum();
+        if (rest.starts_with("Ew") && msa_run >= 80)
+            || ((rest.starts_with("M.") || rest.starts_with("0.A")) && msa_run >= 32)
+        {
+            return Some(msa_run);
+        }
+    }
     let run: usize = rest
         .chars()
         .take_while(|c| is_token_char(*c))
@@ -257,14 +280,16 @@ fn secret_shape_len(rest: &str) -> Option<usize> {
         .sum();
     let w = &rest[..run];
     let jwt = w.starts_with("eyJ") && run >= 20;
-    let three_segments = {
-        let parts: Vec<&str> = w.trim_end_matches('.').split('.').collect();
-        parts.len() == 3 && parts.iter().all(|p| p.len() >= 16)
-    };
-    let ms_refresh = (w.starts_with("M.") || w.starts_with("0.A")) && run >= 40;
-    let ms_access = w.starts_with("Ew") && run >= 100;
+    let parts: Vec<&str> = w.trim_end_matches('.').split('.').collect();
+    let three_segments = parts.len() == 3 && parts.iter().all(|p| p.len() >= 16);
+    let five_segments = parts.len() == 5
+        && run >= 64
+        && parts[0].len() >= 12
+        && parts[2].len() >= 12
+        && parts[3].len() >= 16
+        && parts[4].len() >= 16;
     let fixture = w.len() >= 12 && w[..12].eq_ignore_ascii_case("DEV-FIXTURE-");
-    (jwt || three_segments || ms_refresh || ms_access || fixture).then_some(run)
+    (jwt || three_segments || five_segments || fixture).then_some(run)
 }
 
 /// Replaces credentials that are recognisable by shape wherever they stand in the line (also after
@@ -346,27 +371,34 @@ fn redact_emails(line: &str) -> String {
     out
 }
 
-/// Replaces `C:\Users\<name>` (either slash direction) with `C:\Users\<user>`.
+/// Replaces the user profile folder segment (either slash direction or JSON-escaped) with `<user>`.
 fn redact_user_folder(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let lower = text.to_ascii_lowercase();
     while i < text.len() {
         let rest = &lower[i..];
-        let hit = ["\\users\\", "/users/"]
-            .iter()
-            .find(|p| rest.starts_with(**p));
-        if let Some(p) = hit {
-            let start = i + p.len();
-            let name_len: usize = text[start..]
+        if let Some(prefix) = ["\\users", "/users"].iter().find(|p| rest.starts_with(**p)) {
+            let after_prefix = i + prefix.len();
+            let sep_len: usize = text[after_prefix..]
                 .chars()
-                .take_while(|c| !matches!(c, '\\' | '/' | '"' | '\'' | '\r' | '\n'))
+                .take_while(|c| matches!(*c, '\\' | '/'))
                 .map(char::len_utf8)
                 .sum();
-            out.push_str(&text[i..start]);
-            out.push_str("<user>");
-            i = start + name_len;
-            continue;
+            if sep_len > 0 {
+                let start = after_prefix + sep_len;
+                let name_len: usize = text[start..]
+                    .chars()
+                    .take_while(|c| !matches!(*c, '\\' | '/' | '"' | '\'' | '\r' | '\n'))
+                    .map(char::len_utf8)
+                    .sum();
+                if name_len > 0 {
+                    out.push_str(&text[i..start]);
+                    out.push_str("<user>");
+                    i = start + name_len;
+                    continue;
+                }
+            }
         }
         let ch = text[i..].chars().next().unwrap_or(' ');
         out.push(ch);
@@ -377,19 +409,50 @@ fn redact_user_folder(text: &str) -> String {
 
 /// Everything a log line may be cleaned of before it leaves the machine.
 pub fn redact(root: &Path, text: &str) -> String {
+    let trailing_newline = text.ends_with('\n');
     let mut out = text.to_owned();
-    // The Clade folder (also in the `\\?\` form and with forward slashes) becomes a placeholder.
-    let plain = root.to_string_lossy().replace("\\\\?\\", "");
-    for variant in [plain.clone(), plain.replace('\\', "/")] {
-        if variant.len() > 3 {
-            out = replace_ignore_case(&out, &variant, "<clade>");
+    // The Clade folder (also verbatim, JSON-escaped, forward-slash and file:// forms) becomes a placeholder.
+    let plain = crate::portable::root::normalize_verbatim_path(root.to_path_buf())
+        .to_string_lossy()
+        .replace("\\\\?\\", "");
+    let plain = plain.trim_end_matches(['\\', '/']).to_owned();
+    if plain.len() > 3 {
+        let slash = plain.replace('\\', "/");
+        let mut variants: Vec<(String, &'static str)> = vec![
+            (plain.replace('\\', "\\\\\\\\"), "<clade>"),
+            (plain.replace('\\', "\\\\"), "<clade>"),
+            (slash.replace(' ', "%20"), "<clade>"),
+            (plain.clone(), "<clade>"),
+            (slash, "<clade>"),
+        ];
+        if let Ok(u) = url::Url::from_file_path(&plain) {
+            let full = u.as_str().trim_end_matches('/').to_owned();
+            variants.push((full, "file:///<clade>"));
+            let p = u.path().trim_end_matches('/');
+            let p = match p.as_bytes() {
+                [b'/', d, b':', ..] if d.is_ascii_alphabetic() => &p[1..],
+                _ => p,
+            };
+            variants.push((p.to_owned(), "<clade>"));
+        }
+        variants.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+        variants.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+        for (variant, placeholder) in variants {
+            if variant.len() > 3 {
+                out = replace_ignore_case(&out, &variant, placeholder);
+            }
         }
     }
     out = redact_user_folder(&out);
-    out.lines()
-        .map(|l| redact_emails(&redact_tokens(&redact_key_values(&redact_named_secrets(l)))))
+    let mut redacted = out
+        .lines()
+        .map(|l| redact_emails(&redact_tokens(&redact_named_secrets(&redact_key_values(l)))))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    if trailing_newline {
+        redacted.push('\n');
+    }
+    redacted
 }
 
 /// The Minecraft identities Clade knows about, taken from `accounts.json` (metadata only: no token
@@ -425,16 +488,27 @@ pub fn redact_identities(text: &str, known: &[String]) -> String {
 }
 
 fn replace_word_ignore_case(text: &str, needle: &str, with: &str) -> String {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let (lt, ln) = (text.to_lowercase(), needle.to_lowercase());
-    // Lower-casing can change byte lengths for some scripts; fall back to the unchanged text then.
-    if lt.len() != text.len() || ln.is_empty() {
+    if needle.is_empty() {
         return text.to_owned();
     }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let (lt, ln) = if needle.is_ascii() {
+        (text.to_ascii_lowercase(), needle.to_ascii_lowercase())
+    } else {
+        let (lt, ln) = (text.to_lowercase(), needle.to_lowercase());
+        // Lower-casing can change byte lengths for some non-ASCII scripts; fall back safely then.
+        if lt.len() != text.len() || ln.is_empty() {
+            return text.to_owned();
+        }
+        (lt, ln)
+    };
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while let Some(pos) = lt[i..].find(&ln) {
         let (a, b) = (i + pos, i + pos + ln.len());
+        if !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+            return text.to_owned();
+        }
         let before_ok = !text[..a].chars().next_back().is_some_and(word);
         let after_ok = !text[b..].chars().next().is_some_and(word);
         out.push_str(&text[i..a]);
@@ -450,6 +524,9 @@ fn replace_word_ignore_case(text: &str, needle: &str, with: &str) -> String {
 }
 
 fn replace_ignore_case(text: &str, needle: &str, with: &str) -> String {
+    if needle.is_empty() {
+        return text.to_owned();
+    }
     let (lt, ln) = (text.to_ascii_lowercase(), needle.to_ascii_lowercase());
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -464,24 +541,63 @@ fn replace_ignore_case(text: &str, needle: &str, with: &str) -> String {
 
 // ------------------------------------------------------------------------------------- content
 
-/// The last `LOG_TAIL_BYTES` of a text file, starting at a line boundary. A missing or unreadable
+/// The last `max_bytes` of a text file, starting at a line boundary. A missing or unreadable
 /// file is simply absent from the export.
-fn tail(path: &Path) -> Option<String> {
+fn tail_bytes(path: &Path, max_bytes: u64) -> Option<String> {
+    if max_bytes == 0 {
+        return None;
+    }
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
-    let cut = len > LOG_TAIL_BYTES;
+    let cut = len > max_bytes;
     if cut {
-        f.seek(SeekFrom::Start(len - LOG_TAIL_BYTES)).ok()?;
+        f.seek(SeekFrom::Start(len - max_bytes)).ok()?;
     }
     let mut bytes = Vec::new();
-    f.take(LOG_TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    f.take(max_bytes).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     Some(if cut {
-        text.split_once('\n')
-            .map_or(text.clone(), |(_, r)| r.to_owned())
+        match text.find('\n') {
+            Some(pos) => text[pos + 1..].to_owned(),
+            None => text,
+        }
     } else {
         text
     })
+}
+
+/// The last `LOG_TAIL_BYTES` of a text file, starting at a line boundary. A missing or unreadable
+/// file is simply absent from the export.
+fn tail(path: &Path) -> Option<String> {
+    tail_bytes(path, LOG_TAIL_BYTES)
+}
+
+/// Reads `logs/clade.log`, prepending the tail of `logs/clade.old.log` when `clade.log` is smaller
+/// than [`LOG_TAIL_BYTES`] so a fresh rotation does not discard recent history.
+fn clade_log_tail(logs_dir: &Path) -> Option<String> {
+    let cur_path = logs_dir.join("clade.log");
+    let cur_meta_len = fs::metadata(&cur_path).ok().map(|m| m.len());
+    let cur = tail_bytes(&cur_path, LOG_TAIL_BYTES);
+    if cur_meta_len.is_some_and(|len| len >= LOG_TAIL_BYTES) {
+        return cur;
+    }
+    let cur_len = cur.as_ref().map_or(0, |s| s.len() as u64);
+    let rem = LOG_TAIL_BYTES.saturating_sub(cur_len);
+    let old_path = logs_dir.join("clade.old.log");
+    let old = tail_bytes(&old_path, rem).filter(|s| !s.is_empty());
+    match (old, cur) {
+        (Some(mut o), Some(c)) => {
+            if !c.is_empty() {
+                if !o.ends_with('\n') {
+                    o.push('\n');
+                }
+                o.push_str(&c);
+            }
+            Some(o)
+        }
+        (Some(o), None) => Some(o),
+        (None, c) => c,
+    }
 }
 
 /// Minecraft's own latest log: of the profile played last, else of the most recently written one.
@@ -579,6 +695,7 @@ pub fn collect(
     settings: &LauncherSettings,
     facts: &Facts<'_>,
 ) -> Vec<(&'static str, String)> {
+    let known = known_identities(root);
     let mut files: Vec<(&'static str, String)> = vec![
         (
             "launcher-version.txt",
@@ -607,7 +724,10 @@ pub fn collect(
                 facts.webview_version
             ),
         ),
-        ("profile-summary.txt", profile_summary(root)),
+        (
+            "profile-summary.txt",
+            redact_identities(&redact(root.path(), &profile_summary(root)), &known),
+        ),
         (
             "settings-redacted.json",
             // The settings file holds preferences only (no secrets, no paths); it is still passed
@@ -618,8 +738,7 @@ pub fn collect(
             ),
         ),
     ];
-    let known = known_identities(root);
-    if let Some(t) = tail(&root.logs_dir().join("clade.log")) {
+    if let Some(t) = clade_log_tail(&root.logs_dir()) {
         files.push((
             "logs/clade.log",
             redact_identities(&redact(root.path(), &t), &known),

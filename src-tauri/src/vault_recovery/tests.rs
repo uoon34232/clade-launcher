@@ -1,6 +1,6 @@
 #[cfg(test)]
 use super::*;
-use crate::accounts::{AccountMeta, AccountStatus};
+use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
 use crate::instances::InstanceId;
 use crate::portable::root::PortableRoot;
 use crate::profile_lock::{Activity, ProfileLocks};
@@ -442,10 +442,15 @@ fn a_credential_path_that_is_a_folder_is_never_touched() {
 #[cfg(windows)]
 #[test]
 fn when_the_account_list_cannot_be_written_the_vault_stays_archived_and_a_retry_finishes() {
+    use std::os::windows::fs::OpenOptionsExt;
     let w = world();
-    let mut perms = fs::metadata(w.accounts_file()).unwrap().permissions();
-    perms.set_readonly(true);
-    fs::set_permissions(w.accounts_file(), perms).unwrap();
+    // Hold accounts.json with FILE_SHARE_READ (1) only: reads succeed in Stage 2, while
+    // atomic_write's replacement rename is refused because FILE_SHARE_DELETE is absent.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(w.accounts_file())
+        .unwrap();
     assert_eq!(w.reset(), Err(ResetError::AccountsNotUpdated));
     // the vault is archived, and the accounts are as they were
     assert!(!w.vault().exists() && !w.bak().exists());
@@ -456,10 +461,7 @@ fn when_the_account_list_cannot_be_written_the_vault_stays_archived_and_a_retry_
         .iter()
         .any(|a| matches!(a.status, AccountStatus::Ready)));
     // the retry only repeats the account step: no second archive, no loss
-    let mut perms = fs::metadata(w.accounts_file()).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    fs::set_permissions(w.accounts_file(), perms).unwrap();
+    drop(held);
     w.reset().unwrap();
     assert_eq!(w.retired().len(), 1);
     assert!(w.list().accounts.iter().all(is_unknown_reauth));
@@ -834,4 +836,105 @@ fn the_orphan_purge_runs_only_after_the_epoch_is_verified_and_never_rewrites_an_
         .unwrap()
         .account("ghost")
         .is_none());
+}
+
+#[test]
+fn accounts_changed_event_is_emitted_only_when_state_could_have_changed() {
+    assert!(should_emit_accounts_changed(&Ok(())));
+    let partial = Err(ResetError::AccountsNotUpdated);
+    assert!(should_emit_accounts_changed(&partial));
+    for unchanged in [
+        ResetError::VaultUnlocked,
+        ResetError::SignInInProgress,
+        ResetError::AppearanceBusy,
+        ResetError::GameStarting,
+        ResetError::ResetFailed,
+        ResetError::Storage,
+    ] {
+        assert!(
+            !should_emit_accounts_changed(&Err(unchanged)),
+            "{unchanged:?} must not emit accounts-changed"
+        );
+    }
+}
+
+fn make_dir_link(target: &Path, link: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (target, link);
+        false
+    }
+}
+
+fn remove_dir_link(link: &Path) {
+    #[cfg(windows)]
+    {
+        fs::remove_dir(link).unwrap();
+    }
+    #[cfg(not(windows))]
+    {
+        fs::remove_file(link).unwrap();
+    }
+}
+
+#[test]
+fn reparse_points_on_retired_vaults_or_credential_paths_are_refused() {
+    let w = world();
+    let (vault, bak) = (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap());
+    let outside = w.dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+
+    let retired_link = w.data().join(RETIRED_DIR);
+    assert!(
+        make_dir_link(&outside, &retired_link),
+        "could not create directory link/junction for test"
+    );
+    assert!(crate::portable::fsutil::is_link(&retired_link).unwrap());
+
+    assert_eq!(unique_dir(&retired_link, NOW), Err(ResetError::ResetFailed));
+    assert_eq!(w.reset(), Err(ResetError::ResetFailed));
+    assert_eq!(
+        fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing was redirected outside data/"
+    );
+    assert_eq!(
+        (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap()),
+        (vault, bak)
+    );
+    assert!(w
+        .list()
+        .accounts
+        .iter()
+        .any(|a| matches!(a.status, AccountStatus::Ready)));
+
+    // Also refuse when vault's parent directory itself is a link/junction.
+    let data_link = w.dir.path().join("linked-data");
+    assert!(make_dir_link(&w.data(), &data_link));
+    assert_eq!(
+        credential_files(&data_link.join("vault.bin")),
+        Err(ResetError::ResetFailed)
+    );
+    remove_dir_link(&data_link);
+
+    // Once the link on retired-vaults is removed, recovery succeeds normally.
+    remove_dir_link(&retired_link);
+    w.reset().unwrap();
+    assert_eq!(w.retired().len(), 1);
 }

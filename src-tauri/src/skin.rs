@@ -23,7 +23,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::net::Fetcher;
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, read_bounded};
 
 /// The one host Mojang serves skin textures from (the profile reports `http://`; it is upgraded).
 const TEXTURE_HOST: &str = "textures.minecraft.net";
@@ -86,7 +86,7 @@ pub fn skin_size(png: &[u8]) -> Option<(u32, u32)> {
     }
     let w = u32::from_be_bytes(png[16..20].try_into().ok()?);
     let h = u32::from_be_bytes(png[20..24].try_into().ok()?);
-    let ok = (64..=MAX_EDGE).contains(&w) && w % 64 == 0 && (h == w || h * 2 == w);
+    let ok = (64..=MAX_EDGE).contains(&w) && w % 64 == 0 && (h == w || h == w / 2);
     ok.then_some((w, h))
 }
 
@@ -131,7 +131,8 @@ impl SkinCache {
     }
 
     fn read_text(&self, uuid: &str, ext: &str) -> Option<String> {
-        let t = fs::read_to_string(self.file(uuid, ext)?).ok()?;
+        let bytes = read_bounded(&self.file(uuid, ext)?, 1024).ok()?;
+        let t = String::from_utf8(bytes).ok()?;
         Some(t.trim().to_owned())
     }
 
@@ -181,10 +182,15 @@ impl SkinCache {
         }
         // The texture first, then the note saying which one it is: a crash in between leaves a
         // texture that does not match the note, which is simply fetched again.
-        if let Err(e) =
-            atomic_write(&png, &bytes).and_then(|()| atomic_write(&have, want.id.as_bytes()))
-        {
-            tracing::info!(error = %e, "the skin could not be saved");
+        let want_id = want.id;
+        let saved = tokio::task::spawn_blocking(move || {
+            atomic_write(&png, &bytes).and_then(|()| atomic_write(&have, want_id.as_bytes()))
+        })
+        .await;
+        match saved {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::info!(error = %e, "the skin could not be saved"),
+            Err(e) => tracing::info!(error = %e, "the skin save task failed"),
         }
     }
 
@@ -225,7 +231,7 @@ impl SkinCache {
         if self.read_text(uuid, "have")? != want.id {
             return None; // the profile reports a newer skin than the one cached
         }
-        let bytes = fs::read(self.file(uuid, "png")?).ok()?;
+        let bytes = read_bounded(&self.file(uuid, "png")?, MAX_BYTES as u64).ok()?;
         skin_size(&bytes)?;
         Some(format!("data:image/png;base64,{}", base64(&bytes)))
     }

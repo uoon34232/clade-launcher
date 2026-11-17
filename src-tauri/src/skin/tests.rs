@@ -90,6 +90,27 @@ fn only_skin_shaped_pngs_are_accepted() {
 }
 
 #[test]
+fn extreme_heights_never_overflow_or_wrap_around_into_accepted_skin_dimensions() {
+    assert_eq!(skin_size(&png(64, 0x8000_0020)), None);
+    assert_eq!(skin_size(&png(64, u32::MAX)), None);
+    assert_eq!(skin_size(&png(MAX_EDGE, 0x8000_0200)), None);
+}
+
+#[test]
+fn oversized_cached_files_are_rejected_without_unbounded_reads() {
+    let (_d, c) = cache();
+    let f = FakeFetcher::new();
+    f.ok(&https(ID_A), png(64, 64));
+    c.record(UUID, Some(&url(ID_A)));
+    run(c.sync(&f, UUID));
+    assert!(c.data_uri(UUID).is_some());
+    let mut oversized = png(64, 64);
+    oversized.resize(MAX_BYTES + 1, 0);
+    fs::write(c.file(UUID, "png").unwrap(), oversized).unwrap();
+    assert!(c.data_uri(UUID).is_none());
+}
+
+#[test]
 fn base64_matches_the_rfc_vectors() {
     for (raw, enc) in [
         ("", ""),
