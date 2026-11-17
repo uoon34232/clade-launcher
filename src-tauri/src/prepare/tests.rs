@@ -559,7 +559,7 @@ async fn verify_files_also_checks_and_repairs_the_managed_java_runtime() {
     let modules = java.home.join("lib").join("modules");
     let good = fs::read(&modules).unwrap();
 
-    // same size, different bytes (a damaged jvm/module file): java.exe is intact, so the runtime still
+    // same size, different bytes (a damaged jvm/module file): launcher exe is intact, so the runtime still
     // resolves, and neither the quick check nor an ordinary preparation can see it
     let mut damaged = good.clone();
     damaged[7] ^= 0xFF;
@@ -578,6 +578,9 @@ async fn verify_files_also_checks_and_repairs_the_managed_java_runtime() {
     assert!(again.exe.starts_with(w.root.java_runtimes_dir()));
 
     // and a missing file is restored too
+    fs::remove_file(java.home.join("bin").join("java.exe")).unwrap();
+    prepare_instance(&deep, &id).await.unwrap();
+    assert!(java.home.join("bin").join("java.exe").is_file());
     fs::remove_file(java.home.join("bin").join("javaw.exe")).unwrap();
     prepare_instance(&deep, &id).await.unwrap();
     assert!(java.home.join("bin").join("javaw.exe").is_file());
@@ -812,7 +815,7 @@ pub(crate) fn forge_world() -> (World, Vec<u8>) {
     w.streamer.add("https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-universal.jar", &universal);
     let universal_copy = universal.clone();
     *w.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
-        let mc = cmd.cwd.join("mc");
+        let mc = PathBuf::from(cmd.args.last().unwrap());
         let vdir = mc.join("versions").join(FORGE_ID);
         fs::create_dir_all(&vdir)?;
         let profile = json!({
@@ -893,7 +896,7 @@ async fn forge_runs_its_installer_only_inside_the_sandbox_and_the_result_is_merg
         assert!(cmd.args.iter().any(|a| a == "--installClient"));
     }
 
-    // Only libraries/ and versions/ were taken over, and the staging tree is gone.
+    // Only libraries/ and versions/ were taken over, and the staging tree + installer jar are gone.
     assert!(version_json_path(&w.root, FORGE_ID).is_file());
     assert_eq!(
         fs::read(
@@ -909,6 +912,13 @@ async fn forge_runs_its_installer_only_inside_the_sandbox_and_the_result_is_merg
         .libraries_dir()
         .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-client.jar")
         .is_file());
+    assert!(
+        !w.root
+            .downloads_dir()
+            .join("forge-1.21.4-54.1.14-installer.jar")
+            .exists(),
+        "the temporary installer jar in cache/downloads is deleted after installation"
+    );
     assert!(!w
         .root
         .minecraft_dir()
@@ -1010,8 +1020,9 @@ async fn a_generated_file_the_installer_failed_to_produce_blocks_ready() {
     let original = w.runner.on_run.lock().unwrap().take().unwrap();
     *w.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
         let r = original(cmd)?;
-        fs::remove_file(cmd.cwd.join(
-            "mc/libraries/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-client.jar",
+        let mc = PathBuf::from(cmd.args.last().unwrap());
+        fs::remove_file(mc.join(
+            "libraries/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-client.jar",
         ))?;
         Ok(r)
     }));
@@ -1040,7 +1051,8 @@ async fn neoforge_and_quilt_use_the_same_paths() {
     w.streamer.add(url, &jar);
     w.fetcher.ok(&format!("{url}.sha256"), sha256_of(&jar));
     *w.runner.on_run.lock().unwrap() = Some(Box::new(|cmd| {
-        let vdir = cmd.cwd.join("mc/versions/neoforge-21.4.158");
+        let mc = PathBuf::from(cmd.args.last().unwrap());
+        let vdir = mc.join("versions/neoforge-21.4.158");
         fs::create_dir_all(&vdir)?;
         fs::write(
             vdir.join("neoforge-21.4.158.json"),
@@ -1191,7 +1203,7 @@ async fn everything_preparation_writes_stays_inside_the_folder() {
     let id = vanilla(&w);
     prepare_instance(&ctx(&w), &id).await.unwrap();
     // The scratch locations are left empty, and every top-level folder is one of the layout's.
-    assert_eq!(fs::read_dir(w.root.tmp_dir()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(w.root.prepare_tmp_dir()).unwrap().count(), 0);
     let mut found: Vec<String> = fs::read_dir(w.root.path())
         .unwrap()
         .flatten()
@@ -1328,4 +1340,609 @@ async fn libraries_with_neither_size_nor_hash_are_still_checked_through_the_size
         "and repaired from the sidecar-verified download"
     );
     assert!(check_installed(&w.root, &InstanceStore::new(&w.root).get(&id).unwrap()).is_ok());
+}
+
+// ================================================================================ regressions & edge cases
+
+#[tokio::test]
+async fn unhashed_library_with_missing_sizes_record_or_zero_bytes_is_never_trusted_and_verify_all_rechecks_sidecar(
+) {
+    let w = world("1.21.4", Era::Modern);
+    let jar = bytes(900, 31);
+    let path = "org/quiltmc/quilt-loader/0.27.0/quilt-loader-0.27.0.jar";
+    let url = format!("https://maven.quiltmc.org/repository/release/{path}");
+    let quilt_id = "quilt-loader-0.27.0-1.21.4";
+    w.streamer.add(&url, &jar);
+    w.fetcher.ok(&format!("{url}.sha1"), sha1_hex(&jar));
+    w.fetcher.ok(
+        "https://meta.quiltmc.org/v3/versions/loader/1.21.4/0.27.0/profile/json",
+        json!({
+            "id": quilt_id,
+            "inheritsFrom": "1.21.4",
+            "mainClass": "org.quiltmc.loader.impl.launch.knot.KnotClient",
+            "libraries": [{"name": "org.quiltmc:quilt-loader:0.27.0", "url": "https://maven.quiltmc.org/repository/release/"}]
+        })
+        .to_string(),
+    );
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "Quilt",
+            "1.21.4",
+            LoaderKind::Quilt,
+            LoaderVersionSpec::Pinned {
+                version: LoaderVersion::new("0.27.0").unwrap(),
+            },
+        )
+        .unwrap(),
+    );
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    let file = w.root.libraries_dir().join(path);
+    let sizes_file = w
+        .root
+        .minecraft_dir()
+        .join("versions")
+        .join(quilt_id)
+        .join(format!("{quilt_id}.sizes.json"));
+
+    // 1. Delete `.sizes.json` AND replace the jar with unverified bytes: must NOT be trusted!
+    fs::remove_file(&sizes_file).unwrap();
+    fs::write(&file, b"unverified-garbage").unwrap();
+    assert!(
+        check_installed(&w.root, &inst).is_err(),
+        "missing .sizes.json for an unhashed library must fail offline check"
+    );
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        jar,
+        "missing .sizes.json forced sidecar re-verification and repaired the jar"
+    );
+    assert!(sizes_file.is_file());
+
+    // 2. A 0-byte jar (even if `.sizes.json` was forged to say 0) is rejected and repaired.
+    fs::write(&file, b"").unwrap();
+    fs::write(&sizes_file, json!({ path: 0 }).to_string()).unwrap();
+    assert!(
+        check_installed(&w.root, &inst).is_err(),
+        "0-byte unhashed library must never pass offline check"
+    );
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(fs::read(&file).unwrap(), jar);
+
+    // 3. Same-size byte corruption: `verify_all` fetches `.sha1` sidecar and repairs it.
+    let mut flipped = jar.clone();
+    flipped[5] ^= 0xAA;
+    fs::write(&file, &flipped).unwrap();
+    let before = w.streamer.count(&url);
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    prepare_instance(&deep, &id).await.unwrap();
+    assert_eq!(fs::read(&file).unwrap(), jar);
+    assert_eq!(w.streamer.count(&url), before + 1);
+}
+
+#[tokio::test]
+async fn verify_all_detects_and_repairs_tampered_vanilla_and_loader_profile_jsons() {
+    let w = world("1.21.4", Era::Modern);
+    fabric_profile(&w, "1.21.4");
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "Fab",
+            "1.21.4",
+            LoaderKind::Fabric,
+            LoaderVersionSpec::Pinned {
+                version: LoaderVersion::new("0.16.9").unwrap(),
+            },
+        )
+        .unwrap(),
+    );
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+
+    let vanilla_json_file = version_json_path(&w.root, "1.21.4");
+    let fabric_json_file = version_json_path(&w.root, FABRIC_ID);
+    let good_vanilla = fs::read(&vanilla_json_file).unwrap();
+    let good_fabric = fs::read(&fabric_json_file).unwrap();
+
+    // Tamper both JSON files with syntactically valid metadata whose `mainClass` was swapped.
+    let mut tampered_vanilla: Value = serde_json::from_slice(&good_vanilla).unwrap();
+    tampered_vanilla["mainClass"] = json!("tampered.VanillaMain");
+    fs::write(&vanilla_json_file, tampered_vanilla.to_string()).unwrap();
+
+    let mut tampered_fabric: Value = serde_json::from_slice(&good_fabric).unwrap();
+    tampered_fabric["mainClass"] = json!("tampered.FabricMain");
+    fs::write(&fabric_json_file, tampered_fabric.to_string()).unwrap();
+
+    // Ordinary run skips re-fetching valid-looking local JSONs, whereas `verify_all` checks
+    // Mojang's SHA-1 and refreshes the official loader profile.
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    prepare_instance(&deep, &id).await.unwrap();
+
+    assert_eq!(
+        fs::read(&vanilla_json_file).unwrap(),
+        good_vanilla,
+        "verify_all must detect SHA-1 mismatch on <mc>.json and restore Mojang's copy"
+    );
+    let restored_fabric: Value =
+        serde_json::from_slice(&fs::read(&fabric_json_file).unwrap()).unwrap();
+    assert_eq!(
+        restored_fabric["mainClass"],
+        json!("net.fabricmc.loader.impl.launch.knot.KnotClient"),
+        "verify_all must restore tampered Fabric profile JSON"
+    );
+}
+
+#[tokio::test]
+async fn tampered_generated_forge_jar_fails_verification_and_valid_forge_is_reused_offline() {
+    // 1. An installer that writes corrupt bytes to its locally generated JAR (`url: ""`) is caught.
+    {
+        let (w, _) = forge_world();
+        let original = w.runner.on_run.lock().unwrap().take().unwrap();
+        *w.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+            let r = original(cmd)?;
+            let mc = PathBuf::from(cmd.args.last().unwrap());
+            fs::write(
+                mc.join(
+                    "libraries/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-client.jar",
+                ),
+                b"tamperd", // same 7-byte length, wrong SHA-1
+            )?;
+            Ok(r)
+        }));
+        let bad_id = create(
+            &w,
+            NewInstance::modded(
+                "BadForge",
+                "1.21.4",
+                LoaderKind::Forge,
+                LoaderVersionSpec::Pinned {
+                    version: LoaderVersion::new("54.1.14").unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        let err = prepare_instance(&ctx(&w), &bad_id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Verification(_)), "{err:?}");
+        assert!(matches!(setup_of(&w, &bad_id), SetupState::Pending));
+    }
+
+    // 2. Once a valid Forge version is installed, a second Forge profile for the same MC + loader
+    //    succeeds completely offline without running the installer again.
+    let (w, _) = forge_world();
+    let lv = LoaderVersion::new("54.1.14").unwrap();
+    let first = create(
+        &w,
+        NewInstance::modded(
+            "ForgeOne",
+            "1.21.4",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Pinned {
+                version: lv.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    prepare_instance(&ctx(&w), &first).await.unwrap();
+    assert_eq!(w.runner.seen.lock().unwrap().len(), 1);
+
+    w.fetcher.fail_all();
+    let downloads_before = w.streamer.total_calls();
+    let second = create(
+        &w,
+        NewInstance::modded(
+            "ForgeTwo",
+            "1.21.4",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Pinned {
+                version: lv.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    let second_inst = prepare_instance(&ctx(&w), &second).await.unwrap();
+    assert!(second_inst.is_ready());
+    assert_eq!(
+        second_inst.setup,
+        SetupState::Ready {
+            version_id: VersionId::new(FORGE_ID).unwrap(),
+            loader_version: Some(lv.clone()),
+        }
+    );
+    assert_eq!(
+        w.runner.seen.lock().unwrap().len(),
+        1,
+        "reused Forge install must not run the installer JVM again"
+    );
+    assert_eq!(w.streamer.total_calls(), downloads_before);
+
+    // 3. Corrupting the generated jar on disk is caught by `verify_generated_file` and prevents
+    //    offline reuse by a third profile.
+    let gen_jar = w
+        .root
+        .libraries_dir()
+        .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-client.jar");
+    fs::write(&gen_jar, b"corrupt").unwrap();
+    let gf = GeneratedFile {
+        dest: gen_jar.clone(),
+        expected: Some(Expected::Sha1(sha1_hex(b"patched"))),
+        size: Some(7),
+    };
+    assert!(matches!(
+        verify_generated_file(&gf, &w.root),
+        Err(PrepareError::Verification(_))
+    ));
+    let third = create(
+        &w,
+        NewInstance::modded(
+            "ForgeThree",
+            "1.21.4",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Pinned { version: lv },
+        )
+        .unwrap(),
+    );
+    assert!(
+        prepare_instance(&ctx(&w), &third).await.is_err(),
+        "corrupted generated jar must never be reused offline"
+    );
+}
+
+#[tokio::test]
+async fn forge_on_pre_1_17_minecraft_runs_installer_with_java_21_while_keeping_jre_legacy_for_game()
+{
+    let w = world("1.12.2", Era::Pre16);
+    // Serve both the legacy Java 8 runtime (for MC 1.12.2) and modern Java 21 (for the installer).
+    add_runtime(
+        &w.fetcher,
+        &w.streamer,
+        &["jre-legacy", "java-runtime-delta"],
+    );
+
+    let forge_ver = "14.23.5.2860";
+    let forge_id = "1.12.2-forge-14.23.5.2860";
+    let installer_url = format!(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-{forge_ver}/forge-1.12.2-{forge_ver}-installer.jar"
+    );
+    let universal_url = format!(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-{forge_ver}/forge-1.12.2-{forge_ver}-universal.jar"
+    );
+    let installer = bytes(1800, 21);
+    let universal = bytes(650, 22);
+    w.streamer.add(&installer_url, &installer);
+    w.fetcher
+        .ok(&format!("{installer_url}.sha256"), sha256_of(&installer));
+    w.streamer.add(&universal_url, &universal);
+
+    let universal_copy = universal.clone();
+    let universal_url_copy = universal_url.clone();
+    *w.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+        let mc = PathBuf::from(cmd.args.last().unwrap());
+        let vdir = mc.join("versions").join(forge_id);
+        fs::create_dir_all(&vdir)?;
+        let profile = json!({
+            "id": forge_id,
+            "inheritsFrom": "1.12.2",
+            "mainClass": "net.minecraft.launchwrapper.Launch",
+            "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${game_assets} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker",
+            "libraries": [
+                {"name": format!("net.minecraftforge:forge:1.12.2-{forge_ver}:universal"), "downloads": {"artifact": {
+                    "path": format!("net/minecraftforge/forge/1.12.2-{forge_ver}/forge-1.12.2-{forge_ver}-universal.jar"),
+                    "url": universal_url_copy,
+                    "sha1": sha1_hex(&universal_copy),
+                    "size": universal_copy.len()
+                }}}
+            ]
+        });
+        fs::write(vdir.join(format!("{forge_id}.json")), profile.to_string())?;
+        Ok(RunResult {
+            success: true,
+            tail: String::new(),
+        })
+    }));
+
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "LegacyForge",
+            "1.12.2",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Pinned {
+                version: LoaderVersion::new(forge_ver).unwrap(),
+            },
+        )
+        .unwrap(),
+    );
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert!(inst.is_ready());
+
+    let legacy = java_install::find_installed(&w.root, "jre-legacy")
+        .expect("jre-legacy must be installed for launching 1.12.2");
+    let delta = java_install::find_installed(&w.root, "java-runtime-delta")
+        .expect("java-runtime-delta must be installed for the Forge installer");
+    assert_eq!(legacy.java_major, 8);
+    assert_eq!(delta.java_major, 21);
+
+    let seen = w.runner.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].program.starts_with(&delta.home),
+        "installer JVM must use modern java-runtime-delta, got {}",
+        seen[0].program.display()
+    );
+
+    let resolved = crate::launch_args::resolve(&w.root, forge_id).unwrap();
+    assert_eq!(
+        (resolved.java.component.as_str(), resolved.java.major),
+        ("jre-legacy", 8),
+        "launching 1.12.2 Forge still uses jre-legacy Java 8"
+    );
+}
+
+#[tokio::test]
+async fn loader_natives_override_and_supplement_vanilla_natives_because_extraction_runs_after_loader(
+) {
+    let w = world("1.21.4", Era::Modern);
+    let loader_jar = bytes(512, 61);
+    let loader_path = "net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar";
+    w.streamer.add(
+        &format!("https://maven.fabricmc.net/{loader_path}"),
+        &loader_jar,
+    );
+
+    // Override vanilla's `org.lwjgl:lwjgl:natives-windows` AND add a supplemental native library.
+    let upgraded_lwjgl = zip_of(&[("windows/x64/org/lwjgl/lwjgl.dll", b"loader-upgraded-dll")]);
+    let upgraded_path = "org/lwjgl/lwjgl/3.3.4/lwjgl-3.3.4-natives-windows.jar";
+    w.streamer
+        .add(&format!("{LIBS}/{upgraded_path}"), &upgraded_lwjgl);
+
+    let extra_native = zip_of(&[("fabric_extra.dll", b"supplemental-dll")]);
+    let extra_path = "net/fabricmc/extra-native/1.0/extra-native-1.0-natives-windows.jar";
+    w.streamer.add(
+        &format!("https://maven.fabricmc.net/{extra_path}"),
+        &extra_native,
+    );
+
+    let profile = json!({
+        "id": FABRIC_ID,
+        "inheritsFrom": "1.21.4",
+        "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "libraries": [
+            {"name": "net.fabricmc:fabric-loader:0.16.9", "url": "https://maven.fabricmc.net/", "sha1": sha1_hex(&loader_jar), "size": loader_jar.len()},
+            {"name": "org.lwjgl:lwjgl:3.3.4:natives-windows", "downloads": {"artifact": {
+                "path": upgraded_path, "sha1": sha1_hex(&upgraded_lwjgl), "size": upgraded_lwjgl.len(), "url": format!("{LIBS}/{upgraded_path}")
+            }}},
+            {"name": "net.fabricmc:extra-native:1.0:natives-windows", "downloads": {"artifact": {
+                "path": extra_path, "sha1": sha1_hex(&extra_native), "size": extra_native.len(), "url": format!("https://maven.fabricmc.net/{extra_path}")
+            }}}
+        ]
+    })
+    .to_string();
+    w.fetcher.ok(
+        "https://meta.fabricmc.net/v2/versions/loader/1.21.4/0.16.9/profile/json",
+        &profile,
+    );
+
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "FabNatives",
+            "1.21.4",
+            LoaderKind::Fabric,
+            LoaderVersionSpec::Pinned {
+                version: LoaderVersion::new("0.16.9").unwrap(),
+            },
+        )
+        .unwrap(),
+    );
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert!(inst.is_ready());
+
+    let seen_stages = stages(&w);
+    let loader_pos = seen_stages
+        .iter()
+        .position(|s| *s == Stage::Loader)
+        .unwrap();
+    let natives_pos = seen_stages
+        .iter()
+        .position(|s| *s == Stage::Natives)
+        .unwrap();
+    assert!(
+        loader_pos < natives_pos,
+        "Stage::Loader must run before Stage::Natives: {seen_stages:?}"
+    );
+
+    let natives = InstanceStore::new(&w.root).dirs(&id).natives_dir();
+    assert_eq!(
+        fs::read(natives.join("windows/x64/org/lwjgl/lwjgl.dll")).unwrap(),
+        b"loader-upgraded-dll",
+        "loader's native jar must override vanilla's"
+    );
+    assert_eq!(
+        fs::read(natives.join("fabric_extra.dll")).unwrap(),
+        b"supplemental-dll",
+        "loader's supplemental native jar must also be extracted"
+    );
+
+    // Even if vanilla had no natives of its own, `check_files` enforces `natives/` when the loader has natives.
+    let vpath = version_json_path(&w.root, "1.21.4");
+    let mut vjson: Value = serde_json::from_slice(&fs::read(&vpath).unwrap()).unwrap();
+    vjson["libraries"] = json!([vjson["libraries"][0].clone()]);
+    fs::write(&vpath, vjson.to_string()).unwrap();
+    assert!(check_installed(&w.root, &inst).is_ok());
+    fs::remove_dir_all(&natives).unwrap();
+    assert_eq!(
+        check_installed(&w.root, &inst),
+        Err("the extracted native libraries".into())
+    );
+}
+
+#[tokio::test]
+async fn missing_or_corrupted_virtual_and_mapped_resource_assets_are_detected_and_repaired() {
+    // 1. Virtual layout (`assets/virtual/legacy/`).
+    let w_virt = world("1.6.4", Era::Virtual);
+    let id_virt = create(&w_virt, NewInstance::vanilla("Six", "1.6.4").unwrap());
+    let inst_virt = prepare_instance(&ctx(&w_virt), &id_virt).await.unwrap();
+    let virt_icon = w_virt
+        .root
+        .assets_dir()
+        .join("virtual/legacy/icons/icon_16x16.png");
+    let good_icon = fs::read(&virt_icon).unwrap();
+
+    fs::remove_file(&virt_icon).unwrap();
+    assert_eq!(
+        check_installed(&w_virt.root, &inst_virt),
+        Err("a game asset".into()),
+        "missing virtual asset copy must fail check_installed"
+    );
+    w_virt.fetcher.fail_all(); // repaired locally from assets/objects/ with no network
+    prepare_instance(&ctx(&w_virt), &id_virt).await.unwrap();
+    assert_eq!(fs::read(&virt_icon).unwrap(), good_icon);
+
+    // Same-size byte corruption in virtual asset is repaired by `verify_all`.
+    let w_virt2 = world("1.6.4", Era::Virtual);
+    let id_virt2 = create(&w_virt2, NewInstance::vanilla("Six2", "1.6.4").unwrap());
+    prepare_instance(&ctx(&w_virt2), &id_virt2).await.unwrap();
+    let virt_icon2 = w_virt2
+        .root
+        .assets_dir()
+        .join("virtual/legacy/icons/icon_16x16.png");
+    let mut bad_icon = good_icon.clone();
+    bad_icon[0] ^= 0xFF;
+    fs::write(&virt_icon2, &bad_icon).unwrap();
+    let mut deep_virt = ctx(&w_virt2);
+    deep_virt.verify_all = true;
+    prepare_instance(&deep_virt, &id_virt2).await.unwrap();
+    assert_eq!(fs::read(&virt_icon2).unwrap(), good_icon);
+
+    // 2. Pre-1.6 mapped resource layout (`<game_dir>/resources/`).
+    let w_res = world("b1.7.3", Era::Pre16);
+    let id_res = create(&w_res, NewInstance::vanilla("Beta", "b1.7.3").unwrap());
+    let inst_res = prepare_instance(&ctx(&w_res), &id_res).await.unwrap();
+    let sounds = InstanceStore::new(&w_res.root)
+        .dirs(&id_res)
+        .game_dir()
+        .join("resources/minecraft/sounds.json");
+    let good_sounds = fs::read(&sounds).unwrap();
+
+    fs::remove_file(&sounds).unwrap();
+    assert_eq!(
+        check_installed(&w_res.root, &inst_res),
+        Err("a game asset".into()),
+        "missing mapped resource asset must fail check_installed"
+    );
+    w_res.fetcher.fail_all();
+    prepare_instance(&ctx(&w_res), &id_res).await.unwrap();
+    assert_eq!(fs::read(&sounds).unwrap(), good_sounds);
+}
+
+#[test]
+fn copy_named_preserves_stems_with_copy_tmp_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = PortableRoot::at(dir.path());
+    root.ensure_layout().unwrap();
+
+    let src_png = root.assets_dir().join("objects/aa/src_png");
+    let src_meta = root.assets_dir().join("objects/bb/src_meta");
+    fs::create_dir_all(src_png.parent().unwrap()).unwrap();
+    fs::create_dir_all(src_meta.parent().unwrap()).unwrap();
+    let png_bytes = bytes(128, 41);
+    let meta_bytes = bytes(96, 42);
+    fs::write(&src_png, &png_bytes).unwrap();
+    fs::write(&src_meta, &meta_bytes).unwrap();
+
+    let out_dir = root.assets_dir().join("virtual/legacy");
+    fs::create_dir_all(&out_dir).unwrap();
+    // Sentinel proving `with_extension("copy.tmp")` (`pack.copy.tmp`) is NOT used.
+    let sentinel = out_dir.join("pack.copy.tmp");
+    fs::write(&sentinel, b"keep-me").unwrap();
+
+    let dst_png = out_dir.join("pack.png");
+    let dst_meta = out_dir.join("pack.mcmeta");
+    let mut checked = HashSet::new();
+    copy_named(
+        &src_png,
+        &dst_png,
+        png_bytes.len() as u64,
+        Some(&Expected::Sha1(sha1_hex(&png_bytes))),
+        &mut checked,
+        root.path(),
+    )
+    .unwrap();
+    copy_named(
+        &src_meta,
+        &dst_meta,
+        meta_bytes.len() as u64,
+        Some(&Expected::Sha1(sha1_hex(&meta_bytes))),
+        &mut checked,
+        root.path(),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(&dst_png).unwrap(), png_bytes);
+    assert_eq!(fs::read(&dst_meta).unwrap(), meta_bytes);
+    assert_eq!(
+        fs::read(&sentinel).unwrap(),
+        b"keep-me",
+        "copy_named must use <filename>.copy.tmp, never <stem>.copy.tmp"
+    );
+    assert!(!out_dir.join("pack.png.copy.tmp").exists());
+    assert!(!out_dir.join("pack.mcmeta.copy.tmp").exists());
+}
+
+#[tokio::test]
+async fn bytes_to_download_rounds_up_to_cluster_slack_counts_legacy_asset_copies_and_is_zero_when_present(
+) {
+    assert_eq!(round_up_cluster(0, 4096), 0);
+    assert_eq!(round_up_cluster(1, 4096), 4096);
+    assert_eq!(round_up_cluster(4096, 4096), 4096);
+    assert_eq!(round_up_cluster(4097, 4096), 8192);
+    assert_eq!(round_up_cluster(u64::MAX - 10, 4096), u64::MAX);
+
+    let w = world("b1.7.3", Era::Pre16);
+    let id = create(&w, NewInstance::vanilla("BetaSpace", "b1.7.3").unwrap());
+    let game_dir = InstanceStore::new(&w.root).dirs(&id).game_dir();
+
+    let c = ctx(&w);
+    let vjson = ensure_version_json(&c, &McVersion::new("b1.7.3").unwrap())
+        .await
+        .unwrap();
+    let plan = parse_version(&vjson, &WINDOWS_X64).unwrap();
+    let dl = c.downloader();
+    let (assets_name, index) = ensure_asset_index(&c, &dl, &plan).await.unwrap().unwrap();
+    let rp = java_install::plan_runtime(&w.fetcher, &plan.java.component)
+        .await
+        .unwrap();
+
+    let raw_sum = planned_bytes(&plan, Some(&index), Some(&rp));
+    let before = bytes_to_download(
+        &w.root,
+        "b1.7.3",
+        &[&plan],
+        Some((&assets_name, &index)),
+        &game_dir,
+        &[&rp],
+    );
+    let cluster = fsutil::cluster_size_bytes(w.root.path()).max(1);
+    assert_eq!(
+        before % cluster,
+        0,
+        "footprint is a multiple of cluster size"
+    );
+    assert!(
+        before > raw_sum,
+        "cluster slack + mapped resource copies exceed raw download sum ({before} vs {raw_sum})"
+    );
+
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    let after = bytes_to_download(
+        &w.root,
+        "b1.7.3",
+        &[&plan],
+        Some((&assets_name, &index)),
+        &game_dir,
+        &[],
+    );
+    assert_eq!(after, 0, "all files present on disk require 0 extra bytes");
 }

@@ -11,7 +11,8 @@
 //! the whole folder renamed to `runtimes/java/<id>/`. A runtime folder therefore either is
 //! complete and verified or does not exist; an interrupted run keeps its verified files and the
 //! next run continues from them. An installed runtime is reused (no network) while its
-//! `java.exe` still matches the hash recorded at install time ([`resolve_java`]).
+//! launch executable (`javaw.exe`, falling back to `java.exe`) still matches the hash recorded at
+//! install time ([`resolve_java`]).
 
 use std::fs;
 use std::io;
@@ -23,7 +24,7 @@ use sha1::{Digest, Sha1};
 use crate::download::{DownloadError, Downloader, FileJob};
 use crate::mc_meta::Download;
 use crate::net::{FetchError, Fetcher, Streamer};
-use crate::portable::fsutil::{atomic_write, sha256_hex, Expected};
+use crate::portable::fsutil::{self, atomic_write, sha256_hex, Expected};
 use crate::portable::{PortableRoot, RelPath};
 use crate::runtimes::{resolve_java, runtime_dir, ManagedJava, RuntimeManifest};
 
@@ -33,6 +34,7 @@ const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const JAVAW_EXE: &str = "bin/javaw.exe";
 const JAVA_EXE: &str = "bin/java.exe";
 const STAGING: &str = "java-staging";
 /// Written beside `runtime.json` at install time: every file of the runtime with the SHA-1 and size
@@ -159,8 +161,11 @@ pub fn parse_files(body: &[u8]) -> Result<(Vec<RelPath>, Vec<RuntimeFile>), Java
     if total > MAX_TOTAL_BYTES {
         return Err(JavaError::Manifest("too large"));
     }
-    if !out.iter().any(|f| f.path.as_str() == JAVA_EXE) {
-        return Err(JavaError::Manifest("no bin/java.exe"));
+    if !out
+        .iter()
+        .any(|f| f.path.as_str() == JAVAW_EXE || f.path.as_str() == JAVA_EXE)
+    {
+        return Err(JavaError::Manifest("no bin/javaw.exe or bin/java.exe"));
     }
     Ok((dirs, out))
 }
@@ -180,16 +185,27 @@ pub fn runtime_id(component: &str, version_name: &str) -> String {
     format!("{component}--{v}--windows-x64")
 }
 
-/// A verified runtime of this component that is already installed (newest name first). No network.
+/// A verified runtime of this component that is already installed (newest version first). No network.
 pub fn find_installed(root: &PortableRoot, component: &str) -> Option<ManagedJava> {
+    fn extract_ver<'a>(id: &'a str, prefix: &str, suffix: &str) -> &'a str {
+        let rest = id.strip_prefix(prefix).unwrap_or(id);
+        rest.strip_suffix(suffix).unwrap_or(rest)
+    }
     let prefix = format!("{component}--");
+    let suffix = format!("--{PLATFORM}");
     let mut ids: Vec<String> = fs::read_dir(root.java_runtimes_dir())
         .ok()?
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.starts_with(&prefix))
         .collect();
-    ids.sort();
+    ids.sort_by(|a, b| {
+        crate::loaders::cmp_versions(
+            extract_ver(a, &prefix, &suffix),
+            extract_ver(b, &prefix, &suffix),
+        )
+        .then_with(|| a.cmp(b))
+    });
     ids.into_iter()
         .rev()
         .find_map(|id| resolve_java(root, &id).ok())
@@ -227,17 +243,39 @@ pub async fn install_runtime<S: Streamer>(
 ) -> Result<ManagedJava, JavaError> {
     let id = runtime_id(&plan.release.component, &plan.release.version_name);
     let target = runtime_dir(root, &id).map_err(|_| JavaError::Manifest("bad runtime id"))?;
-    if let Ok(java) = resolve_java(root, &id) {
+    let staging = root.cache_dir().join(STAGING).join(&id);
+
+    let already_installed = {
+        let root = root.clone();
+        let id = id.clone();
+        let target = target.clone();
+        let staging = staging.clone();
+        let dirs = plan.dirs.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<ManagedJava>, JavaError> {
+            if let Ok(java) = resolve_java(&root, &id) {
+                return Ok(Some(java));
+            }
+            if target.exists() {
+                fsutil::reject_links_between(root.path(), &target)?;
+                fsutil::remove_dir_all_with_retry(&target)?; // present but failing its check: reinstall
+            }
+            fsutil::reject_links_between(root.path(), &staging)?;
+            fs::create_dir_all(&staging)?;
+            fsutil::reject_links_between(root.path(), &staging)?;
+            for d in &dirs {
+                let p = d.to_path(&staging);
+                fsutil::reject_links_between(root.path(), &p)?;
+                fs::create_dir_all(&p)?;
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(io::Error::other)??
+    };
+    if let Some(java) = already_installed {
         return Ok(java);
     }
-    if target.exists() {
-        fs::remove_dir_all(&target)?; // present but failing its check: reinstall
-    }
-    let staging = root.cache_dir().join(STAGING).join(&id);
-    fs::create_dir_all(&staging)?;
-    for d in &plan.dirs {
-        fs::create_dir_all(d.to_path(&staging))?;
-    }
+
     let jobs = plan
         .files
         .iter()
@@ -250,26 +288,53 @@ pub async fn install_runtime<S: Streamer>(
         .collect();
     downloader.fetch_all(jobs, concurrency).await?;
 
-    let java_exe = RelPath::new(JAVA_EXE).map_err(|_| JavaError::Manifest("bad exe path"))?;
-    let manifest = RuntimeManifest {
-        schema: 1,
-        id: id.clone(),
-        vendor: "mojang".into(),
-        java_major,
-        arch: "x64".into(),
-        java_exe_sha256: sha256_hex(&java_exe.to_path(&staging))?,
-        java_exe,
-    };
-    atomic_write(&staging.join(FILES_RECORD), &record_bytes(&plan.files)?)?;
-    atomic_write(
-        &staging.join("runtime.json"),
-        &serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
-    )?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::rename(&staging, &target)?;
-    resolve_java(root, &id).map_err(|_| JavaError::Manifest("installed runtime failed its check"))
+    let has_javaw = plan.files.iter().any(|f| f.path.as_str() == JAVAW_EXE);
+    let has_java = plan.files.iter().any(|f| f.path.as_str() == JAVA_EXE);
+    let chosen_exe = if has_javaw { JAVAW_EXE } else { JAVA_EXE };
+
+    let root = root.clone();
+    let files = plan.files.clone();
+    tokio::task::spawn_blocking(move || -> Result<ManagedJava, JavaError> {
+        fsutil::reject_links_between(root.path(), &staging)?;
+        let java_exe = RelPath::new(chosen_exe).map_err(|_| JavaError::Manifest("bad exe path"))?;
+        let java_exe_sha256 = sha256_hex(&java_exe.to_path(&staging))?;
+        let (java_cli_exe, java_cli_exe_sha256) = if has_javaw && has_java {
+            let cli = RelPath::new(JAVA_EXE).map_err(|_| JavaError::Manifest("bad exe path"))?;
+            let sha = sha256_hex(&staging.join(JAVA_EXE))?;
+            (Some(cli), Some(sha))
+        } else {
+            (None, None)
+        };
+        let manifest = RuntimeManifest {
+            schema: 1,
+            id: id.clone(),
+            vendor: "mojang".into(),
+            java_major,
+            arch: "x64".into(),
+            java_exe,
+            java_exe_sha256,
+            java_cli_exe,
+            java_cli_exe_sha256,
+        };
+        atomic_write(&staging.join(FILES_RECORD), &record_bytes(&files)?)?;
+        atomic_write(
+            &staging.join("runtime.json"),
+            &serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
+        )?;
+        if let Some(parent) = target.parent() {
+            fsutil::reject_links_between(root.path(), parent)?;
+            fs::create_dir_all(parent)?;
+        }
+        fsutil::reject_links_between(root.path(), &target)?;
+        if target.exists() {
+            fsutil::remove_dir_all_with_retry(&target)?;
+        }
+        fsutil::rename_with_retry(&staging, &target)?;
+        resolve_java(&root, &id)
+            .map_err(|_| JavaError::Manifest("installed runtime failed its check"))
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 // ------------------------------------------------------------------------------ full verification
@@ -309,8 +374,9 @@ fn record_bytes(files: &[RuntimeFile]) -> io::Result<Vec<u8>> {
 /// entry means the whole record is not trusted).
 pub fn recorded_files(root: &PortableRoot, id: &str) -> Option<Vec<RuntimeFile>> {
     let dir = runtime_dir(root, id).ok()?;
-    let record: FilesRecord =
-        serde_json::from_slice(&fs::read(dir.join(FILES_RECORD)).ok()?).ok()?;
+    fsutil::reject_links_between(root.path(), &dir).ok()?;
+    let bytes = fsutil::read_bounded(&dir.join(FILES_RECORD), MAX_MANIFEST_BYTES as u64).ok()?;
+    let record: FilesRecord = serde_json::from_slice(&bytes).ok()?;
     if record.schema != 1 || record.files.len() > MAX_FILES {
         return None;
     }
@@ -331,7 +397,7 @@ pub fn recorded_files(root: &PortableRoot, id: &str) -> Option<Vec<RuntimeFile>>
 }
 
 /// The authoritative file list for fully verifying an installed runtime, or `None` when there is
-/// none to be had (and then verification stays limited to `java.exe`, which `resolve_java` always
+/// none to be had (and then verification stays limited to `java_exe`, which `resolve_java` always
 /// checks):
 /// - the list recorded when the runtime was installed, which needs no network; or
 /// - for a runtime installed before that record existed, Mojang's current manifest for `component`,
@@ -345,17 +411,34 @@ pub async fn verification_files<F: Fetcher>(
     component: Option<&str>,
     fetcher: &F,
 ) -> Option<Vec<RuntimeFile>> {
-    if let Some(files) = recorded_files(root, &java.id) {
+    let recorded = {
+        let root = root.clone();
+        let id = java.id.clone();
+        tokio::task::spawn_blocking(move || recorded_files(&root, &id))
+            .await
+            .ok()
+            .flatten()
+    };
+    if let Some(files) = recorded {
         return Some(files);
     }
     let plan = plan_runtime(fetcher, component?).await.ok()?;
     if runtime_id(&plan.release.component, &plan.release.version_name) != java.id {
         return None; // a newer runtime exists; this older one has no authoritative list any more
     }
-    if let Ok(bytes) = record_bytes(&plan.files) {
-        let _ = atomic_write(&java.home.join(FILES_RECORD), &bytes); // best effort
-    }
-    Some(plan.files)
+    let files = plan.files;
+    let files_for_record = files.clone();
+    let home = java.home.clone();
+    let root = root.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if fsutil::reject_links_between(root.path(), &home).is_ok() {
+            if let Ok(bytes) = record_bytes(&files_for_record) {
+                let _ = atomic_write(&home.join(FILES_RECORD), &bytes); // best effort
+            }
+        }
+    })
+    .await;
+    Some(files)
 }
 
 /// Download jobs that check every listed file of an installed runtime and replace the missing or
@@ -378,7 +461,9 @@ mod tests {
     use crate::download::{Cancel, Progress};
     use crate::net::testing::FakeFetcher;
     use crate::net::testing_stream::FakeStreamer;
+    use crate::runtimes::{resolve_cli_java_exe, write_manifest};
     use serde_json::json;
+    use sha2::Sha256;
     use std::time::Duration;
 
     const BASE: &str = "https://piston-data.mojang.com/v1/objects";
@@ -452,7 +537,9 @@ mod tests {
             .unwrap();
         assert_eq!(java.id, "java-runtime-delta--21.0.7--windows-x64");
         assert_eq!(java.java_major, 21);
-        assert!(java.exe.ends_with("bin/java.exe") || java.exe.ends_with("bin\\java.exe"));
+        assert!(java.exe.ends_with("bin/javaw.exe") || java.exe.ends_with("bin\\javaw.exe"));
+        let cli = resolve_cli_java_exe(&w.root, &java).unwrap();
+        assert!(cli.ends_with("bin/java.exe") || cli.ends_with("bin\\java.exe"));
         assert_eq!(
             fs::read(java.home.join("lib").join("modules")).unwrap(),
             w.files[2].1
@@ -497,12 +584,16 @@ mod tests {
         let recorded = recorded_files(&w.root, &java.id).expect("the file list was recorded");
         assert_eq!(recorded, plan.files);
 
-        // java.exe is intact, so the everyday check still accepts the runtime...
+        // javaw.exe is intact, so the everyday check still accepts the runtime...
         fs::write(java.home.join("lib").join("modules"), vec![9u8; 5000]).unwrap(); // same size
-        fs::remove_file(java.home.join("bin").join("javaw.exe")).unwrap();
+        fs::remove_file(java.home.join("bin").join("java.exe")).unwrap();
         assert!(
             find_installed(&w.root, "java-runtime-delta").is_some(),
-            "the cheap launch-time check only looks at java.exe"
+            "the cheap launch-time check only looks at javaw.exe"
+        );
+        assert!(
+            resolve_cli_java_exe(&w.root, &java).is_err(),
+            "the headless CLI binary check notices the missing java.exe"
         );
         // ...but a full verification covers every file, offline (the record is local)
         let offline = FakeFetcher::new();
@@ -521,13 +612,14 @@ mod tests {
             w.files[2].1
         );
         assert_eq!(
-            fs::read(java.home.join("bin").join("javaw.exe")).unwrap(),
-            w.files[1].1
+            fs::read(java.home.join("bin").join("java.exe")).unwrap(),
+            w.files[0].1
         );
         // a second run finds nothing to do
         assert_eq!(repair(&w, &java, &files).await, 0);
-        // and the launch-time identity check is unchanged: still java.exe's hash
+        // and both launch-time and CLI checks succeed again
         assert!(resolve_java(&w.root, &java.id).is_ok());
+        assert!(resolve_cli_java_exe(&w.root, &java).is_ok());
     }
 
     #[tokio::test]
@@ -537,7 +629,7 @@ mod tests {
         fs::remove_file(java.home.join(FILES_RECORD)).unwrap(); // as installed by an earlier Clade
         assert!(recorded_files(&w.root, &java.id).is_none());
 
-        // offline: nothing authoritative to check against, so only java.exe is covered
+        // offline: nothing authoritative to check against, so only java_exe is covered
         let offline = FakeFetcher::new();
         assert!(
             verification_files(&w.root, &java, Some("java-runtime-delta"), &offline)
@@ -607,7 +699,7 @@ mod tests {
         let fixed = install_runtime(&w.root, &plan, 21, &downloader(&w), 4)
             .await
             .unwrap();
-        assert_eq!(fs::read(&fixed.exe).unwrap(), w.files[0].1);
+        assert_eq!(fs::read(&fixed.exe).unwrap(), w.files[1].1);
     }
 
     #[tokio::test]
@@ -675,6 +767,15 @@ mod tests {
             json!({"files": {"bin/java.exe": ok.clone(), name: e}}).to_string()
         };
         assert!(parse_files(make("fine.txt", ok.clone()).as_bytes()).is_ok());
+        assert!(
+            parse_files(
+                json!({"files": {"bin/javaw.exe": ok.clone()}})
+                    .to_string()
+                    .as_bytes()
+            )
+            .is_ok(),
+            "javaw.exe alone is accepted"
+        );
         assert!(parse_files(make("../escape.dll", ok.clone()).as_bytes()).is_err());
         assert!(parse_files(make("C:/x.dll", ok.clone()).as_bytes()).is_err());
         assert!(
@@ -690,7 +791,7 @@ mod tests {
         .is_err());
         assert!(
             parse_files(br#"{"files":{"a":{"type":"directory"}}}"#).is_err(),
-            "must contain java.exe"
+            "must contain javaw.exe or java.exe"
         );
     }
 
@@ -703,5 +804,77 @@ mod tests {
             .all(|c| c != '/' && c != '\\' && c != ' '));
         let d = tempfile::tempdir().unwrap();
         assert!(runtime_dir(&PortableRoot::at(d.path()), &id).is_ok());
+    }
+
+    #[test]
+    fn find_installed_sorts_versions_numerically_so_21_0_10_beats_21_0_9() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+        let exe_bytes = b"MZ javaw";
+        let sha = hex::encode(Sha256::digest(exe_bytes));
+
+        for ver in ["21.0.7", "21.0.9", "21.0.10-beta.1", "21.0.10"] {
+            let id = runtime_id("java-runtime-delta", ver);
+            let dir = runtime_dir(&root, &id).unwrap();
+            fs::create_dir_all(dir.join("bin")).unwrap();
+            fs::write(dir.join("bin").join("javaw.exe"), exe_bytes).unwrap();
+            write_manifest(
+                &root,
+                &RuntimeManifest {
+                    schema: 1,
+                    id,
+                    vendor: "mojang".into(),
+                    java_major: 21,
+                    arch: "x64".into(),
+                    java_exe: RelPath::new("bin/javaw.exe").unwrap(),
+                    java_exe_sha256: sha.clone(),
+                    java_cli_exe: None,
+                    java_cli_exe_sha256: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let picked = find_installed(&root, "java-runtime-delta").unwrap();
+        assert_eq!(picked.id, "java-runtime-delta--21.0.10--windows-x64");
+    }
+
+    #[tokio::test]
+    async fn installs_console_only_runtime_when_javaw_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(dir.path());
+        root.ensure_layout().unwrap();
+        let java_bytes = vec![7u8; 250];
+        let url = format!("{BASE}/{}/bin/java.exe", sha1_of(&java_bytes));
+        let streamer = FakeStreamer::new();
+        streamer.add(&url, &java_bytes);
+        let fetcher = FakeFetcher::new();
+        let manifest = json!({
+            "files": {
+                "bin": {"type": "directory"},
+                "bin/java.exe": {
+                    "type": "file",
+                    "downloads": {"raw": {"sha1": sha1_of(&java_bytes), "size": java_bytes.len(), "url": url}}
+                }
+            }
+        })
+        .to_string();
+        let manifest_url = "https://piston-meta.mojang.com/v1/packages/c/manifest.json";
+        fetcher.ok(manifest_url, &manifest);
+        fetcher.ok(
+            RUNTIME_INDEX_URL,
+            json!({"windows-x64": {"jre-legacy": [{
+                "manifest": {"sha1": sha1_of(manifest.as_bytes()), "size": manifest.len(), "url": manifest_url},
+                "version": {"name": "8.0.51"}
+            }]}})
+            .to_string(),
+        );
+        let plan = plan_runtime(&fetcher, "jre-legacy").await.unwrap();
+        let dl =
+            Downloader::new(&streamer, Cancel::new(), Progress::new()).with_backoff(Duration::ZERO);
+        let java = install_runtime(&root, &plan, 8, &dl, 2).await.unwrap();
+        assert!(java.exe.ends_with("bin/java.exe") || java.exe.ends_with("bin\\java.exe"));
+        assert_eq!(resolve_cli_java_exe(&root, &java).unwrap(), java.exe);
     }
 }

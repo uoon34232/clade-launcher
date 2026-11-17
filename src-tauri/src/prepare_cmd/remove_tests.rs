@@ -72,6 +72,23 @@ fn removing_keeps_the_worlds_and_leaves_the_other_profile_alone() {
 }
 
 #[test]
+fn removing_clears_recorded_prepare_failure_for_that_profile_only() {
+    let (_d, state, ids) = world(&["One", "Two"]);
+    lock(&state.failed).insert(
+        ids[0].as_str().to_owned(),
+        (&PrepareError::Offline("x".into())).into(),
+    );
+    lock(&state.failed).insert(
+        ids[1].as_str().to_owned(),
+        (&PrepareError::Network("y".into())).into(),
+    );
+    assert_eq!(state.status(ids[0].as_str()).state, "failed");
+    remove_from_clade(&state, ids[0].as_str()).unwrap();
+    assert_eq!(state.status(ids[0].as_str()).state, "idle");
+    assert_eq!(state.status(ids[1].as_str()).state, "failed");
+}
+
+#[test]
 fn bad_ids_unknown_profiles_and_busy_profiles_are_rejected_before_anything_moves() {
     let (_d, state, ids) = world(&["One", "Two"]);
     for bad in ["", "../escape", ".removed", "UPPER", "a/b", "nope"] {
@@ -142,6 +159,18 @@ fn the_selection_stays_sane_and_the_last_profile_gives_the_empty_state() {
             .unwrap()
             .count(),
         3
+    );
+}
+
+#[test]
+fn remove_profile_command_runs_on_blocking_pool_and_never_erases_files() {
+    let cmd = include_str!("../prepare_cmd.rs");
+    let fn_start = cmd.find("pub async fn remove_profile").unwrap();
+    let fn_end = cmd.find("pub fn cancel_prepare").unwrap();
+    let body = &cmd[fn_start..fn_end];
+    assert!(
+        body.contains("spawn_blocking("),
+        "remove_profile must offload filesystem retire and snapshot walks to spawn_blocking"
     );
 }
 

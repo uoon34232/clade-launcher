@@ -13,7 +13,7 @@ pub struct InvalidToken {
 }
 
 macro_rules! token_newtype {
-    ($(#[$doc:meta])* $name:ident, $what:literal, $space:expr) => {
+    ($(#[$doc:meta])* $name:ident, $what:literal, $space:expr, $max_len:expr) => {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub struct $name(String);
@@ -21,7 +21,7 @@ macro_rules! token_newtype {
         impl $name {
             pub fn new(s: &str) -> Result<Self, InvalidToken> {
                 let ok = !s.is_empty()
-                    && s.len() <= 64
+                    && s.len() <= $max_len
                     && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-') || ($space && c == ' '))
                     // A leading '-' could be mistaken for a command-line flag, '.' for a hidden/relative name.
                     && !s.starts_with(['.', '-'])
@@ -64,20 +64,23 @@ token_newtype!(
     /// `1.21.5-pre1`, `b1.7.3`, `rd-132211`, ...). Never enumerated or restricted by the launcher.
     McVersion,
     "Minecraft version",
-    true // twelve real ids contain spaces, e.g. "1.14.2 Pre-Release 4" and "3D Shareware v1.34"
+    true, // twelve real ids contain spaces, e.g. "1.14.2 Pre-Release 4" and "3D Shareware v1.34"
+    64
 );
 token_newtype!(
     /// A mod loader's own version string (`0.16.9`, `54.1.14`, `21.4.158`, `0.20.0-beta.9`).
     LoaderVersion,
     "loader version",
-    false
+    false,
+    64
 );
 token_newtype!(
     /// The id of an installed, launchable version profile under `minecraft/versions/`
     /// (`1.21.4`, `fabric-loader-0.16.9-1.21.4`, `neoforge-21.4.158`).
     VersionId,
     "version id",
-    true // a Vanilla profile's launchable id is its Minecraft version id
+    true, // a Vanilla profile's launchable id is its Minecraft version id
+    128   // composite loader + snapshot version ids can exceed 64 characters
 );
 
 #[cfg(test)]
@@ -144,12 +147,35 @@ mod tests {
             "a;b",
             "a&b",
             "x\n",
-            &"9".repeat(65),
+            &"9".repeat(129),
         ] {
             assert!(McVersion::new(bad).is_err(), "{bad:?}");
             assert!(LoaderVersion::new(bad).is_err(), "{bad:?}");
             assert!(VersionId::new(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn enforces_per_type_length_bounds() {
+        let len_64 = "9".repeat(64);
+        let len_65 = "9".repeat(65);
+        let len_128 = "9".repeat(128);
+        let len_129 = "9".repeat(129);
+        let composite =
+            "quilt-loader-0.27.1-beta.2+build.20260929-1.21.5-rc1-experimental-snapshot-4";
+        assert!(composite.len() > 64 && composite.len() <= 128);
+
+        assert!(McVersion::new(&len_64).is_ok());
+        assert!(McVersion::new(&len_65).is_err());
+
+        assert!(LoaderVersion::new(&len_64).is_ok());
+        assert!(LoaderVersion::new(&len_65).is_err());
+
+        assert!(VersionId::new(&len_64).is_ok());
+        assert!(VersionId::new(&len_65).is_ok());
+        assert!(VersionId::new(composite).is_ok());
+        assert!(VersionId::new(&len_128).is_ok());
+        assert!(VersionId::new(&len_129).is_err());
     }
 
     #[test]

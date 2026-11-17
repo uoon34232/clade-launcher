@@ -13,11 +13,13 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Seek, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use zip::ZipArchive;
 
-use crate::portable::fsutil::reject_links_between;
+use crate::portable::fsutil::{
+    is_link, reject_links_between, remove_dir_all_with_retry, rename_with_retry,
+};
 use crate::portable::relpath::{RelPath, RelPathError};
 
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +67,68 @@ pub struct Report {
     pub bytes: u64,
 }
 
+fn common_base_dir(a: &Path, b: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    let mut normal_count = 0usize;
+    for (ca, cb) in a.components().zip(b.components()) {
+        let same = if cfg!(windows) {
+            ca.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&cb.as_os_str().to_string_lossy())
+        } else {
+            ca == cb
+        };
+        if !same {
+            break;
+        }
+        if matches!(ca, Component::Normal(_)) {
+            normal_count += 1;
+        }
+        out.push(ca.as_os_str());
+    }
+    (normal_count >= 1 && fs::symlink_metadata(&out).is_ok()).then_some(out)
+}
+
+fn ensure_dir_no_links(dir: &Path, common_base: Option<&Path>) -> io::Result<()> {
+    let base = match common_base.filter(|b| !b.as_os_str().is_empty()) {
+        Some(b) => b,
+        None => {
+            let mut anc = dir;
+            while fs::symlink_metadata(anc).is_err() {
+                match anc.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => anc = p,
+                    _ => break,
+                }
+            }
+            anc
+        }
+    };
+    reject_links_between(base, dir)?;
+    fs::create_dir_all(dir)?;
+    reject_links_between(base, dir)?;
+    if is_link(dir).unwrap_or(false) {
+        return Err(io::Error::other(format!(
+            "refusing to follow link at {}",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_dir_cached(
+    base: &Path,
+    dir: &Path,
+    checked_dirs: &mut HashSet<PathBuf>,
+) -> io::Result<()> {
+    if !checked_dirs.contains(dir) {
+        reject_links_between(base, dir)?;
+        fs::create_dir_all(dir)?;
+        reject_links_between(base, dir)?;
+        checked_dirs.insert(dir.to_path_buf());
+    }
+    Ok(())
+}
+
 /// Extracts into a fresh scratch directory under `scratch_parent` (must be on the same volume
 /// as `dest`, e.g. `cache/`), then renames it to `dest` (which must not exist).
 pub fn extract_zip_atomic<R: Read + Seek>(
@@ -73,21 +137,33 @@ pub fn extract_zip_atomic<R: Read + Seek>(
     scratch_parent: &Path,
     limits: Limits,
 ) -> Result<Report, ExtractError> {
-    if dest.exists() {
+    if fs::symlink_metadata(dest).is_ok() {
         return Err(ExtractError::DestinationExists);
     }
-    fs::create_dir_all(scratch_parent)?;
+    let common = common_base_dir(dest, scratch_parent);
+    ensure_dir_no_links(scratch_parent, common.as_deref())?;
+
     let scratch = tempfile::Builder::new()
         .prefix("extract-")
         .tempdir_in(scratch_parent)?;
-    let report = extract_zip_into(reader, scratch.path(), limits)?;
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+    let scratch_path = scratch.keep();
+
+    let result = (|| -> Result<Report, ExtractError> {
+        let report = extract_zip_into(reader, &scratch_path, limits)?;
+        if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+            ensure_dir_no_links(parent, common.as_deref())?;
+        }
+        if fs::symlink_metadata(dest).is_ok() {
+            return Err(ExtractError::DestinationExists);
+        }
+        rename_with_retry(&scratch_path, dest)?;
+        Ok(report)
+    })();
+
+    if result.is_err() {
+        let _ = remove_dir_all_with_retry(&scratch_path);
     }
-    fs::rename(scratch.path(), dest)?;
-    // The directory now lives at `dest`; stop the guard from deleting a path that no longer exists.
-    let _ = scratch.keep();
-    Ok(report)
+    result
 }
 
 /// Extracts into an existing, empty-ish directory.
@@ -107,10 +183,8 @@ pub fn extract_zip_into<R: Read + Seek>(
         let e = zip.by_index_raw(i)?;
         let name = e.name().to_owned();
         let rel = entry_path(&name)?;
-        if let Some(mode) = e.unix_mode() {
-            if mode & 0o170000 == 0o120000 {
-                return Err(ExtractError::Symlink(name));
-            }
+        if e.is_symlink() || e.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            return Err(ExtractError::Symlink(name));
         }
         if !seen.insert(rel.fold_case()) {
             return Err(ExtractError::CaseCollision(name));
@@ -118,36 +192,34 @@ pub fn extract_zip_into<R: Read + Seek>(
     }
 
     // Pass 2: write, enforcing limits on the bytes that actually arrive.
+    reject_links_between(base, base)?;
+    let mut checked_dirs: HashSet<PathBuf> = HashSet::new();
+    checked_dirs.insert(base.to_path_buf());
     let mut report = Report::default();
     for i in 0..zip.len() {
         let mut e = zip.by_index(i)?;
         let name = e.name().to_owned();
+        if e.is_symlink() || e.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            return Err(ExtractError::Symlink(name));
+        }
         let rel = entry_path(&name)?;
         let out = rel.to_path(base);
-        reject_links_between(base, &out)?;
 
         if e.is_dir() {
-            fs::create_dir_all(&out)?;
+            ensure_dir_cached(base, &out, &mut checked_dirs)?;
             report.dirs += 1;
             continue;
         }
         if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)?;
-            reject_links_between(base, parent)?;
+            ensure_dir_cached(base, parent, &mut checked_dirs)?;
         }
         let compressed = e.compressed_size().max(1);
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&out)?;
-        let written = copy_limited(&mut e, &mut file, limits.max_file_bytes)?;
-        if written / compressed > limits.max_ratio && written > 1024 * 1024 {
-            return Err(ExtractError::LimitExceeded("compression ratio"));
-        }
-        report.bytes += written;
-        if report.bytes > limits.max_total_bytes {
-            return Err(ExtractError::LimitExceeded("total uncompressed size"));
-        }
+        let written = copy_limited(&mut e, &mut file, compressed, report.bytes, &limits)?;
+        report.bytes = report.bytes.saturating_add(written);
         report.files += 1;
     }
     Ok(report)
@@ -161,17 +233,29 @@ fn entry_path(name: &str) -> Result<RelPath, ExtractError> {
     })
 }
 
-fn copy_limited(r: &mut impl Read, w: &mut impl Write, max: u64) -> Result<u64, ExtractError> {
+fn copy_limited(
+    r: &mut impl Read,
+    w: &mut impl Write,
+    compressed: u64,
+    total_so_far: u64,
+    limits: &Limits,
+) -> Result<u64, ExtractError> {
     let mut buf = [0u8; 64 * 1024];
-    let mut total = 0u64;
+    let mut entry_bytes = 0u64;
     loop {
         let n = r.read(&mut buf)?;
         if n == 0 {
-            return Ok(total);
+            return Ok(entry_bytes);
         }
-        total += n as u64;
-        if total > max {
+        entry_bytes = entry_bytes.saturating_add(n as u64);
+        if entry_bytes > limits.max_file_bytes {
             return Err(ExtractError::LimitExceeded("file size"));
+        }
+        if entry_bytes / compressed > limits.max_ratio {
+            return Err(ExtractError::LimitExceeded("compression ratio"));
+        }
+        if total_so_far.saturating_add(entry_bytes) > limits.max_total_bytes {
+            return Err(ExtractError::LimitExceeded("total uncompressed size"));
         }
         w.write_all(&buf[..n])?;
     }
@@ -345,5 +429,65 @@ mod tests {
             extract_zip_atomic(again, &dest, &scratch, Limits::default()),
             Err(ExtractError::DestinationExists)
         ));
+    }
+
+    #[test]
+    fn enforces_ratio_on_sub_megabyte_entries_and_total_bytes_mid_stream() {
+        // 200 KiB (<= 1 MiB) of zeros compresses to ~220 bytes (~930:1 > 50:1) and must be
+        // stopped on the first chunk before writing to disk.
+        let mut w = ZipWriter::new(Cursor::new(Vec::new()));
+        w.start_file(
+            "small_bomb.bin",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        w.write_all(&vec![0u8; 200 * 1024]).unwrap();
+        let mut c = w.finish().unwrap();
+        c.set_position(0);
+
+        let d = tempfile::tempdir().unwrap();
+        let r = extract_zip_into(
+            c,
+            d.path(),
+            Limits {
+                max_ratio: 50,
+                ..Limits::default()
+            },
+        );
+        assert!(matches!(
+            r,
+            Err(ExtractError::LimitExceeded("compression ratio"))
+        ));
+        assert_eq!(
+            fs::metadata(d.path().join("small_bomb.bin")).unwrap().len(),
+            0,
+            "offending chunk must be rejected before writing to disk"
+        );
+
+        // Cumulative `max_total_bytes` must abort mid-stream on the second file before writing past limit.
+        let non_compressible_a: Vec<u8> = (0..4_000).map(|i| (i * 31 % 251) as u8).collect();
+        let non_compressible_b: Vec<u8> = (0..200_000).map(|i| (i * 17 % 253) as u8).collect();
+        let (d2, r2) = extract(
+            &[
+                ("sub/a.bin", &non_compressible_a),
+                ("sub/b.bin", &non_compressible_b),
+            ],
+            Limits {
+                max_total_bytes: 70_000,
+                ..Limits::default()
+            },
+        );
+        assert!(matches!(
+            r2,
+            Err(ExtractError::LimitExceeded("total uncompressed size"))
+        ));
+        let written_a = fs::metadata(d2.path().join("sub/a.bin")).unwrap().len();
+        let written_b = fs::metadata(d2.path().join("sub/b.bin")).unwrap().len();
+        assert!(
+            written_a + written_b <= 70_000,
+            "must never write past max_total_bytes ({} + {})",
+            written_a,
+            written_b
+        );
     }
 }

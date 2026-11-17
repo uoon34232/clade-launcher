@@ -18,12 +18,18 @@
 //! - `url: ""` entries that an installer generates locally (Forge/NeoForge): they must exist,
 //!   they cannot be downloaded.
 
+use std::borrow::Cow;
+use std::fmt;
+
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
 use crate::loader_install::library_relpath;
 use crate::portable::fsutil::Expected;
 use crate::portable::RelPath;
+use crate::versions::VersionId;
 
 /// The platform libraries are selected for.
 #[derive(Debug, Clone, Copy)]
@@ -359,6 +365,15 @@ fn coordinate_classifier(name: &str) -> Option<&str> {
     main.split(':').nth(3)
 }
 
+fn is_target_native_classifier(classifier: &str, target: &Target) -> bool {
+    target.os == "windows"
+        && target.arch_bits == "64"
+        && matches!(
+            classifier,
+            "natives-windows" | "natives-windows-64" | "natives-windows-x86_64"
+        )
+}
+
 fn parse_library(lib: &Value, target: &Target) -> Result<Vec<Library>, MetaError> {
     let name = lib
         .get("name")
@@ -367,6 +382,17 @@ fn parse_library(lib: &Value, target: &Target) -> Result<Vec<Library>, MetaError
     if !rules_allow(lib.get("rules"), target) {
         return Ok(Vec::new());
     }
+    let modern_native = match coordinate_classifier(name) {
+        Some(c) if c.to_ascii_lowercase().starts_with("natives-") => {
+            let lower = c.to_ascii_lowercase();
+            if is_target_native_classifier(&lower, target) {
+                true
+            } else {
+                return Ok(Vec::new());
+            }
+        }
+        _ => false,
+    };
     let exclude: Vec<String> = lib
         .pointer("/extract/exclude")
         .and_then(Value::as_array)
@@ -382,7 +408,6 @@ fn parse_library(lib: &Value, target: &Target) -> Result<Vec<Library>, MetaError
         .and_then(|n| n.get(target.os))
         .and_then(Value::as_str)
         .map(|c| c.replace("${arch}", target.arch_bits));
-    let modern_native = coordinate_classifier(name).is_some_and(|c| c.starts_with("natives-"));
 
     let mut out = Vec::new();
     let main = match downloads.and_then(|d| d.get("artifact")) {
@@ -431,11 +456,25 @@ fn single_component(s: &str, what: &'static str) -> Result<String, MetaError> {
 /// Parses a version JSON or loader profile into a plan.
 pub fn parse_version(bytes: &[u8], target: &Target) -> Result<VersionPlan, MetaError> {
     let v: Value = serde_json::from_slice(bytes).map_err(|_| MetaError::NotJson)?;
-    let id = v
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or(MetaError::Missing("id"))?
+    let raw_id = match v.get("id") {
+        None | Some(Value::Null) => return Err(MetaError::Missing("id")),
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(MetaError::Bad("id")),
+    };
+    let id = VersionId::new(raw_id)
+        .map_err(|_| MetaError::Bad("id"))?
+        .as_str()
         .to_owned();
+    let inherits_from = match v.get("inheritsFrom") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(
+            VersionId::new(s)
+                .map_err(|_| MetaError::Bad("inheritsFrom"))?
+                .as_str()
+                .to_owned(),
+        ),
+        Some(_) => return Err(MetaError::Bad("inheritsFrom")),
+    };
 
     let mut libraries = Vec::new();
     for lib in v
@@ -534,10 +573,7 @@ pub fn parse_version(bytes: &[u8], target: &Target) -> Result<VersionPlan, MetaE
 
     Ok(VersionPlan {
         id,
-        inherits_from: v
-            .get("inheritsFrom")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        inherits_from,
         main_class,
         arguments,
         minecraft_arguments: v
@@ -587,36 +623,362 @@ pub struct AssetIndex {
     pub map_to_resources: bool,
 }
 
-pub fn parse_asset_index(bytes: &[u8]) -> Result<AssetIndex, MetaError> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|_| MetaError::NotJson)?;
-    let objects = v
-        .get("objects")
-        .and_then(Value::as_object)
-        .ok_or(MetaError::Missing("asset objects"))?;
-    let mut out = Vec::with_capacity(objects.len());
-    for (name, o) in objects {
-        let hash = o
-            .get("hash")
-            .and_then(Value::as_str)
-            .filter(|h| is_hex(h, 40))
-            .ok_or(MetaError::Bad("asset hash"))?;
-        out.push(AssetObject {
-            name: name.clone(),
-            hash: hash.to_ascii_lowercase(),
-            size: o
-                .get("size")
-                .and_then(Value::as_u64)
-                .ok_or(MetaError::Bad("asset size"))?,
-        });
+enum HashField {
+    Valid(String),
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for HashField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HashVisitor;
+        impl<'de> Visitor<'de> for HashVisitor {
+            type Value = HashField;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a 40-character hex asset hash")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if is_hex(v, 40) {
+                    Ok(HashField::Valid(v.to_ascii_lowercase()))
+                } else {
+                    Ok(HashField::Invalid)
+                }
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(HashField::Invalid)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(HashField::Invalid)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(HashField::Invalid)
+            }
+        }
+        deserializer.deserialize_any(HashVisitor)
     }
-    Ok(AssetIndex {
-        objects: out,
-        virtual_files: v.get("virtual").and_then(Value::as_bool).unwrap_or(false),
-        map_to_resources: v
-            .get("map_to_resources")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
+}
+
+enum SizeField {
+    Valid(u64),
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for SizeField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SizeVisitor;
+        impl<'de> Visitor<'de> for SizeVisitor {
+            type Value = SizeField;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a non-negative asset size")
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(SizeField::Valid(v))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(u64::try_from(v).map_or(SizeField::Invalid, SizeField::Valid))
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(SizeField::Invalid)
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(SizeField::Invalid)
+            }
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(SizeField::Invalid)
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SizeField::Invalid)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SizeField::Invalid)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(SizeField::Invalid)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(SizeField::Invalid)
+            }
+        }
+        deserializer.deserialize_any(SizeVisitor)
+    }
+}
+
+struct BoolOrFalse(bool);
+
+impl<'de> Deserialize<'de> for BoolOrFalse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BoolVisitor;
+        impl<'de> Visitor<'de> for BoolVisitor {
+            type Value = BoolOrFalse;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a boolean flag")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(v))
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(BoolOrFalse(false))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(BoolOrFalse(false))
+            }
+        }
+        deserializer.deserialize_any(BoolVisitor)
+    }
+}
+
+struct AssetEntrySeed<'a> {
+    name: String,
+    err: &'a mut Option<MetaError>,
+}
+
+impl<'de> DeserializeSeed<'de> for AssetEntrySeed<'_> {
+    type Value = AssetObject;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for AssetEntrySeed<'_> {
+    type Value = AssetObject;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an asset object entry")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        *self.err = Some(MetaError::Bad("asset hash"));
+        Err(de::Error::custom("asset hash"))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut hash: Option<HashField> = None;
+        let mut size: Option<SizeField> = None;
+        while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+            match key.as_ref() {
+                "hash" => hash = Some(map.next_value::<HashField>()?),
+                "size" => size = Some(map.next_value::<SizeField>()?),
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        let Some(HashField::Valid(hash)) = hash else {
+            *self.err = Some(MetaError::Bad("asset hash"));
+            return Err(de::Error::custom("asset hash"));
+        };
+        let Some(SizeField::Valid(size)) = size else {
+            *self.err = Some(MetaError::Bad("asset size"));
+            return Err(de::Error::custom("asset size"));
+        };
+        Ok(AssetObject {
+            name: self.name,
+            hash,
+            size,
+        })
+    }
+}
+
+struct ObjectsMapSeed<'a>(&'a mut Option<MetaError>);
+
+impl<'de> DeserializeSeed<'de> for ObjectsMapSeed<'_> {
+    type Value = Option<Vec<AssetObject>>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ObjectsMapSeed<'_> {
+    type Value = Option<Vec<AssetObject>>;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an objects map")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0).min(65_536));
+        while let Some(name) = map.next_key::<String>()? {
+            let entry = map.next_value_seed(AssetEntrySeed { name, err: self.0 })?;
+            out.push(entry);
+        }
+        Ok(Some(out))
+    }
+}
+
+struct AssetIndexSeed<'a>(&'a mut Option<MetaError>);
+
+impl<'de> DeserializeSeed<'de> for AssetIndexSeed<'_> {
+    type Value = Option<AssetIndex>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for AssetIndexSeed<'_> {
+    type Value = Option<AssetIndex>;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an asset index JSON object")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut objects: Option<Vec<AssetObject>> = None;
+        let mut virtual_files = false;
+        let mut map_to_resources = false;
+        while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+            match key.as_ref() {
+                "objects" => {
+                    objects = map.next_value_seed(ObjectsMapSeed(self.0))?;
+                }
+                "virtual" => {
+                    virtual_files = map.next_value::<BoolOrFalse>()?.0;
+                }
+                "map_to_resources" => {
+                    map_to_resources = map.next_value::<BoolOrFalse>()?.0;
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(objects.map(|objects| AssetIndex {
+            objects,
+            virtual_files,
+            map_to_resources,
+        }))
+    }
+}
+
+pub fn parse_asset_index(bytes: &[u8]) -> Result<AssetIndex, MetaError> {
+    let mut meta_err: Option<MetaError> = None;
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    match AssetIndexSeed(&mut meta_err).deserialize(&mut de) {
+        Ok(maybe_index) => {
+            de.end().map_err(|_| MetaError::NotJson)?;
+            maybe_index.ok_or(MetaError::Missing("asset objects"))
+        }
+        Err(e) if e.is_syntax() || e.is_eof() || e.is_io() => Err(MetaError::NotJson),
+        Err(_) => Err(meta_err.unwrap_or(MetaError::NotJson)),
+    }
 }
 
 #[cfg(test)]
@@ -934,5 +1296,191 @@ mod tests {
         assert!(pre.map_to_resources);
         assert!(parse_asset_index(br#"{"objects":{"a":{"hash":"short","size":1}}}"#).is_err());
         assert!(parse_asset_index(b"{}").is_err());
+    }
+
+    #[test]
+    fn validates_version_id_and_inherits_from_tokens() {
+        assert!(matches!(
+            parse_version(b"{}", &WINDOWS_X64),
+            Err(MetaError::Missing("id"))
+        ));
+        assert!(matches!(
+            parse_version(br#"{"id":null}"#, &WINDOWS_X64),
+            Err(MetaError::Missing("id"))
+        ));
+        for bad_id in [
+            json!(""),
+            json!("../evil"),
+            json!("-flag"),
+            json!(".hidden"),
+            json!("a/b"),
+            json!("9".repeat(129)),
+            json!(123),
+        ] {
+            let doc = json!({"id": bad_id, "libraries": []}).to_string();
+            assert!(
+                matches!(
+                    parse_version(doc.as_bytes(), &WINDOWS_X64),
+                    Err(MetaError::Bad("id"))
+                ),
+                "bad id not rejected: {doc}"
+            );
+        }
+
+        let null_parent = parse_version(
+            br#"{"id":"1.21.4","inheritsFrom":null,"libraries":[]}"#,
+            &WINDOWS_X64,
+        )
+        .unwrap();
+        assert_eq!(null_parent.inherits_from, None);
+
+        let long_id = "f".repeat(100);
+        let ok_composite = json!({
+            "id": long_id,
+            "inheritsFrom": "1.21.4",
+            "libraries": []
+        })
+        .to_string();
+        let plan = parse_version(ok_composite.as_bytes(), &WINDOWS_X64).unwrap();
+        assert_eq!(plan.id.len(), 100);
+        assert_eq!(plan.inherits_from.as_deref(), Some("1.21.4"));
+
+        for bad_parent in [
+            json!(""),
+            json!("../evil"),
+            json!("-flag"),
+            json!(".hidden"),
+            json!("9".repeat(129)),
+            json!(42),
+            json!(["1.21.4"]),
+        ] {
+            let doc =
+                json!({"id": "1.21.4", "inheritsFrom": bad_parent, "libraries": []}).to_string();
+            assert!(
+                matches!(
+                    parse_version(doc.as_bytes(), &WINDOWS_X64),
+                    Err(MetaError::Bad("inheritsFrom"))
+                ),
+                "bad inheritsFrom not rejected: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn filters_foreign_native_classifiers_even_when_rules_omit_os_arch() {
+        let win_only_rule = json!([{"action": "allow", "os": {"name": "windows"}}]);
+        let plan = parse_version(
+            &version(json!([
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-windows", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows.jar")}, "rules": win_only_rule},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-windows-64", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows-64.jar")}, "rules": win_only_rule},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-windows-x86_64", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows-x86_64.jar")}},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-windows-x86", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows-x86.jar")}, "rules": win_only_rule},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-windows-arm64", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows-arm64.jar")}, "rules": win_only_rule},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-linux", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-linux.jar")}},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-macos", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-macos.jar")}},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-macos-arm64", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-macos-arm64.jar")}},
+                {"name": "org.lwjgl:lwjgl:3.3.1:natives-osx", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-osx.jar")}},
+            ])),
+            &WINDOWS_X64,
+        )
+        .unwrap();
+
+        assert_eq!(
+            names(&plan),
+            [
+                "org.lwjgl:lwjgl:3.3.1:natives-windows",
+                "org.lwjgl:lwjgl:3.3.1:natives-windows-64",
+                "org.lwjgl:lwjgl:3.3.1:natives-windows-x86_64",
+            ]
+        );
+        assert!(plan
+            .libraries
+            .iter()
+            .all(|l| matches!(l.role, Role::ClasspathAndNative { .. })));
+    }
+
+    #[test]
+    fn streaming_asset_index_validates_hashes_sizes_and_syntax() {
+        let upper = H.to_ascii_uppercase();
+        let mut entries = String::new();
+        for i in 0..200 {
+            if i > 0 {
+                entries.push(',');
+            }
+            entries.push_str(&format!(
+                r#""sounds/ambient_{i}.ogg":{{"extra":true,"size":{},"hash":"{upper}"}}"#,
+                100 + i
+            ));
+        }
+        let raw = format!(
+            r#"{{"unknown":[1,2,3],"objects":{{{entries}}},"virtual":true,"map_to_resources":false}}"#
+        );
+        let parsed = parse_asset_index(raw.as_bytes()).unwrap();
+        assert_eq!(parsed.objects.len(), 200);
+        assert!(parsed.virtual_files);
+        assert!(!parsed.map_to_resources);
+        assert_eq!(parsed.objects[0].hash, H);
+        assert_eq!(parsed.objects[0].size, 100);
+        assert_eq!(parsed.objects[199].size, 299);
+
+        // Syntax / EOF / trailing bytes -> NotJson
+        for bad_json in [
+            &b""[..],
+            b"not json",
+            b"{\"objects\": {\"a\": ",
+            b"{\"objects\": {}} trailing",
+        ] {
+            assert!(
+                matches!(parse_asset_index(bad_json), Err(MetaError::NotJson)),
+                "{bad_json:?}"
+            );
+        }
+
+        // Missing or non-map objects -> Missing("asset objects")
+        for missing in [
+            &b"{}"[..],
+            b"[]",
+            b"{\"objects\":null}",
+            b"{\"objects\":[]}",
+        ] {
+            assert!(
+                matches!(
+                    parse_asset_index(missing),
+                    Err(MetaError::Missing("asset objects"))
+                ),
+                "{missing:?}"
+            );
+        }
+
+        // Invalid hash -> Bad("asset hash")
+        for bad_hash in [
+            r#"{"objects":{"a":{"hash":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","size":1}}}"#
+                .to_owned(),
+            r#"{"objects":{"a":{"hash":123,"size":1}}}"#.to_owned(),
+            r#"{"objects":{"a":{"size":1}}}"#.to_owned(),
+        ] {
+            assert!(
+                matches!(
+                    parse_asset_index(bad_hash.as_bytes()),
+                    Err(MetaError::Bad("asset hash"))
+                ),
+                "{bad_hash}"
+            );
+        }
+
+        // Invalid size -> Bad("asset size")
+        for bad_size in [
+            format!(r#"{{"objects":{{"a":{{"hash":"{H}"}}}}}}"#),
+            format!(r#"{{"objects":{{"a":{{"hash":"{H}","size":-1}}}}}}"#),
+            format!(r#"{{"objects":{{"a":{{"hash":"{H}","size":"5"}}}}}}"#),
+        ] {
+            assert!(
+                matches!(
+                    parse_asset_index(bad_size.as_bytes()),
+                    Err(MetaError::Bad("asset size"))
+                ),
+                "{bad_size}"
+            );
+        }
     }
 }
