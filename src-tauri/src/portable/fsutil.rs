@@ -77,7 +77,6 @@ pub fn rename_with_retry(src: &Path, dst: &Path) -> io::Result<()> {
         match res {
             Ok(()) => return Ok(()),
             Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
-                clear_readonly(dst);
                 std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
                 attempt += 1;
             }
@@ -293,7 +292,7 @@ pub fn is_link(p: &Path) -> io::Result<bool> {
     }
 }
 
-pub(crate) fn strip_prefix_portable<'a>(target: &'a Path, base: &Path) -> Option<PathBuf> {
+pub(crate) fn strip_prefix_portable(target: &Path, base: &Path) -> Option<PathBuf> {
     if let Ok(rest) = target.strip_prefix(base) {
         return Some(rest.to_path_buf());
     }
@@ -314,7 +313,7 @@ pub(crate) fn strip_prefix_portable<'a>(target: &'a Path, base: &Path) -> Option
         for rem in t_comps {
             out.push(rem.as_os_str());
         }
-        return Some(out);
+        Some(out)
     }
     #[cfg(not(windows))]
     {
