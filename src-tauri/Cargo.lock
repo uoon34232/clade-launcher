@@ -78,6 +78,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -568,6 +569,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.1",
  "rand_core",
+ "zeroize",
 ]
 
 [[package]]
@@ -580,6 +582,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -619,6 +622,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.11.0",
+ "socket2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -629,7 +633,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "webview2-com",
  "windows",
+ "windows-core",
  "windows-sys 0.61.2",
  "wry",
  "zeroize",
@@ -5644,6 +5650,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

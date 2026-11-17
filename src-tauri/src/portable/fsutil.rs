@@ -3,6 +3,251 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+const RETRY_DELAYS_MS: &[u64] = &[10, 25, 50, 100, 200, 400, 750];
+
+/// True when `err` is a transient Windows sharing or antivirus scan lock (`ERROR_ACCESS_DENIED` = 5
+/// or `ERROR_SHARING_VIOLATION` = 32) commonly triggered by Windows Defender or Search Indexer
+/// right after a file handle closes.
+pub fn is_transient_win_lock(err: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(err.raw_os_error(), Some(5 | 32))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+fn clear_readonly(path: &Path) {
+    if let Ok(md) = fs::symlink_metadata(path) {
+        let mut perms = md.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(p: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Atomically renames `src` over `dst` (flushing directory metadata with `MOVEFILE_WRITE_THROUGH` on
+/// Windows) and retries transient Windows Defender / Indexer locks (`os error 5` and `32`).
+pub fn rename_with_retry(src: &Path, dst: &Path) -> io::Result<()> {
+    let mut attempt = 0usize;
+    loop {
+        let res = {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::Storage::FileSystem::{
+                    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+                };
+                let src_w = wide_null(src);
+                let dst_w = wide_null(dst);
+                // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
+                let ok = unsafe {
+                    MoveFileExW(
+                        src_w.as_ptr(),
+                        dst_w.as_ptr(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                    )
+                };
+                if ok != 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                fs::rename(src, dst)
+            }
+        };
+        match res {
+            Ok(()) => return Ok(()),
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                clear_readonly(dst);
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Moves `src` to `dst` ONLY if `dst` does not already exist (no `MOVEFILE_REPLACE_EXISTING`),
+/// retrying transient scan locks on `src`. Never overwrites an existing backup.
+pub fn move_new_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
+    let mut attempt = 0usize;
+    loop {
+        let res = {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::Storage::FileSystem::{
+                    MoveFileExW, MOVEFILE_WRITE_THROUGH,
+                };
+                let src_w = wide_null(src);
+                let dst_w = wide_null(dst);
+                // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
+                let ok =
+                    unsafe { MoveFileExW(src_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+                if ok != 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if fs::symlink_metadata(dst).is_ok() {
+                    Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "destination exists",
+                    ))
+                } else {
+                    fs::rename(src, dst)
+                }
+            }
+        };
+        match res {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if e.kind() == io::ErrorKind::AlreadyExists
+                    || matches!(e.raw_os_error(), Some(80 | 183)) =>
+            {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, e));
+            }
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Removes a file, retrying transient Windows Defender / Indexer locks. Missing files succeed.
+pub fn remove_file_with_retry(path: &Path) -> io::Result<()> {
+    let mut attempt = 0usize;
+    loop {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                clear_readonly(path);
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Removes a directory tree (refusing top-level reparse points), retrying transient Windows locks.
+pub fn remove_dir_all_with_retry(path: &Path) -> io::Result<()> {
+    match is_link(path) {
+        Ok(true) => {
+            return Err(io::Error::other(format!(
+                "refusing to remove link directory {}",
+                path.display()
+            )))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    let mut attempt = 0usize;
+    loop {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Reads a file up to `max_bytes`, failing before allocating multi-gigabyte buffers on corrupt or
+/// hostile inputs and retrying transient sharing violations on Windows.
+pub fn read_bounded(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    let mut attempt = 0usize;
+    let file = loop {
+        match File::open(path) {
+            Ok(f) => break f,
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds maximum size ({len} > {max_bytes} bytes)"),
+        ));
+    }
+    let cap = usize::try_from(len).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut out)?;
+    if out.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file grew past maximum size while reading",
+        ));
+    }
+    Ok(out)
+}
+
+/// Allocation unit (cluster size) in bytes for the volume holding `path`, clamped to a sane
+/// `4 KiB..=1 MiB` range. Matters on exFAT USB drives with 128–256 KiB clusters.
+pub fn cluster_size_bytes(path: &Path) -> u64 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
+        let mut dir = path;
+        while !dir.exists() {
+            let Some(p) = dir.parent() else {
+                return 4096;
+            };
+            dir = p;
+        }
+        let root_anc = dir.ancestors().last().unwrap_or(dir);
+        let wide = wide_null(root_anc);
+        let mut spc = 0u32;
+        let mut bps = 0u32;
+        let mut free_c = 0u32;
+        let mut total_c = 0u32;
+        // SAFETY: `wide` is NUL-terminated and all out pointers are valid scalars.
+        let ok = unsafe {
+            GetDiskFreeSpaceW(wide.as_ptr(), &mut spc, &mut bps, &mut free_c, &mut total_c)
+        };
+        if ok != 0 && spc > 0 && bps > 0 {
+            return (u64::from(spc) * u64::from(bps)).clamp(4096, 1024 * 1024);
+        }
+        4096
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        4096
+    }
+}
 
 /// Writes `bytes` to `path` so readers only ever see the old or the new content, never a
 /// torn file. Matters on USB sticks that can be pulled mid-write.
@@ -11,6 +256,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
     fs::create_dir_all(parent)?;
+    if is_link(parent).unwrap_or(false) || is_link(path).unwrap_or(false) {
+        return Err(io::Error::other("refusing to atomic_write through a link"));
+    }
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     let mut nonce = [0u8; 6];
     getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
@@ -22,10 +270,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?; // flush to the device, not just the OS cache
         drop(f);
-        fs::rename(&tmp, path) // replaces atomically on Windows (MoveFileEx) and POSIX
+        rename_with_retry(&tmp, path)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+        let _ = remove_file_with_retry(&tmp);
     }
     result
 }
@@ -45,12 +293,52 @@ pub fn is_link(p: &Path) -> io::Result<bool> {
     }
 }
 
-/// Fails if any existing component between `base` and `target` is a link. Defends against
-/// a hostile archive (or a stray junction on the stick) redirecting writes outside the root.
+pub(crate) fn strip_prefix_portable<'a>(target: &'a Path, base: &Path) -> Option<PathBuf> {
+    if let Ok(rest) = target.strip_prefix(base) {
+        return Some(rest.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let mut t_comps = target.components();
+        for b_comp in base.components() {
+            let t_comp = t_comps.next()?;
+            let eq = b_comp
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&t_comp.as_os_str().to_string_lossy());
+            if !eq {
+                return None;
+            }
+        }
+        let mut out = PathBuf::new();
+        for rem in t_comps {
+            out.push(rem.as_os_str());
+        }
+        return Some(out);
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Fails if `base` itself or any existing component between `base` and `target` is a link.
+/// Defends against a hostile archive (or a stray NTFS junction on the stick) redirecting writes
+/// outside the root.
 pub fn reject_links_between(base: &Path, target: &Path) -> io::Result<()> {
-    let rest = target
-        .strip_prefix(base)
-        .map_err(|_| io::Error::other("target is outside the base directory"))?;
+    match is_link(base) {
+        Ok(true) => {
+            return Err(io::Error::other(format!(
+                "refusing to follow link at {}",
+                base.display()
+            )))
+        }
+        Ok(false) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let rest = strip_prefix_portable(target, base)
+        .ok_or_else(|| io::Error::other("target is outside the base directory"))?;
     let mut cur = base.to_path_buf();
     for comp in rest.components() {
         match comp {
@@ -145,13 +433,13 @@ pub fn install_verified(
     size: Option<u64>,
 ) -> Result<(), VerifyError> {
     if let Err(e) = verify_file(tmp, expected, size) {
-        let _ = fs::remove_file(tmp);
+        let _ = remove_file_with_retry(tmp);
         return Err(e);
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(tmp, dest)?;
+    rename_with_retry(tmp, dest)?;
     Ok(())
 }
 
@@ -172,11 +460,11 @@ pub fn quarantine_corrupt(path: &Path) -> io::Result<PathBuf> {
     candidates.extend((1..1000).map(|n| format!("{name}.corrupt-{stamp}-{n}")));
     for candidate in candidates {
         let target = dir.join(candidate);
-        if target.exists() {
-            continue; // never replace an earlier backup
+        match move_new_no_replace(path, &target) {
+            Ok(()) => return Ok(target),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
-        fs::rename(path, &target)?;
-        return Ok(target);
     }
     Err(io::Error::other("too many corrupt backups"))
 }
@@ -218,6 +506,15 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), 3, "no backup overwrote another");
         assert!(d.path().join("settings.json.corrupt").is_file());
+    }
+
+    #[test]
+    fn read_bounded_enforces_ceiling() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("big.bin");
+        fs::write(&p, b"1234567890").unwrap();
+        assert_eq!(read_bounded(&p, 10).unwrap(), b"1234567890");
+        assert!(read_bounded(&p, 9).is_err());
     }
 
     #[test]

@@ -5,9 +5,10 @@
 //! No environment variable, registry key, or user-profile folder is consulted.
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use super::fsutil::{is_link, reject_links_between, remove_file_with_retry, strip_prefix_portable};
 use super::relpath::{RelPath, RelPathError};
 
 /// Bump when the on-disk layout changes in a way older builds cannot read.
@@ -44,10 +45,30 @@ pub const DIRS: &[&str] = &[
     "assets",
     "cache",
     "cache/tmp",
-    "cache/downloads", // in-flight downloads, verified before being moved into place
-    "cache/updates",   // staged launcher updates (never outside the folder)
+    "cache/tmp/prepare", // scratch space for preparation/extraction only (safe to sweep at start)
+    "cache/tmp/game",    // -Djava.io.tmpdir for launched games (isolated from prepare sweeps)
+    "cache/downloads",   // in-flight downloads, verified before being moved into place
+    "cache/updates",     // staged launcher updates (never outside the folder)
     "logs",
 ];
+
+/// Strips Windows verbatim prefixes (`\\?\UNC\server\share` -> `\\server\share`, and `<248`-char
+/// `\\?\X:\...` -> `X:\...`) so child tools (Java 8, WebView2 Fixed Version, diagnostics redaction)
+/// receive standard Win32 paths.
+pub fn normalize_verbatim_path(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else {
+        return p;
+    };
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(drive) = s.strip_prefix(r"\\?\") {
+        if drive.encode_utf16().count() < 248 {
+            return PathBuf::from(drive);
+        }
+    }
+    p
+}
 
 #[derive(Debug, Clone)]
 pub struct PortableRoot {
@@ -67,28 +88,60 @@ impl PortableRoot {
         } else {
             dir.to_path_buf()
         };
+        let abs = std::path::absolute(root).map_err(RootError::Exe)?;
         Ok(Self {
-            root: std::path::absolute(root).map_err(RootError::Exe)?,
+            root: normalize_verbatim_path(abs),
         })
     }
 
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: normalize_verbatim_path(root.into()),
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.root
     }
 
-    /// Creates the standard layout and proves the folder is writable.
-    pub fn ensure_layout(&self) -> Result<(), RootError> {
-        for d in DIRS {
-            fs::create_dir_all(RelPath::new(d)?.to_path(&self.root))
-                .map_err(RootError::NotWritable)?;
+    /// Creates only `data/` (checking for reparse points) so `RootLock::acquire` can lock the
+    /// folder before touching any shared layout files.
+    pub fn ensure_data_dir(&self) -> Result<(), RootError> {
+        if is_link(&self.root).unwrap_or(false) {
+            return Err(RootError::NotWritable(io::Error::other(
+                "launcher root cannot be a link or junction",
+            )));
         }
-        let probe = self.data_dir().join(".write-test");
-        fs::write(&probe, b"ok").map_err(RootError::NotWritable)?;
-        let _ = fs::remove_file(probe);
+        let data = self.data_dir();
+        reject_links_between(&self.root, &data).map_err(RootError::NotWritable)?;
+        fs::create_dir_all(&data).map_err(RootError::NotWritable)?;
+        reject_links_between(&self.root, &data).map_err(RootError::NotWritable)?;
+        Ok(())
+    }
+
+    /// Creates the standard layout, rejects junctions/symlinks, and proves the folder is writable
+    /// using a unique temp probe so concurrent second-instance launches never collide.
+    pub fn ensure_layout(&self) -> Result<(), RootError> {
+        self.ensure_data_dir()?;
+        for d in DIRS {
+            let target = RelPath::new(d)?.to_path(&self.root);
+            reject_links_between(&self.root, &target).map_err(RootError::NotWritable)?;
+            fs::create_dir_all(&target).map_err(RootError::NotWritable)?;
+            reject_links_between(&self.root, &target).map_err(RootError::NotWritable)?;
+        }
+        let mut nonce = [0u8; 6];
+        let _ = getrandom::fill(&mut nonce);
+        let probe = self
+            .data_dir()
+            .join(format!(".write-test-{}.tmp", hex::encode(nonce)));
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(RootError::NotWritable)?;
+        f.write_all(b"ok").map_err(RootError::NotWritable)?;
+        drop(f);
+        let _ = remove_file_with_retry(&probe);
         Ok(())
     }
 
@@ -101,7 +154,7 @@ impl PortableRoot {
     /// outside the root, so absolute paths can never leak into saved files.
     pub fn relativize(&self, abs: &Path) -> Result<RelPath, RootError> {
         let outside = || RootError::Outside(abs.display().to_string());
-        let rest = abs.strip_prefix(&self.root).map_err(|_| outside())?;
+        let rest = strip_prefix_portable(abs, &self.root).ok_or_else(outside)?;
         let parts: Vec<&str> = rest
             .components()
             .map(|c| c.as_os_str().to_str().ok_or_else(outside))
@@ -139,9 +192,17 @@ impl PortableRoot {
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join("cache")
     }
-    /// Java and the game are pointed here via `-Djava.io.tmpdir` instead of `%TEMP%`.
+    /// Legacy/general scratch root inside `cache/tmp`.
     pub fn tmp_dir(&self) -> PathBuf {
         self.root.join("cache").join("tmp")
+    }
+    /// Scratch space exclusively for preparation/extraction (safe to sweep at startup).
+    pub fn prepare_tmp_dir(&self) -> PathBuf {
+        self.root.join("cache").join("tmp").join("prepare")
+    }
+    /// Isolated `-Djava.io.tmpdir` for launched Minecraft processes.
+    pub fn game_tmp_dir(&self) -> PathBuf {
+        self.root.join("cache").join("tmp").join("game")
     }
     pub fn downloads_dir(&self) -> PathBuf {
         self.root.join("cache").join("downloads")
@@ -176,11 +237,23 @@ pub struct RootLock {
 
 impl RootLock {
     pub fn acquire(root: &PortableRoot) -> Result<Self, RootError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(root.lock_file())?;
+        root.ensure_data_dir()?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).truncate(false).read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ | FILE_SHARE_WRITE (0x3), deliberately omitting FILE_SHARE_DELETE
+            // so `clade.lock` cannot be unlinked or renamed away while held.
+            opts.share_mode(0x0000_0001 | 0x0000_0002);
+        }
+        let file = opts
+            .open(root.lock_file())
+            .map_err(|e| match e.raw_os_error() {
+                #[cfg(windows)]
+                Some(32 | 33) => RootError::AlreadyRunning,
+                _ => RootError::Io(e),
+            })?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(RootError::AlreadyRunning),
@@ -203,8 +276,14 @@ mod tests {
         }
         let rel = RelPath::new("instances/foo/mods").unwrap();
         let abs = root.resolve(&rel);
-        assert!(abs.starts_with(d.path()));
+        assert!(abs.starts_with(root.path()));
         assert_eq!(root.relativize(&abs).unwrap(), rel);
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_normalized() {
+        let p = normalize_verbatim_path(PathBuf::from(r"\\?\UNC\srv\share\Clade"));
+        assert_eq!(p, PathBuf::from(r"\\srv\share\Clade"));
     }
 
     #[test]

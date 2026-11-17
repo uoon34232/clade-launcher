@@ -14,9 +14,39 @@ const MAX_COMPONENT_LEN: usize = 200;
 const MAX_TOTAL_LEN: usize = 240;
 
 const RESERVED_DEVICE_NAMES: &[&str] = &[
-    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-    "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-    "conin$", "conout$",
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "clock$",
+    "com0",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "com\u{00b9}",
+    "com\u{00b2}",
+    "com\u{00b3}",
+    "lpt0",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+    "lpt\u{00b9}",
+    "lpt\u{00b2}",
+    "lpt\u{00b3}",
+    "conin$",
+    "conout$",
 ];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -107,8 +137,13 @@ fn validate_component(comp: &str, whole: &str) -> Result<(), RelPathError> {
     if comp.ends_with('.') || comp.ends_with(' ') {
         return Err(RelPathError::ReservedName(comp.to_owned()));
     }
-    // "CON", "con.txt", "NUL.tar.gz" all name devices on Windows.
-    let stem = comp.split('.').next().unwrap_or(comp).to_lowercase();
+    // "CON", "con.txt", "NUL .txt", "NUL.tar.gz", "COM¹.dll" all name devices on Windows.
+    let stem = comp
+        .split('.')
+        .next()
+        .unwrap_or(comp)
+        .trim_end_matches([' ', '.'])
+        .to_lowercase();
     if RESERVED_DEVICE_NAMES.contains(&stem.as_str()) {
         return Err(RelPathError::ReservedName(comp.to_owned()));
     }
@@ -170,6 +205,11 @@ mod tests {
             "file.txt:stream",
             "con",
             "dir/NUL.txt",
+            "dir/NUL .txt",
+            "CON   .log",
+            "CLOCK$",
+            "COM\u{00b9}.dll",
+            "LPT\u{00b2}",
             "LPT1",
             "trail.",
             "trail /x",
