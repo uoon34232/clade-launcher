@@ -371,6 +371,7 @@ describe("structured backend errors are worded in the current language", () => {
       ...[
         "passphrase_mismatch",
         "passphrase_too_short",
+        "passphrase_too_long",
         "vault_exists",
         "vault_unreadable",
         "vault_missing",
@@ -395,6 +396,8 @@ describe("structured backend errors are worded in the current language", () => {
     expect(
       wanted("vault", [
         "passphrase_mismatch",
+        "passphrase_too_short",
+        "passphrase_too_long",
         "vault_unreadable",
         "vault_missing",
         "sign_in_in_progress",
@@ -423,6 +426,7 @@ describe("structured backend errors are worded in the current language", () => {
       wanted("vault", [
         "passphrase_mismatch",
         "passphrase_too_short",
+        "passphrase_too_long",
         "vault_exists",
         "vault_unreadable",
       ]),

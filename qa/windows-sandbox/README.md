@@ -20,17 +20,17 @@ automatically. Use `-DryRun` to stage and resolve the configuration without star
 
 ## Configurations
 
-| File | Network | Virtual GPU | Use it for |
-| --- | --- | --- | --- |
-| `clade-offline.wsb` | off | off (software rendering) | first launch, relocation, settings, damage and recovery, offline prepared launch (a profile must already be prepared in the package under test) |
-| `clade-online.wsb` | on | off | preparation and download rows (Java, Minecraft, loaders) |
-| `clade-online-gpu.wsb` | on | on | rows that must open a Minecraft window |
+| File                   | Network | Virtual GPU              | Use it for                                                                                                                                      |
+| ---------------------- | ------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clade-offline.wsb`    | off     | off (software rendering) | first launch, relocation, settings, damage and recovery, offline prepared launch (a profile must already be prepared in the package under test) |
+| `clade-online.wsb`     | on      | off                      | preparation and download rows (Java, Minecraft, loaders)                                                                                        |
+| `clade-online-gpu.wsb` | on      | on                       | rows that must open a Minecraft window                                                                                                          |
 
 Common to all three: audio, video, printer and clipboard redirection **disabled**; 8 GB memory; exactly two
 mapped folders and no others:
 
-* the staging folder, **read-only**, as `C:\CladeQA\in` (the ZIP, its `.sha256`, the QA scripts);
-* one empty results folder, **writable**, as `C:\CladeQA\results` (reports come back through it).
+- the staging folder, **read-only**, as `C:\CladeQA\in` (the ZIP, its `.sha256`, the QA scripts);
+- one empty results folder, **writable**, as `C:\CladeQA\results` (reports come back through it).
 
 Not shared, ever: the repository, the user profile, the real `%APPDATA%\.minecraft`, any real Clade folder
 or data, the host's Documents. The templates contain the placeholders `%CLADE_QA_STAGING%` and
@@ -83,12 +83,12 @@ LogonCommand + results-folder design is simpler and works on every Windows Sandb
 
 ## Limits
 
-* The sandbox window size is not configurable; do not try to force one. Check the 960x600 layout by
+- The sandbox window size is not configurable; do not try to force one. Check the 960x600 layout by
   dragging the window edges by hand.
-* Display scaling inside the sandbox follows the host. Test 100 / 125 / 150% by changing scaling yourself
+- Display scaling inside the sandbox follows the host. Test 100 / 125 / 150% by changing scaling yourself
   in Settings before starting the sandbox, or on a real machine; this harness never changes it.
-* No GPU means no game window; with `online-gpu` the host GPU is used through Microsoft's virtualization.
-* A sandbox has a Microsoft Edge / WebView2 runtime of its own; the bundled-runtime check is done by looking
+- No GPU means no game window; with `online-gpu` the host GPU is used through Microsoft's virtualization.
+- A sandbox has a Microsoft Edge / WebView2 runtime of its own; the bundled-runtime check is done by looking
   at which `msedgewebview2.exe` the Clade process tree uses (see the runbook), not by the absence of a
   system runtime.
-* Closing the sandbox deletes everything not written to the results folder.
+- Closing the sandbox deletes everything not written to the results folder.

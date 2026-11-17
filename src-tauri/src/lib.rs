@@ -22,7 +22,6 @@ pub mod ms_auth;
 pub mod natives;
 pub mod net;
 pub mod playtime;
-#[allow(clippy::needless_lifetimes, clippy::needless_return)]
 pub mod portable;
 pub mod prepare;
 pub mod prepare_cmd;

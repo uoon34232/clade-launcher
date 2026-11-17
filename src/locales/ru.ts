@@ -395,6 +395,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.vault.unknown": "Не получилось.",
   "error.vault.passphrase_mismatch": "Парольная фраза не подходит.",
   "error.vault.passphrase_too_short": "Парольная фраза слишком короткая.",
+  "error.vault.passphrase_too_long": "Парольная фраза слишком длинная.",
   "error.vault.vault_exists": "Аккаунты уже защищены парольной фразой.",
   "error.vault.vault_unreadable": "Не удалось открыть зашифрованное хранилище аккаунтов.",
   "error.vault.vault_missing":

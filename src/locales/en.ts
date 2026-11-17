@@ -391,6 +391,7 @@ export const en = {
   "error.vault.unknown": "That didn't work.",
   "error.vault.passphrase_mismatch": "That passphrase doesn't match.",
   "error.vault.passphrase_too_short": "That passphrase is too short.",
+  "error.vault.passphrase_too_long": "That passphrase is too long.",
   "error.vault.vault_exists": "Accounts are already protected by a passphrase.",
   "error.vault.vault_unreadable": "The encrypted account store could not be opened.",
   "error.vault.vault_missing":
