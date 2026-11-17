@@ -5,22 +5,41 @@
 
 use std::path::Path;
 
-/// Total physical memory in MiB, or `None` where it cannot be read.
+const MIB: u64 = 1024 * 1024;
+
+/// Point-in-time physical RAM and virtual commit-charge availability in MiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemorySnapshot {
+    pub total_mb: u64,
+    pub avail_phys_mb: u64,
+    pub avail_commit_mb: u64,
+}
+
+/// Physical memory and commit availability in MiB, or `None` where they cannot be read.
 #[cfg(windows)]
-pub fn total_memory_mb() -> Option<u64> {
+pub fn memory_snapshot() -> Option<MemorySnapshot> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     // SAFETY: MEMORYSTATUSEX is plain data; the length field is set as the API requires and the
     // pointer is valid for the duration of the call.
     unsafe {
         let mut s: MEMORYSTATUSEX = std::mem::zeroed();
         s.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-        (GlobalMemoryStatusEx(&mut s) != 0).then_some(s.ullTotalPhys / (1024 * 1024))
+        (GlobalMemoryStatusEx(&mut s) != 0).then_some(MemorySnapshot {
+            total_mb: s.ullTotalPhys / MIB,
+            avail_phys_mb: s.ullAvailPhys / MIB,
+            avail_commit_mb: s.ullAvailPageFile / MIB,
+        })
     }
 }
 
 #[cfg(not(windows))]
-pub fn total_memory_mb() -> Option<u64> {
+pub fn memory_snapshot() -> Option<MemorySnapshot> {
     None
+}
+
+/// Total physical memory in MiB, or `None` where it cannot be read.
+pub fn total_memory_mb() -> Option<u64> {
+    memory_snapshot().map(|s| s.total_mb)
 }
 
 /// The Windows display language as a locale name (`en-US`, `ru-RU`), or `None` where it cannot be
@@ -100,13 +119,51 @@ pub fn high_contrast() -> bool {
     false
 }
 
+#[cfg(windows)]
+fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|ch| {
+            if ch == u16::from(b'/') {
+                u16::from(b'\\')
+            } else {
+                ch
+            }
+        })
+        .collect();
+    const BS: u16 = b'\\' as u16;
+    const Q: u16 = b'?' as u16;
+    const U: u16 = b'U' as u16;
+    const N: u16 = b'N' as u16;
+    const C: u16 = b'C' as u16;
+    if wide.starts_with(&[BS, BS, Q, BS]) {
+        return std::path::PathBuf::from(OsString::from_wide(&wide));
+    }
+    let mut out = Vec::with_capacity(wide.len() + 8);
+    if wide.starts_with(&[BS, BS]) {
+        out.extend_from_slice(&[BS, BS, Q, BS, U, N, C, BS]);
+        out.extend_from_slice(&wide[2..]);
+    } else {
+        out.extend_from_slice(&[BS, BS, Q, BS]);
+        out.extend_from_slice(&wide);
+    }
+    std::path::PathBuf::from(OsString::from_wide(&out))
+}
+
 /// Free space, in bytes, available to this user on the drive that holds `path`.
 #[cfg(windows)]
 pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    // Walk up to a folder that exists (the target may not have been created yet).
-    let mut dir = path;
+    // Resolve to an extended-length verbatim path first so paths > MAX_PATH (260 chars) work,
+    // then walk up to a folder that exists (the target may not have been created yet).
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let verbatim = to_verbatim_win32(&abs);
+    let mut dir: &Path = &verbatim;
     while !dir.exists() {
         dir = dir.parent()?;
     }
@@ -130,30 +187,49 @@ pub fn free_disk_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
-const MIB: u64 = 1024 * 1024;
-
-/// The automatic game memory (MiB): a quarter of the RAM, never less than 2 GiB or more than
-/// 8 GiB, never more than half the machine, and in steps of 256 MiB. Unknown RAM means 2 GiB.
-pub fn auto_memory_mb(total_mb: Option<u64>) -> u32 {
-    let Some(total) = total_mb else { return 2048 };
-    let mb = (total / 4).clamp(2048, 8192).min(total / 2).max(1024);
-    (mb / 256 * 256) as u32
+/// Safe maximum JVM heap ceiling (MiB) for a machine with `total_mb` physical RAM, reserving
+/// headroom for Windows, integrated graphics and JVM off-heap allocations on 4–8 GB PCs.
+fn safe_ceiling_mb(total_mb: u64) -> u32 {
+    let capped = if total_mb <= 4403 {
+        total_mb.saturating_sub(1920)
+    } else if total_mb <= 8704 {
+        total_mb.saturating_sub(2816)
+    } else {
+        (total_mb.saturating_mul(3) / 4).min(32_768)
+    };
+    (capped / 256 * 256).max(1024) as u32
 }
 
-/// The range (MiB) a person may choose for the game's memory on this machine: at least 1 GiB, at
-/// most three quarters of the RAM (never above 32 GiB), in steps of 256 MiB. Unknown RAM allows
-/// up to 16 GiB.
+/// The automatic game memory (MiB): conservative on 4 GiB iGPU machines (`1536 MiB`, or `1024 MiB`
+/// on `<=3 GiB`), otherwise a quarter of RAM clamped to `2048..=8192` and kept within the machine's
+/// safe ceiling and half its RAM, snapped to 256 MiB steps. Unknown RAM means 2 GiB.
+pub fn auto_memory_mb(total_mb: Option<u64>) -> u32 {
+    let Some(total) = total_mb else { return 2048 };
+    if total <= 4403 {
+        (total.saturating_sub(1920).min(1536) / 256 * 256).max(1024) as u32
+    } else {
+        ((total / 4)
+            .clamp(2048, 8192)
+            .min(u64::from(safe_ceiling_mb(total)))
+            .min(total / 2)
+            / 256
+            * 256)
+            .max(1024) as u32
+    }
+}
+
+/// The range (MiB) a person may choose for the game's memory on this machine: at least 1 GiB, up
+/// to the machine's safe ceiling (never above 32 GiB), in steps of 256 MiB. Unknown RAM allows up
+/// to 16 GiB.
 pub fn memory_limits_mb(total_mb: Option<u64>) -> (u32, u32) {
-    const MIN: u32 = 1024;
-    let ceiling = total_mb.map_or(16_384, |t| t * 3 / 4).min(32_768) as u32;
-    (MIN, (ceiling / 256 * 256).max(MIN))
+    (1024, total_mb.map_or(16_384, safe_ceiling_mb))
 }
 
 /// The memory to use: the profile's own setting (kept within sane bounds) or the automatic one.
 pub fn memory_for(requested: Option<u32>, total_mb: Option<u64>) -> u32 {
     match requested {
         Some(r) => {
-            let ceiling = total_mb.map_or(32_768, |t| (t * 3 / 4).clamp(1024, 32_768)) as u32;
+            let ceiling = total_mb.map_or(32_768, safe_ceiling_mb);
             r.clamp(512, ceiling)
         }
         None => auto_memory_mb(total_mb),
@@ -168,6 +244,26 @@ pub fn effective_memory_mb(
     total_mb: Option<u64>,
 ) -> u32 {
     memory_for(profile.or(global), total_mb)
+}
+
+/// Live launch-time heap size (MiB): starts from [`effective_memory_mb`] and clamps down if current
+/// Windows commit charge or available physical RAM cannot safely hold the heap plus JVM/OpenGL
+/// off-heap overhead.
+pub fn launch_memory_mb(
+    profile: Option<u32>,
+    global: Option<u32>,
+    snap: Option<MemorySnapshot>,
+) -> u32 {
+    let base = effective_memory_mb(profile, global, snap.map(|s| s.total_mb));
+    if let Some(s) = snap {
+        let commit_cap = s.avail_commit_mb.saturating_sub(512);
+        let phys_cap = s.avail_phys_mb.saturating_sub(384);
+        let live_cap = commit_cap.min(phys_cap);
+        if live_cap < u64::from(base) {
+            return ((live_cap / 64 * 64).max(512) as u32).min(base);
+        }
+    }
+    base
 }
 
 /// Bytes needed beyond the download itself: staging, extraction and a safety margin.
@@ -191,12 +287,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automatic_memory_scales_with_ram_within_bounds() {
+    fn automatic_memory_scales_with_ram_and_protects_weak_machines() {
         for (total, want) in [
             (None, 2048),
-            (Some(2048), 1024), // never more than half of a small machine
-            (Some(3072), 1536),
-            (Some(4096), 2048),
+            (Some(2048), 1024),
+            (Some(3072), 1024), // <=3 GiB defaults to 1024 MiB
+            (Some(3840), 1536), // 4 GB laptop with hardware-reserved iGPU RAM
+            (Some(4096), 1536), // 4 GB machine leaves room for OS + iGPU + JVM off-heap
+            (Some(4403), 1536),
             (Some(8192), 2048),
             (Some(16_384), 4096),
             (Some(32_768), 8192),
@@ -206,9 +304,10 @@ mod tests {
         }
         for total in (1..=256).map(|g| g * 1024u64) {
             let m = u64::from(auto_memory_mb(Some(total)));
+            let (_, max) = memory_limits_mb(Some(total));
             assert!(
-                m * 2 <= total.max(2048) && m >= 1024 && m % 256 == 0,
-                "{total}"
+                m <= u64::from(max) && m * 2 <= total.max(2048) && m >= 1024 && m % 256 == 0,
+                "{total}: auto={m}, max={max}"
             );
         }
     }
@@ -221,16 +320,22 @@ mod tests {
         assert_eq!(
             memory_for(Some(60_000), Some(16_384)),
             12_288,
-            "at most three quarters of the machine"
+            "at most three quarters of a 16 GiB machine"
         );
+        assert_eq!(memory_for(Some(8192), Some(4096)), 2048);
+        assert_eq!(memory_for(Some(8192), Some(3840)), 1792);
+        assert_eq!(memory_for(Some(8192), Some(8192)), 5376);
         assert_eq!(memory_for(Some(60_000), None), 32_768);
     }
 
     #[test]
-    fn memory_limits_follow_the_machine_in_256_mib_steps() {
+    fn memory_limits_reserve_os_and_igpu_headroom_on_4_to_8_gb_pcs() {
         assert_eq!(memory_limits_mb(Some(16_384)), (1024, 12_288));
-        assert_eq!(memory_limits_mb(Some(8_192)), (1024, 6_144));
-        assert_eq!(memory_limits_mb(Some(2_048)), (1024, 1_536));
+        assert_eq!(memory_limits_mb(Some(8_192)), (1024, 5_376));
+        assert_eq!(memory_limits_mb(Some(7_936)), (1024, 5_120));
+        assert_eq!(memory_limits_mb(Some(4_096)), (1024, 2_048));
+        assert_eq!(memory_limits_mb(Some(3_840)), (1024, 1_792));
+        assert_eq!(memory_limits_mb(Some(2_048)), (1024, 1_024));
         assert_eq!(
             memory_limits_mb(Some(1_024)),
             (1024, 1_024),
@@ -254,9 +359,48 @@ mod tests {
         );
         assert_eq!(
             effective_memory_mb(None, Some(30_000), Some(8_192)),
-            6_144,
-            "a global value too big for this machine is still capped"
+            5_376,
+            "a global value too big for an 8 GiB machine is capped to its safe ceiling"
         );
+    }
+
+    #[test]
+    fn launch_memory_clamps_under_low_commit_or_physical_ram_pressure() {
+        // Plenty of free RAM and commit: uses normal effective memory.
+        let roomy = MemorySnapshot {
+            total_mb: 8192,
+            avail_phys_mb: 5000,
+            avail_commit_mb: 7000,
+        };
+        assert_eq!(launch_memory_mb(None, Some(4096), Some(roomy)), 4096);
+        assert_eq!(launch_memory_mb(None, None, None), 2048);
+
+        // Tight Windows commit limit (e.g. small/disabled pagefile with browser open):
+        // avail_commit_mb = 1820 -> commit_cap = 1308 -> snapped to 64 MiB = 1280.
+        let low_commit = MemorySnapshot {
+            total_mb: 8192,
+            avail_phys_mb: 4096,
+            avail_commit_mb: 1820,
+        };
+        assert_eq!(launch_memory_mb(None, Some(4096), Some(low_commit)), 1280);
+
+        // Tight physical RAM on a 4 GB laptop:
+        // avail_phys_mb = 1450 -> phys_cap = 1066 -> snapped to 64 MiB = 1024.
+        let low_phys = MemorySnapshot {
+            total_mb: 4096,
+            avail_phys_mb: 1450,
+            avail_commit_mb: 4096,
+        };
+        assert_eq!(launch_memory_mb(None, None, Some(low_phys)), 1024);
+
+        // Extreme pressure never drops below 512 MiB and never exceeds base.
+        let starved = MemorySnapshot {
+            total_mb: 4096,
+            avail_phys_mb: 500,
+            avail_commit_mb: 600,
+        };
+        assert_eq!(launch_memory_mb(None, None, Some(starved)), 512);
+        assert_eq!(launch_memory_mb(Some(512), None, Some(roomy)), 512);
     }
 
     #[test]
@@ -268,11 +412,47 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_can_be_queried() {
+    fn the_machine_can_be_queried_including_deep_long_paths() {
         let d = tempfile::tempdir().unwrap();
         let free = free_disk_bytes(d.path()).expect("free space of the temp drive");
         assert!(free > 0);
         assert!(free_disk_bytes(&d.path().join("not/yet/created")).is_some());
+
+        let seg = "a".repeat(55);
+        let mut deep = d.path().to_path_buf();
+        for _ in 0..6 {
+            deep.push(&seg);
+        }
+        assert!(deep.as_os_str().len() > 280);
+        // Non-existent >260-char path walks up cleanly after verbatim conversion.
+        assert!(free_disk_bytes(&deep).is_some());
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                to_verbatim_win32(Path::new(r"\\?\D:\Portable\Clade")),
+                std::path::PathBuf::from(r"\\?\D:\Portable\Clade")
+            );
+            assert_eq!(
+                to_verbatim_win32(Path::new(r"\\server\share\Clade")),
+                std::path::PathBuf::from(r"\\?\UNC\server\share\Clade")
+            );
+            assert_eq!(
+                to_verbatim_win32(Path::new(r"D:\Portable\Clade")),
+                std::path::PathBuf::from(r"\\?\D:\Portable\Clade")
+            );
+
+            // Existing >260-char directory passed without `\\?\` prefix still succeeds.
+            let verbatim_deep = to_verbatim_win32(&deep);
+            std::fs::create_dir_all(&verbatim_deep).unwrap();
+            assert!(free_disk_bytes(&deep).is_some());
+            assert!(free_disk_bytes(&deep.join("missing-leaf")).is_some());
+            let _ = std::fs::remove_dir_all(to_verbatim_win32(&d.path().join(&seg)));
+
+            let snap = memory_snapshot().expect("Windows memory snapshot");
+            assert!(snap.total_mb >= 512);
+            assert!(snap.avail_phys_mb > 0 && snap.avail_commit_mb > 0);
+        }
         assert!(total_memory_mb().is_some_and(|m| m >= 512));
     }
 }

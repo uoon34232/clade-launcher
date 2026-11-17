@@ -77,7 +77,9 @@ fn is_russian_locale(locale: &str) -> bool {
 /// The language for a dialog shown now. `root` is the launcher folder if it is already known;
 /// without it (or with unreadable settings) the Windows language decides. Never fails.
 pub fn current_language(root: Option<&Path>) -> Language {
-    let settings = root.and_then(|r| std::fs::read(r.join("data").join("settings.json")).ok());
+    let settings = root.and_then(|r| {
+        crate::portable::fsutil::read_bounded(&r.join("data").join("settings.json"), 64 * 1024).ok()
+    });
     resolve_language(
         settings.as_deref(),
         crate::system::system_locale().as_deref(),
@@ -188,7 +190,13 @@ mod tests {
         assert_eq!(current_language(Some(d.path())), En);
         std::fs::write(&file, b"{ broken").unwrap();
         let _ = current_language(Some(d.path())); // falls back to Windows, no panic
-                                                  // A directory where the file should be is unreadable, not fatal.
+                                                  // An oversized file (> 64 KiB) is rejected by read_bounded without unbounded allocation.
+        let mut oversized = br#"{"ui":{"language":"ru","pad":""#.to_vec();
+        oversized.extend(std::iter::repeat_n(b'x', 70 * 1024));
+        oversized.extend_from_slice(br#""}}"#);
+        std::fs::write(&file, oversized).unwrap();
+        let _ = current_language(Some(d.path()));
+        // A directory where the file should be is unreadable, not fatal.
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         let _ = current_language(Some(d.path()));

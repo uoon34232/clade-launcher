@@ -164,7 +164,7 @@ fn build_for(
     let resolved = resolve(&e.root, launch_id)?;
     let java = java_for(&e.root, major);
     let sys = SystemEnv::from_process();
-    let temp = e.root.cache_dir().join("game-tmp").join(inst.id.as_str());
+    let temp = e.root.game_tmp_dir().join(inst.id.as_str());
     build(&BuildInput {
         root: &e.root,
         dirs: &dirs,
@@ -325,10 +325,18 @@ fn memory_and_extra_jvm_arguments_come_from_the_profile_and_system() {
         "-Dmy.flag=1",
         "user arguments sit last among the JVM arguments"
     );
-    // Java 8 gets the collector Java 17+ already defaults to; newer Java gets nothing extra.
-    assert!(!cmd.args.contains(&"-XX:+UseG1GC".to_string()));
+    // Weak-PC G1GC tuning is enabled across Java generations, with periodic idle page return on 12+.
+    assert!(cmd.args.contains(&"-XX:+UseG1GC".to_string()));
+    assert!(cmd
+        .args
+        .contains(&"-XX:G1PeriodicGCInterval=60000".to_string()));
+    assert!(cmd.args.contains(&"-XX:G1HeapRegionSize=32M".to_string()));
     let old = build_for(&e, "1.21.4", 8, 2048, &[]).unwrap();
     assert!(old.args.contains(&"-XX:+UseG1GC".to_string()));
+    assert!(old.args.contains(&"-XX:G1HeapRegionSize=16M".to_string()));
+    assert!(!old
+        .args
+        .contains(&"-XX:G1PeriodicGCInterval=60000".to_string()));
 }
 
 // ================================================================================ historical versions
@@ -352,17 +360,18 @@ fn a_pre_1_13_version_uses_minecraft_arguments_and_the_default_jvm_arguments() {
         ],
         Some(("1.12", json!({"objects": {}}))),
     );
-    let a = build_for(&e, "1.12.2", 8, 2048, &[]).unwrap().args;
+    let cmd = build_for(&e, "1.12.2", 8, 2048, &[]).unwrap();
+    let a = &cmd.args;
     for needed in ["-Djava.library.path", "-Dminecraft.launcher.brand=Clade"] {
         assert!(
             a.iter().any(|x| x.starts_with(needed)),
             "default JVM argument {needed}"
         );
     }
-    assert_eq!(classpath(&a).len(), 3);
-    assert_eq!(after(&a, "--username"), "Steve_01");
-    assert_eq!(after(&a, "--accessToken"), TOKEN);
-    assert_eq!(after(&a, "--assetIndex"), "1.12");
+    assert_eq!(classpath(a).len(), 3);
+    assert_eq!(after(a, "--username"), "Steve_01");
+    assert_eq!(after(a, "--accessToken"), TOKEN);
+    assert_eq!(after(a, "--assetIndex"), "1.12");
 }
 
 #[test]
@@ -381,7 +390,8 @@ fn the_pre_1_6_layout_uses_positional_arguments_and_resources_in_the_game_folder
         &["net/minecraft/launchwrapper/1.5/launchwrapper-1.5.jar"],
         Some(("pre-1.6", json!({"map_to_resources": true, "objects": {}}))),
     );
-    let a = build_for(&e, "b1.7.3", 8, 2048, &[]).unwrap().args;
+    let cmd = build_for(&e, "b1.7.3", 8, 2048, &[]).unwrap();
+    let a = &cmd.args;
     let main = a
         .iter()
         .position(|x| x == "net.minecraft.launchwrapper.Launch")
@@ -392,9 +402,9 @@ fn the_pre_1_6_layout_uses_positional_arguments_and_resources_in_the_game_folder
         format!("token:{TOKEN}:0000000000004000800000000000a001"),
         "the legacy session string"
     );
-    let game = after(&a, "--gameDir").to_owned();
+    let game = after(a, "--gameDir").to_owned();
     assert_eq!(
-        after(&a, "--assetsDir"),
+        after(a, "--assetsDir"),
         format!("{game}\\resources").replace('\\', std::path::MAIN_SEPARATOR_STR)
     );
 }
@@ -415,9 +425,10 @@ fn the_1_6_virtual_layout_points_at_the_shared_virtual_assets() {
         &[],
         Some(("legacy", json!({"virtual": true, "objects": {}}))),
     );
-    let a = build_for(&e, "1.6.4", 8, 2048, &[]).unwrap().args;
+    let cmd = build_for(&e, "1.6.4", 8, 2048, &[]).unwrap();
+    let a = &cmd.args;
     assert_eq!(
-        after(&a, "--assetsDir"),
+        after(a, "--assetsDir"),
         e.root
             .assets_dir()
             .join("virtual")
@@ -426,7 +437,7 @@ fn the_1_6_virtual_layout_points_at_the_shared_virtual_assets() {
             .unwrap()
     );
     assert_eq!(
-        after(&a, "--session"),
+        after(a, "--session"),
         format!("token:{TOKEN}:0000000000004000800000000000a001")
     );
 }
@@ -466,9 +477,8 @@ fn fabric_and_quilt_inherit_from_vanilla_with_their_libraries_first() {
         ],
         None,
     );
-    let a = build_for(&e, "fabric-loader-0.16.9-1.21.4", 21, 2048, &[])
-        .unwrap()
-        .args;
+    let cmd = build_for(&e, "fabric-loader-0.16.9-1.21.4", 21, 2048, &[]).unwrap();
+    let a = &cmd.args;
     assert!(a
         .iter()
         .any(|x| x == "net.fabricmc.loader.impl.launch.knot.KnotClient"));
@@ -480,7 +490,7 @@ fn fabric_and_quilt_inherit_from_vanilla_with_their_libraries_first() {
         a.contains(&"-DFabricMcEmu= net.minecraft.client.main.Main ".to_string()),
         "a JVM argument with spaces stays one argument"
     );
-    let cp = classpath(&a);
+    let cp = classpath(a);
     assert!(
         cp[0].contains("fabric-loader-0.16.9.jar"),
         "the loader's libraries come first: {cp:?}"
@@ -499,12 +509,12 @@ fn fabric_and_quilt_inherit_from_vanilla_with_their_libraries_first() {
         "the Vanilla jar closes the classpath"
     );
     assert_eq!(
-        after(&a, "--version"),
+        after(a, "--version"),
         "1.21.4",
         "the base Minecraft version"
     );
     assert_eq!(
-        after(&a, "--username"),
+        after(a, "--username"),
         "Steve_01",
         "Vanilla's game arguments still apply"
     );
@@ -532,16 +542,15 @@ fn neoforge_style_module_path_arguments_expand_library_directory_and_separator()
         &["cpw/mods/bootstraplauncher/2.0.2/bootstraplauncher-2.0.2.jar"],
         None,
     );
-    let a = build_for(&e, "neoforge-21.4.158", 21, 2048, &[])
-        .unwrap()
-        .args;
+    let cmd = build_for(&e, "neoforge-21.4.158", 21, 2048, &[]).unwrap();
+    let a = &cmd.args;
     assert!(
         a.contains(&"-DignoreList=client-extra,1.21.4.jar".to_string()),
         "matches the Vanilla jar's name"
     );
     let lib = e.root.libraries_dir().to_str().unwrap().to_owned();
     assert!(a.contains(&format!("-DlibraryDirectory={lib}")));
-    let p = after(&a, "-p");
+    let p = after(a, "-p");
     assert!(
         p.starts_with(&lib) && p.contains(";") && p.contains("securejarhandler-3.0.8.jar"),
         "{p}"
@@ -702,16 +711,28 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
             "{k} must point inside the Clade folder"
         );
     }
-    // Only the read-only Windows directory is allowed outside the folder.
+    // Only the read-only Windows directory and standard system process variables are allowed outside.
     let outside: Vec<_> = cmd
         .env
         .iter()
         .filter(|(k, v)| {
             !Path::new(v.as_str()).starts_with(e.root.path())
-                && !matches!(k.as_str(), "SystemRoot" | "windir" | "PATH")
+                && !matches!(
+                    k.as_str(),
+                    "SystemDrive" | "SystemRoot" | "windir" | "PATH" | "COMSPEC" | "PATHEXT"
+                )
         })
         .collect();
     assert!(outside.is_empty(), "{outside:?}");
+    let sys_root = &cmd.env["SystemRoot"];
+    assert_eq!(
+        cmd.env["PATH"],
+        format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
+        "includes SystemRoot so explorer.exe works for in-game Open Folder buttons"
+    );
+    assert_eq!(cmd.env["COMSPEC"], format!(r"{sys_root}\System32\cmd.exe"));
+    assert_eq!(cmd.env["PATHEXT"], ".COM;.EXE;.BAT;.CMD");
+    assert!(cmd.env["SystemDrive"].ends_with(':'));
     let process = cmd.to_process();
     assert_eq!(process.get_program(), cmd.program.as_os_str());
     assert_eq!(process.get_current_dir(), Some(cmd.cwd.as_path()));
@@ -727,6 +748,344 @@ fn unknown_placeholders_become_empty_instead_of_leaking_through() {
     );
     assert_eq!(unknown, ["nope"]);
     assert_eq!(substitute("broken ${a", &vars, &mut unknown), "broken ${a");
+}
+
+#[test]
+fn forge_1_12_2_2851_merges_parent_minecraft_arguments_with_child_game_args_while_legacy_override_replaces(
+) {
+    let e = env();
+    let vanilla_1_12 = json!({
+        "id": "1.12.2", "type": "release", "mainClass": "net.minecraft.client.main.Main", "assets": "1.12",
+        "assetIndex": asset_ref("1.12"), "downloads": {"client": client()},
+        "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --versionType ${version_type}",
+        "libraries": [lib("com.mojang:authlib:1.5.25", "com/mojang/authlib/1.5.25/authlib-1.5.25.jar")]
+    });
+    install(
+        &e.root,
+        "1.12.2",
+        &vanilla_1_12,
+        &["com/mojang/authlib/1.5.25/authlib-1.5.25.jar"],
+        Some(("1.12", json!({"objects": {}}))),
+    );
+
+    // Forge 14.23.5.2851+ omits `minecraftArguments` and supplies structured `arguments.game`.
+    let forge_2860 = json!({
+        "id": "1.12.2-forge-14.23.5.2860", "inheritsFrom": "1.12.2", "type": "release",
+        "mainClass": "net.minecraft.launchwrapper.Launch",
+        "arguments": {
+            "game": ["--tweakClass", "net.minecraftforge.fml.common.launcher.FMLTweaker"],
+            "jvm": []
+        },
+        "libraries": [lib("net.minecraft:launchwrapper:1.12", "net/minecraft/launchwrapper/1.12/launchwrapper-1.12.jar")]
+    });
+    install(
+        &e.root,
+        "1.12.2-forge-14.23.5.2860",
+        &forge_2860,
+        &["net/minecraft/launchwrapper/1.12/launchwrapper-1.12.jar"],
+        None,
+    );
+    let cmd = build_for(&e, "1.12.2-forge-14.23.5.2860", 8, 2048, &[]).unwrap();
+    let a = &cmd.args;
+    assert_eq!(after(a, "--username"), "Steve_01");
+    assert_eq!(after(a, "--accessToken"), TOKEN);
+    assert_eq!(after(a, "--assetIndex"), "1.12");
+    assert_eq!(
+        after(a, "--assetsDir"),
+        e.root.assets_dir().to_str().unwrap()
+    );
+    assert_eq!(
+        after(a, "--tweakClass"),
+        "net.minecraftforge.fml.common.launcher.FMLTweaker"
+    );
+
+    // Earlier Forge (e.g. 1.7.10 / early 1.12.2) supplies a full `minecraftArguments` replacement.
+    let forge_legacy = json!({
+        "id": "1.12.2-forge-14.23.5.2768", "inheritsFrom": "1.12.2", "type": "release",
+        "mainClass": "net.minecraft.launchwrapper.Launch",
+        "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker",
+        "libraries": []
+    });
+    install(
+        &e.root,
+        "1.12.2-forge-14.23.5.2768",
+        &forge_legacy,
+        &[],
+        None,
+    );
+    let legacy_cmd = build_for(&e, "1.12.2-forge-14.23.5.2768", 8, 2048, &[]).unwrap();
+    assert_eq!(
+        legacy_cmd
+            .args
+            .iter()
+            .filter(|x| x.as_str() == "--username")
+            .count(),
+        1,
+        "child minecraftArguments replaces parent rather than duplicating flags"
+    );
+    assert_eq!(
+        after(&legacy_cmd.args, "--tweakClass"),
+        "net.minecraftforge.fml.common.launcher.FMLTweaker"
+    );
+}
+
+#[test]
+fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad_root = PortableRoot::at(dir.path().join("Clade;Portable"));
+    bad_root.ensure_layout().unwrap();
+    let bad_env = Env {
+        _dir: dir,
+        root: bad_root,
+    };
+    install(
+        &bad_env.root,
+        "1.21.4",
+        &modern_vanilla(),
+        &VANILLA_LIBS,
+        Some(("19", modern_index())),
+    );
+    assert!(matches!(
+        build_for(&bad_env, "1.21.4", 21, 2048, &[]),
+        Err(LaunchError::UnsupportedFolderPath)
+    ));
+
+    let clean = env();
+    with_vanilla(&clean);
+    let store = InstanceStore::new(&clean.root);
+    let inst = store
+        .create(NewInstance::vanilla("Clean", "1.21.4").unwrap(), 1)
+        .unwrap();
+    let dirs = store.dirs(&inst.id);
+    let resolved = resolve(&clean.root, "1.21.4").unwrap();
+    let java = java_for(&clean.root, 21);
+    let sys = SystemEnv::from_process();
+    let bad_temp = clean.root.game_tmp_dir().join("bad;tmp");
+    assert!(matches!(
+        build(&BuildInput {
+            root: &clean.root,
+            dirs: &dirs,
+            resolved: &resolved,
+            java: &java,
+            identity: &identity(),
+            memory_mb: 2048,
+            extra_jvm_args: &[],
+            sys: &sys,
+            temp_dir: &bad_temp,
+        }),
+        Err(LaunchError::UnsupportedFolderPath)
+    ));
+}
+
+#[test]
+fn load_chain_rejects_traversal_tokens_and_mismatched_declared_ids() {
+    let e = env();
+    for bad in ["../escape", "a/b", "a\\b", "-flag", ".dot"] {
+        assert!(
+            matches!(resolve(&e.root, bad), Err(LaunchError::BadVersion(_))),
+            "{bad}"
+        );
+    }
+    write_version(
+        &e.root,
+        "child-bad-parent",
+        &json!({"id": "child-bad-parent", "inheritsFrom": "../escape", "libraries": []}),
+    );
+    assert!(matches!(
+        resolve(&e.root, "child-bad-parent"),
+        Err(LaunchError::BadVersion(_))
+    ));
+
+    write_version(
+        &e.root,
+        "spoofed",
+        &json!({
+            "id": "other-id", "type": "release", "mainClass": "m.Main",
+            "downloads": {"client": client()}, "minecraftArguments": "--username ${auth_player_name}",
+            "libraries": []
+        }),
+    );
+    assert!(matches!(
+        resolve(&e.root, "spoofed"),
+        Err(LaunchError::BadVersion(_))
+    ));
+}
+
+#[test]
+fn jvm_flags_tune_encoding_security_crashdumps_gc_direct_memory_and_optimus_by_java_major() {
+    let e = env();
+    let old_meta = json!({
+        "id": "1.12.2", "type": "release", "mainClass": "net.minecraft.client.main.Main", "assets": "1.12",
+        "assetIndex": asset_ref("1.12"), "downloads": {"client": client()},
+        "minecraftArguments": "--username ${auth_player_name}",
+        "libraries": []
+    });
+    install(
+        &e.root,
+        "1.12.2",
+        &old_meta,
+        &[],
+        Some(("1.12", json!({"objects": {}}))),
+    );
+    with_vanilla(&e);
+
+    // Java 8 on 1536 MiB: 16M regions, 768M direct memory, minidump off, Optimus HeapDumpPath, no Java 12+/19+ flags.
+    let j8 = build_for(&e, "1.12.2", 8, 1536, &[]).unwrap();
+    for expected in [
+        "-Xmx1536M",
+        "-Dfile.encoding=UTF-8",
+        "-Dsun.stdout.encoding=UTF-8",
+        "-Dsun.stderr.encoding=UTF-8",
+        "-Dlog4j2.formatMsgNoLookups=true",
+        "-XX:-CreateMinidumpOnCrash",
+        "-XX:+UnlockExperimentalVMOptions",
+        "-XX:+UseG1GC",
+        "-XX:G1NewSizePercent=20",
+        "-XX:G1ReservePercent=20",
+        "-XX:MaxGCPauseMillis=50",
+        "-XX:G1HeapRegionSize=16M",
+        "-XX:MaxDirectMemorySize=768M",
+        "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
+    ] {
+        assert!(j8.args.iter().any(|a| a == expected), "missing {expected}");
+    }
+    for absent in [
+        "-Dstdout.encoding=UTF-8",
+        "-XX:-CreateCoredumpOnCrash",
+        "-XX:G1PeriodicGCInterval=60000",
+    ] {
+        assert!(!j8.args.iter().any(|a| a == absent), "unexpected {absent}");
+    }
+
+    // Java 17 on 512 MiB: direct memory clamped to 512M floor, coredump off, G1PeriodicGCInterval=60000, no Java 19+ stdout.encoding.
+    let j17 = build_for(&e, "1.21.4", 17, 512, &[]).unwrap();
+    assert!(j17.args.iter().any(|a| a == "-XX:MaxDirectMemorySize=512M"));
+    assert!(j17.args.iter().any(|a| a == "-XX:-CreateCoredumpOnCrash"));
+    assert!(j17
+        .args
+        .iter()
+        .any(|a| a == "-XX:G1PeriodicGCInterval=60000"));
+    assert!(!j17.args.iter().any(|a| a == "-Dstdout.encoding=UTF-8"));
+
+    // Java 21 on 8192 MiB: 32M regions, direct memory clamped to 2048M ceiling, stdout/stderr UTF-8.
+    let j21 = build_for(&e, "1.21.4", 21, 8192, &[]).unwrap();
+    assert!(j21.args.iter().any(|a| a == "-XX:G1HeapRegionSize=32M"));
+    assert!(j21
+        .args
+        .iter()
+        .any(|a| a == "-XX:MaxDirectMemorySize=2048M"));
+    assert!(j21.args.iter().any(|a| a == "-Dstdout.encoding=UTF-8"));
+    assert!(j21.args.iter().any(|a| a == "-Dstderr.encoding=UTF-8"));
+}
+
+#[test]
+fn huge_classpaths_compact_to_relative_paths_and_spill_to_a_secret_free_argfile_on_java_9_plus() {
+    // Verify exact Windows CRT UTF-16 length calculation first.
+    let prog = Path::new("java.exe");
+    // "java.exe" (10) + ' ' (1) + "" (2) + ' ' (1) + "a b\\" -> "\"a b\\\\\"" (7) + ' ' (1) + a\"b -> a\\\"b (6) + NUL (1) = 29
+    assert_eq!(
+        utf16_command_line_len(
+            prog,
+            &[String::new(), r"a b\".to_owned(), r#"a"b"#.to_owned()]
+        ),
+        29
+    );
+
+    // 1) Compaction tier (> 20,000 UTF-16 chars, <= 28,000 after relativizing):
+    let dir = tempfile::tempdir().unwrap();
+    let deep = dir
+        .path()
+        .join("a_very_deeply_nested_portable_usb_folder_structure_segment_one")
+        .join("a_very_deeply_nested_portable_usb_folder_structure_segment_two")
+        .join("Clade Folder");
+    let root = PortableRoot::at(deep);
+    root.ensure_layout().unwrap();
+    let e_deep = Env { _dir: dir, root };
+
+    let mut lib_vals = Vec::new();
+    let mut lib_paths_owned = Vec::new();
+    for idx in 0..115 {
+        let rel = format!("org/example/modlib{idx:03}/1.0.{idx}/modlib{idx:03}-1.0.{idx}.jar");
+        lib_vals.push(lib(&format!("org.example:modlib{idx:03}:1.0.{idx}"), &rel));
+        lib_paths_owned.push(rel);
+    }
+    let lib_refs: Vec<&str> = lib_paths_owned.iter().map(String::as_str).collect();
+    let mut v115 = modern_vanilla();
+    v115["libraries"] = Value::Array(lib_vals);
+    install(
+        &e_deep.root,
+        "1.21.4",
+        &v115,
+        &lib_refs,
+        Some(("19", modern_index())),
+    );
+    let compacted = build_for(&e_deep, "1.21.4", 8, 2048, &[]).unwrap();
+    let cp_entries = classpath(&compacted.args);
+    assert!(
+        cp_entries
+            .iter()
+            .all(|p| p.starts_with(r"..\..\..\") || p.starts_with("../../../")),
+        "entries under root compacted relative to instances/<id>/game: {:?}",
+        &cp_entries[..3]
+    );
+    let shown = compacted.redacted(&e_deep.root);
+    assert!(!shown.contains(TOKEN) && shown.contains("<clade>"));
+
+    // 2) Argfile tier (> 28,000 UTF-16 chars even after relative compaction):
+    let e_huge = env();
+    let mut huge_vals = Vec::new();
+    let mut huge_paths = Vec::new();
+    for idx in 0..450 {
+        let rel = format!(
+            "org/example/heavy_pack_component_{idx:03}/2.4.{idx}/heavy_pack_component_{idx:03}-2.4.{idx}.jar"
+        );
+        huge_vals.push(lib(
+            &format!("org.example:heavy_pack_component_{idx:03}:2.4.{idx}"),
+            &rel,
+        ));
+        huge_paths.push(rel);
+    }
+    let huge_refs: Vec<&str> = huge_paths.iter().map(String::as_str).collect();
+    let mut v450 = modern_vanilla();
+    v450["libraries"] = Value::Array(huge_vals);
+    install(
+        &e_huge.root,
+        "1.21.4",
+        &v450,
+        &huge_refs,
+        Some(("19", modern_index())),
+    );
+
+    // Java 21 spills `-cp` into `instances/<id>/.clade-jvm.args` and passes `@../.clade-jvm.args`.
+    let spilled = build_for(&e_huge, "1.21.4", 21, 4096, &[]).unwrap();
+    assert!(spilled.args.iter().any(|a| a == "@../.clade-jvm.args"));
+    assert!(!spilled.args.iter().any(|a| a == "-cp"));
+    assert!(utf16_command_line_len(&spilled.program, &spilled.args) < 5_000);
+
+    let inst_id = &InstanceStore::new(&e_huge.root).list().unwrap().instances[0].id;
+    let argfile = InstanceStore::new(&e_huge.root)
+        .dirs(inst_id)
+        .root()
+        .join(".clade-jvm.args");
+    let content = fs::read_to_string(&argfile).unwrap();
+    assert!(content.is_ascii());
+    assert!(content.starts_with("-cp\n\""));
+    assert!(content.contains("heavy_pack_component_000"));
+    #[cfg(windows)]
+    assert!(
+        content.contains(r"..\\..\\..\\libraries\\"),
+        "backslashes inside quoted Java argfile strings are doubled"
+    );
+    assert!(
+        !content.contains(TOKEN) && !content.contains("Steve_01") && !content.contains("a001"),
+        "credentials and identity never touch the argfile"
+    );
+
+    // Java 8 has no `@argfile` support, so a command line still > 30,000 chars fails cleanly.
+    assert!(matches!(
+        build_for(&e_huge, "1.21.4", 8, 4096, &[]),
+        Err(LaunchError::TooLong)
+    ));
 }
 
 // ================================================================================ the real thing (by hand)
@@ -765,7 +1124,7 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
         let java = crate::java_install::find_installed(&root, &resolved.java.component)
             .unwrap_or_else(|| panic!("{}: no Java", inst.name));
         let dirs = store.dirs(&inst.id);
-        let temp = root.cache_dir().join("game-tmp").join(inst.id.as_str());
+        let temp = root.game_tmp_dir().join(inst.id.as_str());
         for d in [
             dirs.game_dir(),
             temp.clone(),
@@ -790,12 +1149,14 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
             temp_dir: &temp,
         })
         .unwrap_or_else(|e| panic!("{}: {e}", inst.name));
+        let cp_count = cmd
+            .args
+            .iter()
+            .position(|a| a == "-cp")
+            .map_or(1, |idx| cmd.args[idx + 1].split(';').count());
         println!(
             "== {} ({}) java {} cp entries {}",
-            inst.name,
-            resolved.launch_id,
-            java.id,
-            classpath(&cmd.args).len()
+            inst.name, resolved.launch_id, java.id, cp_count
         );
         println!(
             "   {}",

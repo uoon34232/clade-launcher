@@ -171,3 +171,56 @@ fn a_failed_move_leaves_the_profile_exactly_where_it_was() {
     assert_eq!(tree(store.dirs(&inst.id).root()), before);
     assert_eq!(store.list().unwrap().instances.len(), 1);
 }
+
+#[test]
+fn retiring_cleans_disposable_natives_while_preserving_all_user_files_byte_for_byte() {
+    let (d, root) = setup();
+    let store = InstanceStore::new(&root);
+    let inst = store.create(vanilla("WithNatives"), 1).unwrap();
+    let dirs = store.dirs(&inst.id);
+
+    // User files across game/, home/, playtime.json, and unknown custom files.
+    let kept_files: [(&str, &[u8]); 5] = [
+        ("game/saves/World/level.dat", &[1, 2, 3, 4]),
+        ("game/options.txt", b"fov:85.0\n"),
+        ("home/AppData/Roaming/state.bin", b"user-state"),
+        ("playtime.json", br#"{"schema":1}"#),
+        ("custom-note.txt", b"do not touch"),
+    ];
+    for (rel, bytes) in kept_files {
+        let p = dirs.root().join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, bytes).unwrap();
+    }
+    let expected = tree(dirs.root());
+
+    // Disposable extracted native DLLs under natives/.
+    fs::create_dir_all(dirs.natives_dir().join("x64")).unwrap();
+    fs::write(dirs.natives_dir().join("lwjgl.dll"), vec![0xAA; 4096]).unwrap();
+    fs::write(dirs.natives_dir().join("x64/openal.dll"), vec![0xBB; 4096]).unwrap();
+    assert!(dirs.natives_dir().is_dir());
+
+    let retired_at = store.retire(&inst.id).unwrap();
+    assert!(!retired_at.join("natives").exists());
+    assert_eq!(tree(&retired_at), expected);
+
+    #[cfg(windows)]
+    {
+        let outside = d.path().join("outside-profile");
+        fs::create_dir_all(&outside).unwrap();
+        let linked = root.instances_dir().join("linked-retire");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(matches!(
+            store.retire(&InstanceId::new("linked-retire").unwrap()),
+            Err(InstanceError::Link(_))
+        ));
+        fs::remove_dir(&linked).unwrap();
+    }
+    let _ = &d;
+}

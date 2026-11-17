@@ -48,6 +48,23 @@ pub struct ProfilesState {
     pub global: Result<HttpFetcher, String>,
     /// Loader hosts only.
     pub loaders: Result<HttpFetcher, String>,
+    /// Serialises concurrent `create_profile` calls across async catalog verification.
+    pub create_lock: tokio::sync::Mutex<()>,
+}
+
+impl ProfilesState {
+    pub fn new(
+        root: PortableRoot,
+        global: Result<HttpFetcher, String>,
+        loaders: Result<HttpFetcher, String>,
+    ) -> Self {
+        Self {
+            root,
+            global,
+            loaders,
+            create_lock: tokio::sync::Mutex::new(()),
+        }
+    }
 }
 
 fn catalogs_dir(root: &PortableRoot) -> PathBuf {
@@ -314,6 +331,37 @@ pub async fn loader_options_all<F: Fetcher>(
         .collect()
 }
 
+fn check_name_and_problems(
+    listing: &crate::instances::Listing,
+    raw_name: &str,
+) -> Result<(), ProfileError> {
+    let trimmed = raw_name.trim();
+    let wanted = trimmed.to_lowercase();
+    if listing
+        .instances
+        .iter()
+        .any(|i| i.name.trim().to_lowercase() == wanted)
+    {
+        return Err(ProfileError::DuplicateName(trimmed.to_owned()));
+    }
+    if !trimmed.is_empty() {
+        let slug = crate::instances::slugify(trimmed);
+        if listing
+            .problems
+            .iter()
+            .any(|(folder, _)| folder.eq_ignore_ascii_case(slug.as_str()))
+        {
+            return Err(ProfileError::Instance(InstanceError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("profile folder '{slug}' already exists and could not be read"),
+                ),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Creates a profile after verifying it against the official catalogs. Returns the new snapshot
 /// with the new profile selected.
 pub async fn create_verified<G: Fetcher, L: Fetcher>(
@@ -324,18 +372,15 @@ pub async fn create_verified<G: Fetcher, L: Fetcher>(
     request: NewInstance,
     now: i64,
 ) -> Result<ProfilesDto, ProfileError> {
-    let store = InstanceStore::new(root);
-
-    // 1. A friendly, case-insensitive duplicate check (the store would also keep ids unique).
-    let wanted = request.name.trim().to_lowercase();
-    if store
-        .list()?
-        .instances
-        .iter()
-        .any(|i| i.name.trim().to_lowercase() == wanted)
-    {
-        return Err(ProfileError::DuplicateName(request.name.trim().to_owned()));
-    }
+    // 1. Friendly case-insensitive duplicate check and unreadable-folder collision check.
+    let root_for_check = root.clone();
+    let name_for_check = request.name.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), ProfileError> {
+        let listing = InstanceStore::new(&root_for_check).list()?;
+        check_name_and_problems(&listing, &name_for_check)
+    })
+    .await
+    .map_err(|e| ProfileError::Io(std::io::Error::other(e.to_string())))??;
 
     // 2. The Minecraft version must be in Mojang's official catalog (live or saved).
     let catalog = mc_catalog::load(global, &manifest_cache(root), now, false)
@@ -391,12 +436,21 @@ pub async fn create_verified<G: Fetcher, L: Fetcher>(
         }
     }
 
-    // 4. Create it (isolated, Pending) and select it.
-    let created = store.create(request, now)?;
-    if let Err(e) = settings.set_last_instance(Some(created.id.clone())) {
-        tracing::warn!(error = %e, "could not remember the new profile as selected");
-    }
-    Ok(snapshot(root, Some(created.id))?)
+    // 4. Re-check, create (isolated, Pending), persist selection and snapshot off Tokio workers.
+    let root_for_create = root.clone();
+    let settings_for_create = settings.clone();
+    tokio::task::spawn_blocking(move || -> Result<ProfilesDto, ProfileError> {
+        let store = InstanceStore::new(&root_for_create);
+        let listing = store.list()?;
+        check_name_and_problems(&listing, &request.name)?;
+        let created = store.create(request, now)?;
+        if let Err(e) = settings_for_create.set_last_instance(Some(created.id.clone())) {
+            tracing::warn!(error = %e, "could not remember the new profile as selected");
+        }
+        Ok(snapshot(&root_for_create, Some(created.id))?)
+    })
+    .await
+    .map_err(|e| ProfileError::Io(std::io::Error::other(e.to_string())))?
 }
 
 // ------------------------------------------------------------------------------ Tauri commands
@@ -411,26 +465,35 @@ fn fetcher(f: &Result<HttpFetcher, String>) -> Result<&HttpFetcher, CodedError> 
 }
 
 #[tauri::command]
-pub fn list_profiles(
+pub async fn list_profiles(
     state: State<'_, ProfilesState>,
     settings: State<'_, SettingsState>,
 ) -> Result<ProfilesDto, CodedError> {
-    snapshot(&state.root, settings.last_instance()).map_err(CodedError::storage)
+    let root = state.root.clone();
+    let selected = settings.last_instance();
+    tokio::task::spawn_blocking(move || snapshot(&root, selected))
+        .await
+        .map_err(|e| CodedError::storage(format!("profile listing task failed: {e}")))?
+        .map_err(CodedError::storage)
 }
 
 #[tauri::command]
-pub fn select_profile(
+pub async fn select_profile(
     state: State<'_, ProfilesState>,
     settings: State<'_, SettingsState>,
     id: String,
 ) -> Result<(), CodedError> {
     let id = InstanceId::new(&id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
-    InstanceStore::new(&state.root)
-        .get(&id)
-        .map_err(|e| CodedError::new("not_found", e.to_string()))?;
-    settings
-        .set_last_instance(Some(id))
-        .map_err(CodedError::storage)
+    let root = state.root.clone();
+    let st = settings.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        InstanceStore::new(&root)
+            .get(&id)
+            .map_err(|e| CodedError::new("not_found", e.to_string()))?;
+        st.set_last_instance(Some(id)).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile selection task failed: {e}")))?
 }
 
 #[tauri::command]
@@ -463,6 +526,7 @@ pub async fn create_profile(
     settings: State<'_, SettingsState>,
     request: NewInstance,
 ) -> Result<ProfilesDto, CodedError> {
+    let _guard = state.create_lock.lock().await;
     let (g, l) = (fetcher(&state.global)?, fetcher(&state.loaders)?);
     create_verified(g, l, &state.root, &settings, request, now_unix())
         .await
@@ -959,5 +1023,33 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e["kind"] == "old_beta" && e["releaseTime"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn create_verified_refuses_dash_2_when_slug_collides_with_damaged_folder_in_problems() {
+        let e = env();
+        let damaged = e.root.instances_dir().join("survival");
+        fs::create_dir_all(damaged.join("game/saves/MyWorld")).unwrap();
+        fs::write(damaged.join("game/saves/MyWorld/level.dat"), b"world-bytes").unwrap();
+        fs::write(damaged.join("instance.json"), b"{corrupt").unwrap();
+
+        let listing = InstanceStore::new(&e.root).list().unwrap();
+        assert_eq!(listing.problems.len(), 1);
+        assert_eq!(listing.problems[0].0, "survival");
+
+        let err = create(&e, vanilla("Survival", "1.21.4")).await.unwrap_err();
+        assert_eq!(err.coded().code, "storage");
+        assert!(
+            e.global.calls().is_empty(),
+            "colliding with a damaged profile folder fails before any network call"
+        );
+        assert!(!e.root.instances_dir().join("survival-2").exists());
+        assert_eq!(
+            fs::read(damaged.join("game/saves/MyWorld/level.dat")).unwrap(),
+            b"world-bytes"
+        );
+
+        let st = ProfilesState::new(e.root.clone(), Err("offline".into()), Err("offline".into()));
+        let _guard = st.create_lock.lock().await;
     }
 }

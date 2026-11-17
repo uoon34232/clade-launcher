@@ -22,7 +22,6 @@
 //! game exits (see `lib.rs`).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -107,11 +106,15 @@ struct Entry {
     pid: Option<u32>,
 }
 
+struct StateInner {
+    sessions: HashMap<String, Entry>,
+    exit_when_idle: bool,
+}
+
 /// The running games, managed by Tauri.
 pub struct LaunchState {
     pub root: PortableRoot,
-    sessions: Mutex<HashMap<String, Entry>>,
-    exit_when_idle: AtomicBool,
+    sessions: Mutex<StateInner>,
     locks: Arc<ProfileLocks>,
 }
 
@@ -119,8 +122,10 @@ impl LaunchState {
     pub fn new(root: PortableRoot) -> Self {
         Self {
             root,
-            sessions: Mutex::new(HashMap::new()),
-            exit_when_idle: AtomicBool::new(false),
+            sessions: Mutex::new(StateInner {
+                sessions: HashMap::new(),
+                exit_when_idle: false,
+            }),
             locks: Arc::new(ProfileLocks::default()),
         }
     }
@@ -131,7 +136,7 @@ impl LaunchState {
         self
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StateInner> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -143,12 +148,12 @@ impl LaunchState {
     /// [`Self::claim`] that also says what the profile is busy with when it is refused: the game is
     /// already starting or running (`Launching`), or its files are being prepared (`Preparing`).
     pub fn claim_checked(&self, id: &InstanceId) -> Result<(), Activity> {
-        let mut s = self.lock();
-        if s.contains_key(id.as_str()) {
+        let mut inner = self.lock();
+        if inner.sessions.contains_key(id.as_str()) {
             return Err(Activity::Launching);
         }
         self.locks.claim(id.as_str(), Activity::Launching)?;
-        s.insert(
+        inner.sessions.insert(
             id.to_string(),
             Entry {
                 phase: Phase::Launching,
@@ -159,45 +164,74 @@ impl LaunchState {
     }
 
     fn set_pid(&self, id: &InstanceId, pid: u32) {
-        if let Some(e) = self.lock().get_mut(id.as_str()) {
+        if let Some(e) = self.lock().sessions.get_mut(id.as_str()) {
             e.pid = Some(pid);
         }
     }
 
     pub(crate) fn mark_playing(&self, id: &InstanceId) {
-        if let Some(e) = self.lock().get_mut(id.as_str()) {
+        if let Some(e) = self.lock().sessions.get_mut(id.as_str()) {
             e.phase = Phase::Playing;
         }
     }
 
     pub fn release(&self, id: &InstanceId) {
-        self.lock().remove(id.as_str());
+        let mut inner = self.lock();
+        inner.sessions.remove(id.as_str());
         self.locks.release(id.as_str());
+    }
+
+    /// Atomically removes `id`, releases its profile lock, and returns `(exit_when_idle, another_running)`
+    /// under the same mutex as [`Self::close_requested`] so closing the window cannot race game exit.
+    pub fn finish_session(&self, id: &InstanceId) -> (bool, bool) {
+        let mut inner = self.lock();
+        inner.sessions.remove(id.as_str());
+        self.locks.release(id.as_str());
+        let closed = inner.exit_when_idle;
+        let another_running = inner.sessions.values().any(|e| e.pid.is_some());
+        (closed, another_running)
+    }
+
+    /// Called when the window is asked to close: under one lock, if any game process is alive, sets
+    /// `exit_when_idle = true` and returns `true` (hide instead of quitting); otherwise returns `false`.
+    pub fn close_requested(&self) -> bool {
+        let mut inner = self.lock();
+        if inner.sessions.values().any(|e| e.pid.is_some()) {
+            inner.exit_when_idle = true;
+            true
+        } else {
+            inner.exit_when_idle = false;
+            false
+        }
     }
 
     /// Is a game process alive (started and not yet exited)? Closing the window while this is
     /// true must not end Clade.
     pub fn has_live_game(&self) -> bool {
-        self.lock().values().any(|e| e.pid.is_some())
+        self.lock().sessions.values().any(|e| e.pid.is_some())
     }
 
     /// Is some game still *starting* (its credentials are being fetched or its process is coming up)?
     /// A game that is already running is not: that is `Phase::Playing`. "Start fresh" waits only for
     /// the first kind (see `vault_recovery`).
     pub fn any_starting(&self) -> bool {
-        self.lock().values().any(|e| e.phase == Phase::Launching)
+        self.lock()
+            .sessions
+            .values()
+            .any(|e| e.phase == Phase::Launching)
     }
 
     pub fn set_exit_when_idle(&self, on: bool) {
-        self.exit_when_idle.store(on, Ordering::SeqCst);
+        self.lock().exit_when_idle = on;
     }
 
     pub fn exit_when_idle(&self) -> bool {
-        self.exit_when_idle.load(Ordering::SeqCst)
+        self.lock().exit_when_idle
     }
 
     fn snapshot(&self) -> Vec<(String, &'static str)> {
         self.lock()
+            .sessions
             .iter()
             .map(|(id, e)| {
                 (
@@ -243,6 +277,8 @@ pub struct LaunchEnv<'a> {
     pub total_memory_mb: Option<u64>,
     /// The global game memory chosen in Settings (`None` = automatic). A profile's own setting wins.
     pub default_memory_mb: Option<u32>,
+    /// Live physical + commit memory availability (`None` in purely static planning tests).
+    pub memory_snapshot: Option<crate::system::MemorySnapshot>,
 }
 
 /// Everything that must be true before the game may start, ending in the ready-to-run command.
@@ -297,6 +333,7 @@ pub async fn plan_launch<T: Transport>(
         LaunchError::MissingVersion(_) | LaunchError::MissingFile(_) => {
             needs_repair("the version information")
         }
+        LaunchError::UnsupportedFolderPath => fail("unsupported_folder_path", e.to_string()),
         other => fail(
             "unsupported",
             format!("This profile can't be started: {other}."),
@@ -310,7 +347,7 @@ pub async fn plan_launch<T: Transport>(
         .map_err(|e| from_auth(&e, &meta.id))?;
 
     let dirs = store.dirs(id);
-    let temp = root.cache_dir().join("game-tmp").join(id.as_str());
+    let temp = root.game_tmp_dir().join(id.as_str());
     for d in [
         dirs.game_dir(),
         temp.clone(),
@@ -324,6 +361,28 @@ pub async fn plan_launch<T: Transport>(
             )
         })?;
     }
+    let effective_mb = crate::system::effective_memory_mb(
+        inst.memory_mb,
+        env.default_memory_mb,
+        total_memory_mb.or_else(|| env.memory_snapshot.map(|s| s.total_mb)),
+    );
+    let memory_mb = if env.memory_snapshot.is_some() {
+        let clamped = crate::system::launch_memory_mb(
+            inst.memory_mb,
+            env.default_memory_mb,
+            env.memory_snapshot,
+        );
+        if clamped < effective_mb {
+            tracing::info!(
+                effective_mb,
+                clamped_mb = clamped,
+                "clamped game heap to fit currently available memory"
+            );
+        }
+        clamped
+    } else {
+        effective_mb
+    };
     let command = build(&BuildInput {
         root,
         dirs: &dirs,
@@ -334,17 +393,14 @@ pub async fn plan_launch<T: Transport>(
             name: meta.username.clone(),
             access_token: token,
         },
-        memory_mb: crate::system::effective_memory_mb(
-            inst.memory_mb,
-            env.default_memory_mb,
-            total_memory_mb,
-        ),
+        memory_mb,
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,
     })
     .map_err(|e| match e {
         LaunchError::MissingFile(what) => needs_repair(&what),
+        LaunchError::UnsupportedFolderPath => fail("unsupported_folder_path", e.to_string()),
         other => fail(
             "unsupported",
             format!("This profile can't be started: {other}."),
@@ -465,15 +521,22 @@ async fn start(
             sys: &SystemEnv::from_process(),
             total_memory_mb: crate::system::total_memory_mb(),
             default_memory_mb: app.state::<SettingsState>().default_memory_mb(),
+            memory_snapshot: crate::system::memory_snapshot(),
         },
     )
     .await?;
+
+    let account_id = planned.account_id.clone();
+    let header = planned.command.redacted(&state.root);
+    let secrets = planned.command.secrets().to_vec();
 
     // Direct process creation (no shell). The child is not tied to this process: if Clade ends,
     // the game does not. Its console output goes to a launcher-owned file, not to pipes: a pipe's
     // reader dies with Clade and the game would then stop on its own a little later. If the file cannot
     // be created, the old piped output is used (the game then lives only as long as Clade does).
     let mut process = tokio::process::Command::from(planned.command.to_process());
+    // Zeroize our Rust-side copy of the access token in RAM immediately now that `Command` holds the OS argv.
+    drop(planned);
     process.stdin(std::process::Stdio::null());
     let output = match crate::game_session::open_output(&state.root, id) {
         Ok((file, path)) => match file.try_clone() {
@@ -501,6 +564,7 @@ async fn start(
     let child = process
         .spawn()
         .map_err(|e| fail("spawn_failed", format!("Java could not be started: {e}")))?;
+
     let pid = child.id().unwrap_or(0);
     state.set_pid(id, pid);
     tracing::info!(pid, "game process started");
@@ -508,14 +572,14 @@ async fn start(
     // The playtime session starts only now, after a successful spawn.
     let tracker =
         match PlaytimeStore::new(&state.root).begin_session(id, pid, now_unix(), Instant::now()) {
-            Ok(t) => Some(t),
+            Ok(t) => Some(t.with_unbiased_clock()),
             Err(e) => {
                 tracing::warn!(error = %e, "could not start the playtime session");
                 None
             }
         };
     let _ = accounts.update(|f| {
-        if let Some(a) = f.accounts.iter_mut().find(|a| a.id == planned.account_id) {
+        if let Some(a) = f.accounts.iter_mut().find(|a| a.id == account_id) {
             a.last_used_at = Some(now_unix());
         }
     });
@@ -526,10 +590,10 @@ async fn start(
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.hide();
         }
+        crate::glass::suspend(app);
+        crate::webview::suspend_hidden_window(app);
     }
 
-    let header = planned.command.redacted(&state.root);
-    let secrets = planned.command.secrets().to_vec();
     let (app, id, root) = (app.clone(), id.clone(), state.root.clone());
     tokio::spawn(async move {
         let playing_app = app.clone();
@@ -550,26 +614,161 @@ async fn start(
             move || {
                 playing_app.state::<LaunchState>().mark_playing(&playing_id);
                 emit(&playing_app, &playing_id, "playing", None);
+                if let Some(w) = playing_app.get_webview_window("main") {
+                    if !w.is_visible().unwrap_or(true) {
+                        crate::glass::suspend(&playing_app);
+                        crate::webview::suspend_hidden_window(&playing_app);
+                    } else if !w.is_focused().unwrap_or(true) {
+                        crate::webview::throttle_unfocused_window(&playing_app);
+                    }
+                }
             },
         )
         .await;
-        let _ = std::fs::remove_dir_all(root.cache_dir().join("game-tmp").join(id.as_str()));
+        for mut s in secrets {
+            zeroize::Zeroize::zeroize(&mut s);
+        }
+        let _ = crate::portable::fsutil::remove_dir_all_with_retry(
+            &root.game_tmp_dir().join(id.as_str()),
+        );
         if let Some(path) = &output {
-            let _ = std::fs::remove_file(path);
+            let _ = crate::portable::fsutil::remove_file_with_retry(path);
         }
         let ls = app.state::<LaunchState>();
-        ls.release(&id);
+        let (closed, another_running) = ls.finish_session(&id);
         tracing::info!(code = ?outcome.exit.code, kind = ?outcome.exit.kind, "game process ended");
+        crate::webview::resume_window(&app);
         emit(&app, &id, "stopped", Some((&outcome.exit).into()));
         // What happens to the window now that the game is over.
-        apply_window_plan(
-            &app,
-            outcome.exit.kind,
-            ls.exit_when_idle(),
-            ls.has_live_game(),
-        );
+        apply_window_plan(&app, outcome.exit.kind, closed, another_running);
     });
     Ok(())
+}
+
+fn read_output_tail(path: &std::path::Path) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(len) = f.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    let skip = len.saturating_sub(64 * 1024);
+    if skip > 0 && f.seek(SeekFrom::Start(skip)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.take(64 * 1024).read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .rev()
+        .take(250)
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// Reattaches any live game processes recorded in `data/playtime-active/` at startup so the UI
+/// marks them Playing, their playtime keeps ticking, and their eventual exit is handled cleanly.
+pub fn reattach_live_sessions(app: &AppHandle) {
+    let state = app.state::<LaunchState>();
+    let sessions = match PlaytimeStore::new(&state.root).live_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not inspect live playtime sessions");
+            return;
+        }
+    };
+    for (journal_path, session) in sessions {
+        let id = session.instance_id.clone();
+        let pid = session.pid;
+        let started_at = session.started_at;
+        if !state.claim(&id) {
+            continue;
+        }
+        state.set_pid(&id, pid);
+        state.mark_playing(&id);
+        emit(app, &id, "playing", None);
+        tracing::info!(pid, instance = %id, "reattached live game session");
+
+        let app = app.clone();
+        let root = state.root.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut tracker =
+                crate::playtime::SessionTracker::resume(journal_path, session, Instant::now())
+                    .with_unbiased_clock();
+
+            let raw_exit = if let Some((proc_handle, _)) =
+                crate::playtime::LiveProcess::open_matching(pid, started_at)
+            {
+                let mut wait_task =
+                    tokio::task::spawn_blocking(move || proc_handle.wait_blocking());
+                let mut heartbeat = tokio::time::interval(HEARTBEAT);
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                heartbeat.tick().await;
+                loop {
+                    tokio::select! {
+                        res = &mut wait_task => break res.ok().flatten(),
+                        _ = heartbeat.tick() => {
+                            if let Err(e) = tracker.tick(now_unix(), Instant::now()) {
+                                tracing::warn!(error = %e, "playtime heartbeat failed");
+                            }
+                        }
+                    }
+                }
+            } else {
+                Some(0)
+            };
+
+            let banked_secs =
+                match tracker.finish(&PlaytimeStore::new(&root), now_unix(), Instant::now()) {
+                    Ok(b) => b.seconds,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not bank reattached playtime session");
+                        0
+                    }
+                };
+
+            let out_path = crate::game_session::output_dir(&root).join(format!("{id}.out"));
+            let tail_lines = read_output_tail(&out_path);
+            #[cfg(windows)]
+            let status = raw_exit.map(|c| {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(c)
+            });
+            #[cfg(not(windows))]
+            let status: Option<std::process::ExitStatus> = {
+                let _ = raw_exit;
+                None
+            };
+            let mut exit = crate::game_session::summarize(
+                status,
+                Duration::from_secs(banked_secs.max(15)),
+                &tail_lines,
+            );
+            exit.seconds = banked_secs;
+
+            let _ = crate::portable::fsutil::remove_dir_all_with_retry(
+                &root.game_tmp_dir().join(id.as_str()),
+            );
+            let _ = crate::portable::fsutil::remove_file_with_retry(&out_path);
+
+            let ls = app.state::<LaunchState>();
+            let (closed, another_running) = ls.finish_session(&id);
+            tracing::info!(
+                code = ?exit.code,
+                kind = ?exit.kind,
+                "reattached game process ended"
+            );
+            crate::webview::resume_window(&app);
+            emit(&app, &id, "stopped", Some((&exit).into()));
+            apply_window_plan(&app, exit.kind, closed, another_running);
+        });
+    }
 }
 
 /// What to do with Clade's window when a game has ended.
@@ -618,23 +817,29 @@ pub fn window_plan(
 }
 
 fn reveal(app: &AppHandle) {
+    crate::webview::resume_window(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+    crate::glass::resume(app);
 }
 
 fn apply_window_plan(app: &AppHandle, kind: ExitKind, closed: bool, another_running: bool) {
     let visible = app
         .get_webview_window("main")
-        .is_none_or(|w| w.is_visible().unwrap_or(true));
+        .is_some_and(|w| w.is_visible().unwrap_or(false));
     let stay_hidden = app
         .state::<SettingsState>()
         .behavior()
         .stays_hidden_on_exit();
     match window_plan(kind, closed, another_running, visible, stay_hidden) {
-        WindowPlan::Leave => {}
+        WindowPlan::Leave => {
+            if !visible && another_running {
+                crate::webview::suspend_hidden_window(app);
+            }
+        }
         WindowPlan::Reveal => reveal(app),
         WindowPlan::Quit => app.exit(0),
     }

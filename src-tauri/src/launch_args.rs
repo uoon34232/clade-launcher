@@ -40,8 +40,13 @@ use crate::portable::PortableRoot;
 use crate::runtimes::ManagedJava;
 
 pub const LAUNCHER_NAME: &str = "Clade";
-/// Windows refuses a command line longer than 32,767 characters.
-const MAX_COMMAND_CHARS: usize = 30_000;
+/// Above this UTF-16 length, `-cp` entries under the Clade folder are rewritten relative to `cwd`.
+const COMPACT_CP_CHARS: usize = 20_000;
+/// Above this UTF-16 length on Java 9+, `-cp` spills to `instances/<id>/.clade-jvm.args`.
+const MAX_COMMAND_CHARS: usize = 28_000;
+/// Windows refuses a `CreateProcessW` command line longer than 32,767 `WCHAR`s; keep safety margin.
+const HARD_MAX_COMMAND_CHARS: usize = 30_000;
+const MAX_VERSION_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHAIN: usize = 5;
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +61,10 @@ pub enum LaunchError {
     MissingFile(String),
     #[error("the game's command line would be too long for Windows")]
     TooLong,
+    #[error(
+        "the Clade folder path cannot contain ';' because Java uses ';' to separate libraries"
+    )]
+    UnsupportedFolderPath,
     #[error("a path is not valid Unicode")]
     NotUtf8,
 }
@@ -103,9 +112,26 @@ fn load_chain(root: &PortableRoot, id: &str) -> Result<Vec<VersionPlan>, LaunchE
                 "the inheritance chain is too deep or loops".into(),
             ));
         }
-        let bytes = fs::read(version_file(root, &cur))
-            .map_err(|_| LaunchError::MissingVersion(cur.clone()))?;
+        crate::versions::VersionId::new(&cur)
+            .map_err(|e| LaunchError::BadVersion(e.to_string()))?;
+        let vfile = version_file(root, &cur);
+        crate::portable::fsutil::reject_links_between(root.path(), &vfile)
+            .map_err(|e| LaunchError::BadVersion(e.to_string()))?;
+        let bytes =
+            crate::portable::fsutil::read_bounded(&vfile, MAX_VERSION_JSON_BYTES).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LaunchError::MissingVersion(cur.clone())
+                } else {
+                    LaunchError::BadVersion(e.to_string())
+                }
+            })?;
         let plan = parse_version(&bytes, &WINDOWS_X64)?;
+        if plan.id != cur {
+            return Err(LaunchError::BadVersion(format!(
+                "version metadata for {cur} declares id {}",
+                plan.id
+            )));
+        }
         next = plan.inherits_from.clone();
         chain.push(plan);
     }
@@ -146,15 +172,24 @@ pub fn resolve(root: &PortableRoot, launch_id: &str) -> Result<Resolved, LaunchE
         .collect();
 
     // Arguments: the base's, then each child's on top (root to launched).
+    // Legacy `minecraftArguments` replaces prior game arguments (Forge 1.7.10 / early 1.12.2),
+    // while structured `arguments.game` appends on top (Forge 1.12.2 2851+, whose child JSON
+    // carries `arguments.game: ["--tweakClass", "..."]` without `minecraftArguments`).
     let (mut jvm, mut game) = (Vec::new(), Vec::new());
     for plan in chain.iter().rev() {
+        if let Some(s) = &plan.minecraft_arguments {
+            game = s
+                .split_whitespace()
+                .map(|t| Arg::Plain(t.to_owned()))
+                .collect();
+        }
         if let Some(a) = &plan.arguments {
             jvm.extend(a.jvm.iter().cloned());
             game.extend(a.game.iter().cloned());
         }
     }
     let legacy_args = chain.iter().find_map(|p| p.minecraft_arguments.clone());
-    if legacy_args.is_none() && game.is_empty() {
+    if game.is_empty() {
         return Err(LaunchError::Incomplete("no game arguments"));
     }
 
@@ -200,6 +235,17 @@ pub struct GameCommand {
     secrets: Vec<String>,
 }
 
+impl Drop for GameCommand {
+    fn drop(&mut self) {
+        for a in &mut self.args {
+            zeroize::Zeroize::zeroize(a);
+        }
+        for s in &mut self.secrets {
+            zeroize::Zeroize::zeroize(s);
+        }
+    }
+}
+
 impl fmt::Debug for GameCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -219,11 +265,11 @@ impl GameCommand {
     /// The command line as text that is safe to log: secrets replaced, and the Clade folder
     /// shown as `<clade>` so the log does not depend on where the folder lives.
     pub fn redacted(&self, root: &PortableRoot) -> String {
+        let rootp = root.path().to_string_lossy().into_owned();
+        let prog = self.program.to_string_lossy().into_owned();
         let mut parts = Vec::with_capacity(self.args.len() + 1);
         let mut hide_next = false;
-        for a in
-            std::iter::once(&self.program.to_string_lossy().into_owned()).chain(self.args.iter())
-        {
+        for a in std::iter::once(&prog).chain(self.args.iter()) {
             let mut text = a.clone();
             if hide_next {
                 text = "<redacted>".into();
@@ -236,8 +282,10 @@ impl GameCommand {
                     text = text.replace(s.as_str(), "<redacted>");
                 }
             }
-            let rootp = root.path().to_string_lossy().into_owned();
-            text = text.replace(&rootp, "<clade>");
+            text = text
+                .replace(&rootp, "<clade>")
+                .replace(r"..\..\..", "<clade>")
+                .replace("../../..", "<clade>");
             parts.push(if text.contains(' ') || text.is_empty() {
                 format!("\"{text}\"")
             } else {
@@ -263,6 +311,58 @@ impl GameCommand {
         }
         c
     }
+}
+
+fn quoted_utf16_arg_len<I>(units: I, force_quotes: bool) -> usize
+where
+    I: Iterator<Item = u16> + Clone,
+{
+    let mut is_empty = true;
+    let mut needs_quotes = force_quotes;
+    for c in units.clone() {
+        is_empty = false;
+        if c == u16::from(b' ') || c == u16::from(b'\t') || c == u16::from(b'"') {
+            needs_quotes = true;
+            break;
+        }
+    }
+    let quote = needs_quotes || is_empty;
+    let mut len = usize::from(quote);
+    let mut backslashes = 0usize;
+    for c in units {
+        if c == u16::from(b'\\') {
+            backslashes += 1;
+        } else {
+            if c == u16::from(b'"') {
+                len += backslashes + 1;
+            }
+            backslashes = 0;
+        }
+        len += 1;
+    }
+    if quote {
+        len += backslashes + 1;
+    }
+    len
+}
+
+/// Exact UTF-16 `WCHAR` length (including quotes, escaped backslashes/quotes, separating spaces,
+/// and terminating `NUL`) of the Windows CRT command line `CreateProcessW` receives.
+pub fn utf16_command_line_len(program: &Path, args: &[String]) -> usize {
+    #[cfg(windows)]
+    let mut total = {
+        use std::os::windows::ffi::OsStrExt;
+        quoted_utf16_arg_len(program.as_os_str().encode_wide(), true)
+    };
+    #[cfg(not(windows))]
+    let mut total = {
+        let s = program.to_string_lossy();
+        quoted_utf16_arg_len(s.encode_utf16(), true)
+    };
+    for arg in args {
+        total += 1 + quoted_utf16_arg_len(arg.encode_utf16(), false);
+    }
+    total + 1
 }
 
 fn utf8(p: &Path) -> Result<String, LaunchError> {
@@ -348,7 +448,85 @@ fn default_jvm() -> Vec<Arg> {
     .collect()
 }
 
+fn compact_classpath_relative(
+    jvm_args: &mut [String],
+    root: &Path,
+    game_dir: &Path,
+) -> Result<(), LaunchError> {
+    let Some(cp_idx) = (0..jvm_args.len().saturating_sub(1))
+        .find(|&idx| jvm_args[idx] == "-cp" || jvm_args[idx] == "-classpath")
+    else {
+        return Ok(());
+    };
+    let Some(rel_game) = crate::portable::fsutil::strip_prefix_portable(game_dir, root) else {
+        return Ok(());
+    };
+    let depth = rel_game
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    if depth == 0 {
+        return Ok(());
+    }
+    let mut up = PathBuf::new();
+    for _ in 0..depth {
+        up.push("..");
+    }
+    let mut rewritten = Vec::new();
+    for entry in jvm_args[cp_idx + 1].split(';') {
+        if let Some(rel) = crate::portable::fsutil::strip_prefix_portable(Path::new(entry), root) {
+            rewritten.push(utf8(&up.join(rel))?);
+        } else {
+            rewritten.push(entry.to_owned());
+        }
+    }
+    jvm_args[cp_idx + 1] = rewritten.join(";");
+    Ok(())
+}
+
+fn maybe_spill_classpath_argfile(
+    args: &mut Vec<String>,
+    main_idx: usize,
+    root: &Path,
+    instance_root: &Path,
+    token: &str,
+) -> Result<(), LaunchError> {
+    let Some(cp_idx) = (0..main_idx.saturating_sub(1))
+        .find(|&idx| args[idx] == "-cp" || args[idx] == "-classpath")
+    else {
+        return Ok(());
+    };
+    let cp_val = &args[cp_idx + 1];
+    // Java argfiles are read in the OS ANSI codepage, never UTF-8, and must never hold credentials.
+    if !cp_val.is_ascii() || (!token.is_empty() && cp_val.contains(token)) {
+        return Ok(());
+    }
+    let mut escaped = String::with_capacity(cp_val.len() + 64);
+    for ch in cp_val.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            c => escaped.push(c),
+        }
+    }
+    let content = format!("-cp\n\"{escaped}\"\n");
+    let argfile = instance_root.join(".clade-jvm.args");
+    crate::portable::fsutil::reject_links_between(root, &argfile)
+        .map_err(|e| LaunchError::BadVersion(e.to_string()))?;
+    if crate::portable::fsutil::atomic_write(&argfile, content.as_bytes()).is_ok() {
+        args.splice(cp_idx..=cp_idx + 1, ["@../.clade-jvm.args".to_owned()]);
+    }
+    Ok(())
+}
+
 pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
+    if utf8(i.root.path())?.contains(';')
+        || utf8(i.dirs.root())?.contains(';')
+        || utf8(i.temp_dir)?.contains(';')
+    {
+        return Err(LaunchError::UnsupportedFolderPath);
+    }
+
     let r = i.resolved;
     let libdir = i.root.libraries_dir();
 
@@ -402,13 +580,13 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
     }
 
     let uuid = i.identity.uuid.replace('-', "").to_ascii_lowercase();
-    let token = i.identity.access_token.expose().to_owned();
+    let mut token = zeroize::Zeroizing::new(i.identity.access_token.expose().to_owned());
     let mut vars: BTreeMap<&str, String> = BTreeMap::new();
     for (k, v) in [
         ("auth_player_name", i.identity.name.clone()),
         ("auth_uuid", uuid.clone()),
-        ("auth_access_token", token.clone()),
-        ("auth_session", format!("token:{token}:{uuid}")),
+        ("auth_access_token", (*token).clone()),
+        ("auth_session", format!("token:{}:{}", *token, uuid)),
         ("user_type", "msa".to_owned()),
         ("user_properties", "{}".to_owned()),
         // Optional telemetry identifiers the game accepts empty.
@@ -453,9 +631,45 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
 
     let mut unknown = Vec::new();
     let home = i.dirs.home_dir();
-    let mut args: Vec<String> = vec![format!("-Xmx{}M", i.memory_mb)];
+    let mut args: Vec<String> = vec![
+        format!("-Xmx{}M", i.memory_mb),
+        "-Dfile.encoding=UTF-8".into(),
+        "-Dsun.stdout.encoding=UTF-8".into(),
+        "-Dsun.stderr.encoding=UTF-8".into(),
+    ];
+    if i.java.java_major >= 19 {
+        args.push("-Dstdout.encoding=UTF-8".into());
+        args.push("-Dstderr.encoding=UTF-8".into());
+    }
+    args.push("-Dlog4j2.formatMsgNoLookups=true".into());
     if i.java.java_major <= 8 {
-        args.push("-XX:+UseG1GC".into()); // Java 8's default collector is the throughput one
+        args.push("-XX:-CreateMinidumpOnCrash".into());
+    } else {
+        args.push("-XX:-CreateCoredumpOnCrash".into());
+    }
+    let region_mb = if i.memory_mb <= 2048 { 16 } else { 32 };
+    let direct_mb = (i.memory_mb / 2).clamp(512, 2048);
+    args.extend([
+        "-XX:+UnlockExperimentalVMOptions".into(),
+        "-XX:+UseG1GC".into(),
+        "-XX:G1NewSizePercent=20".into(),
+        "-XX:G1ReservePercent=20".into(),
+        "-XX:MaxGCPauseMillis=50".into(),
+        format!("-XX:G1HeapRegionSize={region_mb}M"),
+        format!("-XX:MaxDirectMemorySize={direct_mb}M"),
+    ]);
+    if i.java.java_major >= 12 {
+        args.push("-XX:G1PeriodicGCInterval=60000".into());
+    }
+    if i.java.java_major <= 8
+        && !jvm_template
+            .iter()
+            .any(|a| a.starts_with("-XX:HeapDumpPath="))
+    {
+        args.push(
+            "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
+                .into(),
+        );
     }
     args.push(format!("-Djava.io.tmpdir={}", utf8(i.temp_dir)?));
     args.push(format!("-Duser.home={}", utf8(&home)?));
@@ -472,26 +686,57 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         let mut v = vars.clone();
         v.insert("path", utf8(p)?);
         args.push(substitute(template, &v, &mut unknown));
+        for val in v.values_mut() {
+            zeroize::Zeroize::zeroize(val);
+        }
     }
     args.extend(i.extra_jvm_args.iter().cloned());
+    let main_idx = args.len();
     args.push(r.main_class.clone());
     args.extend(
         game_template
             .iter()
             .map(|a| substitute(a, &vars, &mut unknown)),
     );
+    for val in vars.values_mut() {
+        zeroize::Zeroize::zeroize(val);
+    }
 
-    let total: usize = args.iter().map(|a| a.len() + 3).sum::<usize>() + utf8(&i.java.exe)?.len();
-    if total > MAX_COMMAND_CHARS {
+    if utf16_command_line_len(&i.java.exe, &args) > COMPACT_CP_CHARS {
+        compact_classpath_relative(&mut args[..main_idx], i.root.path(), &game_dir)?;
+    }
+    if utf16_command_line_len(&i.java.exe, &args) > MAX_COMMAND_CHARS && i.java.java_major >= 9 {
+        maybe_spill_classpath_argfile(&mut args, main_idx, i.root.path(), i.dirs.root(), &token)?;
+    }
+    if utf16_command_line_len(&i.java.exe, &args) > HARD_MAX_COMMAND_CHARS {
+        for a in &mut args {
+            zeroize::Zeroize::zeroize(a);
+        }
         return Err(LaunchError::TooLong);
     }
 
     let (sys_root, tmp, userprofile) = (utf8(&i.sys.system_root)?, utf8(i.temp_dir)?, utf8(&home)?);
+    let sys_drive = if sys_root
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && sys_root.as_bytes().get(1) == Some(&b':')
+    {
+        &sys_root[..2]
+    } else {
+        "C:"
+    };
     let mut env = BTreeMap::new();
     for (k, v) in [
+        ("SystemDrive", sys_drive.to_owned()),
         ("SystemRoot", sys_root.clone()),
         ("windir", sys_root.clone()),
-        ("PATH", format!(r"{sys_root}\System32")),
+        (
+            "PATH",
+            format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
+        ),
+        ("COMSPEC", format!(r"{sys_root}\System32\cmd.exe")),
+        ("PATHEXT", ".COM;.EXE;.BAT;.CMD".to_owned()),
         ("TEMP", tmp.clone()),
         ("TMP", tmp.clone()),
         ("TMPDIR", tmp),
@@ -508,7 +753,7 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         args,
         cwd: game_dir,
         env,
-        secrets: vec![token],
+        secrets: vec![std::mem::take(&mut *token)],
     })
 }
 

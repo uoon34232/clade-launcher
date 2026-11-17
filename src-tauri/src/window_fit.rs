@@ -147,6 +147,47 @@ mod tests {
     }
 
     #[test]
+    fn multi_dpi_negative_coordinate_secondary_monitor_uses_physical_placement() {
+        // Secondary 1440p monitor at 125% DPI to the left of a 200%-DPI primary monitor:
+        // physical coordinates stay directly in the secondary monitor's physical work area
+        // without dividing by scale (which would misplace the window under primary-monitor DPI).
+        let left_125 = WorkArea {
+            x: -2560,
+            y: -120,
+            width: 2560,
+            height: 1392,
+            scale: 1.25,
+        };
+        let p = fit(left_125);
+        assert_eq!((p.width, p.height), DEFAULT_SIZE);
+        assert_eq!(p.x as i32, -2080);
+        assert_eq!(p.y as i32, 126);
+        fits(left_125, p);
+
+        // Secondary 1080p monitor at 150% DPI positioned above and to the left (both x and y < 0).
+        let top_left_150 = WorkArea {
+            x: -1920,
+            y: -1080,
+            width: 1920,
+            height: 1032,
+            scale: 1.5,
+        };
+        let p2 = fit(top_left_150);
+        assert!(p2.x < 0.0 && p2.y < 0.0, "{p2:?}");
+        assert!(
+            (p2.x as i32) >= top_left_150.x
+                && (p2.x as i32) + (p2.width * top_left_150.scale) as i32
+                    <= top_left_150.x + top_left_150.width as i32
+        );
+        assert!(
+            (p2.y as i32) >= top_left_150.y
+                && (p2.y as i32) + (p2.height * top_left_150.scale) as i32
+                    <= top_left_150.y + top_left_150.height as i32
+        );
+        fits(top_left_150, p2);
+    }
+
+    #[test]
     fn nonsense_scale_factors_are_treated_as_one() {
         for s in [0.0, -2.0, f64::NAN, f64::INFINITY] {
             assert_eq!(fit(area(1920, 1032, s)), fit(area(1920, 1032, 1.0)));

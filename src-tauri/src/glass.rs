@@ -4,25 +4,29 @@
 //! or fails, Clade silently stays on the opaque warm treatment it has always had.
 //!
 //! **Technique (Windows 11):** the window keeps its normal, opaque WebView background. Turning
-//! glass on asks the desktop window manager for its documented *Acrylic* system backdrop
-//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW`, forcing the
+//! glass on asks the desktop window manager for its documented *Mica* system backdrop
+//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing the
 //! light variant with `DWMWA_USE_IMMERSIVE_DARK_MODE = 0`) and makes the WebView's own background
 //! transparent (`set_background_color` with alpha 0), so the page's translucent surfaces sit over
-//! the live material. Turning it off clears the backdrop and restores the opaque background, so
-//! nothing of the desktop can show through. Both directions are applied to the running window.
+//! the cached desktop material without per-frame live-blur GPU overhead. Turning it off clears the
+//! backdrop and restores the opaque background, so nothing of the desktop can show through. Both
+//! directions are applied to the running window, deduplicated so repeated focus events never poke
+//! DWM when nothing changed, and suspended while the window is hidden.
 //!
 //! **What decides it** (`wanted`): High Contrast always wins and means opaque. Otherwise the
 //! person's choice (`ui.transparency`): `off` is opaque, `on` asks for glass, and `system` follows
-//! the Windows "Transparency effects" preference, which is read through the documented
+//! the Windows "Transparency effects" preference, which is read once and watched on the dedicated
+//! `glass-watch` thread through the documented
 //! `Windows.UI.ViewManagement.UISettings.AdvancedEffectsEnabled` (a read-only OS preference API;
 //! nothing is ever written to the registry or to Windows settings).
 //!
-//! **Limit, stated plainly:** Windows itself replaces Acrylic with a solid colour while its
+//! **Limit, stated plainly:** Windows itself replaces Mica with a solid colour while its
 //! "Transparency effects" switch is off. `on` therefore still gives the person's explicit
 //! request, but the material behind the page is then Windows' solid fallback (`live = false`), and
 //! the page uses its denser surfaces. Clade cannot make Windows draw live transparency against the
 //! person's system setting without capturing the screen, which it never does.
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -98,15 +102,25 @@ pub fn resolve(mode: &str, env: Environment, backdrop: &dyn Backdrop) -> GlassSt
     }
 }
 
+const EFFECTS_UNKNOWN: u8 = 0;
+const EFFECTS_OFF: u8 = 1;
+const EFFECTS_ON: u8 = 2;
+
 /// The resolved state, shared with the interface.
 pub struct GlassState {
     status: Mutex<GlassStatus>,
+    system_effects: AtomicU8,
+    applied_backdrop: Mutex<Option<bool>>,
+    suspended: AtomicBool,
 }
 
 impl GlassState {
     pub fn new() -> Self {
         Self {
             status: Mutex::new(GlassStatus::OPAQUE),
+            system_effects: AtomicU8::new(EFFECTS_UNKNOWN),
+            applied_backdrop: Mutex::new(None),
+            suspended: AtomicBool::new(false),
         }
     }
 
@@ -121,6 +135,79 @@ impl GlassState {
         *guard = next;
         changed
     }
+
+    pub(crate) fn set_system_effects(&self, enabled: Option<bool>) {
+        let encoded = match enabled {
+            None => EFFECTS_UNKNOWN,
+            Some(false) => EFFECTS_OFF,
+            Some(true) => EFFECTS_ON,
+        };
+        self.system_effects.store(encoded, Ordering::Release);
+    }
+
+    pub(crate) fn system_effects(&self) -> Option<bool> {
+        match self.system_effects.load(Ordering::Acquire) {
+            EFFECTS_OFF => Some(false),
+            EFFECTS_ON => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Resolves and applies the backdrop if the window is active, deduplicating redundant native
+    /// DWM calls. Returns `Some(status)` only when the UI-facing status changed.
+    fn apply_refresh(
+        &self,
+        mode: &str,
+        high_contrast: bool,
+        window_hidden: bool,
+        backdrop: &dyn Backdrop,
+    ) -> Option<GlassStatus> {
+        if self.suspended.load(Ordering::Acquire) || window_hidden {
+            // Never turn or keep the DWM backdrop on while the window is hidden or suspended.
+            if *self
+                .applied_backdrop
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                == Some(true)
+            {
+                let _ = (DedupBackdrop {
+                    state: self,
+                    inner: backdrop,
+                })
+                .set(false);
+            }
+            return None;
+        }
+        let env = Environment {
+            system_effects: self.system_effects(),
+            high_contrast,
+        };
+        let status = resolve(
+            mode,
+            env,
+            &DedupBackdrop {
+                state: self,
+                inner: backdrop,
+            },
+        );
+        self.replace(status).then_some(status)
+    }
+
+    fn apply_suspend(&self, backdrop: &dyn Backdrop) {
+        self.suspended.store(true, Ordering::Release);
+        let mut applied = self
+            .applied_backdrop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *applied != Some(false) {
+            let _ = backdrop.set(false);
+            *applied = Some(false);
+        }
+    }
+
+    fn clear_suspended(&self) {
+        self.suspended.store(false, Ordering::Release);
+    }
 }
 
 impl Default for GlassState {
@@ -129,29 +216,75 @@ impl Default for GlassState {
     }
 }
 
+struct DedupBackdrop<'a> {
+    state: &'a GlassState,
+    inner: &'a dyn Backdrop,
+}
+
+impl Backdrop for DedupBackdrop<'_> {
+    fn set(&self, on: bool) -> Result<(), String> {
+        let mut applied = self
+            .state
+            .applied_backdrop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *applied == Some(on) {
+            return Ok(());
+        }
+        match self.inner.set(on) {
+            Ok(()) => {
+                *applied = Some(on);
+                Ok(())
+            }
+            Err(e) => {
+                *applied = if on { None } else { Some(false) };
+                Err(e)
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub fn get_glass_status(state: State<'_, GlassState>) -> GlassStatus {
     state.get()
 }
 
-/// Re-reads the choice and the PC, applies the material to the window and tells the interface when
-/// the result changed. Safe to call at any time and from any thread.
+/// Re-reads the choice and the cached OS preferences, applies the material to the window when it
+/// differs from what is already applied, and tells the interface when the resolved status changed.
+/// Safe to call at any time and from any thread; never spawns threads.
 pub fn refresh(app: &AppHandle) {
     let mode = app
         .state::<crate::ui_settings::SettingsState>()
         .transparency();
-    let env = Environment {
-        system_effects: crate::system::transparency_effects_enabled(),
-        high_contrast: crate::system::high_contrast(),
-    };
-    let status = resolve(&mode, env, &WindowBackdrop { app });
+    let window_hidden = app
+        .get_webview_window("main")
+        .is_some_and(|w| matches!(w.is_visible(), Ok(false)));
     let state = app.state::<GlassState>();
-    if state.replace(status) {
+    if let Some(status) = state.apply_refresh(
+        &mode,
+        crate::system::high_contrast(),
+        window_hidden,
+        &WindowBackdrop { app },
+    ) {
         let _ = app.emit(STATUS_EVENT, status);
     }
 }
 
-/// Calls `refresh` whenever Windows reports that its transparency preference changed.
+/// Clears the native DWM backdrop so Windows stops compositing Mica while the launcher window is
+/// hidden, without sending a spurious status event to the suspended frontend.
+pub fn suspend(app: &AppHandle) {
+    app.state::<GlassState>()
+        .apply_suspend(&WindowBackdrop { app });
+}
+
+/// Re-enables backdrop updates and refreshes the window material when the launcher window returns.
+pub fn resume(app: &AppHandle) {
+    app.state::<GlassState>().clear_suspended();
+    refresh(app);
+}
+
+/// Reads the initial Windows transparency preference and calls `refresh` whenever Windows reports
+/// that it changed.
 #[cfg(windows)]
 pub fn watch_system_preference(app: AppHandle) {
     use windows::core::IInspectable;
@@ -169,8 +302,18 @@ pub fn watch_system_preference(app: AppHandle) {
             let Ok(settings) = UISettings::new() else {
                 return;
             };
-            let handler = TypedEventHandler::<UISettings, IInspectable>::new(move |_, _| {
-                refresh(&app);
+            app.state::<GlassState>()
+                .set_system_effects(settings.AdvancedEffectsEnabled().ok());
+            refresh(&app);
+
+            let handler_app = app.clone();
+            let handler = TypedEventHandler::<UISettings, IInspectable>::new(move |sender, _| {
+                if let Some(u) = sender.as_ref() {
+                    handler_app
+                        .state::<GlassState>()
+                        .set_system_effects(u.AdvancedEffectsEnabled().ok());
+                }
+                refresh(&handler_app);
                 Ok(())
             });
             if settings.AdvancedEffectsEnabledChanged(&handler).is_err() {
@@ -222,7 +365,7 @@ impl Backdrop for WindowBackdrop<'_> {
 #[cfg(windows)]
 mod native {
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE,
         DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
     use windows_sys::Win32::UI::Controls::MARGINS;
@@ -266,17 +409,18 @@ mod native {
         }
     }
 
-    /// Windows 11 22H2 or newer understands the backdrop attribute; older versions refuse it, which
-    /// is reported as an error and leaves Clade opaque.
+    /// Windows 11 22H2 or newer understands the Mica backdrop attribute (`DWMSBT_MAINWINDOW`);
+    /// older versions refuse it, which is reported as an error and leaves Clade opaque.
     pub fn set_backdrop(hwnd: isize, on: bool) -> Result<(), String> {
         if on {
             // Clade is a light, warm interface: ask for the light variant of the material.
             set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 0)?;
             extend_frame(hwnd, true)?;
-            set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
+            set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)
         } else {
-            set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)?;
-            extend_frame(hwnd, false)
+            let attr = set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE);
+            let frame = extend_frame(hwnd, false);
+            frame.and(attr)
         }
     }
 }
@@ -420,5 +564,72 @@ mod tests {
         .unwrap();
         assert_eq!(json["active"], true);
         assert_eq!(json["live"], false);
+    }
+
+    #[test]
+    fn system_effects_preference_is_cached_atomically() {
+        let s = GlassState::new();
+        assert_eq!(s.system_effects(), None);
+        s.set_system_effects(Some(true));
+        assert_eq!(s.system_effects(), Some(true));
+        s.set_system_effects(Some(false));
+        assert_eq!(s.system_effects(), Some(false));
+        s.set_system_effects(None);
+        assert_eq!(s.system_effects(), None);
+    }
+
+    #[test]
+    fn backdrop_calls_are_deduplicated_and_suspended_windows_never_reapply_mica() {
+        let s = GlassState::new();
+        s.set_system_effects(Some(true));
+        let b = Recorder::new(false);
+
+        // Initial refresh turns Mica on once; repeated refreshes (e.g. Focused(true)) skip DWM.
+        assert_eq!(
+            s.apply_refresh("system", false, false, &b),
+            Some(GlassStatus {
+                active: true,
+                live: true
+            })
+        );
+        assert_eq!(s.apply_refresh("system", false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [true]);
+
+        // Suspending clears the native DWM backdrop without emitting a spurious OPAQUE event,
+        // and refreshes while suspended or hidden never turn Mica back on.
+        s.apply_suspend(&b);
+        assert_eq!(*b.calls.borrow(), [true, false]);
+        assert_eq!(
+            s.get(),
+            GlassStatus {
+                active: true,
+                live: true
+            }
+        );
+        assert_eq!(s.apply_refresh("on", false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [true, false]);
+
+        // Resuming while the window is still hidden keeps the backdrop off; once visible, Mica is
+        // re-applied cleanly.
+        s.clear_suspended();
+        assert_eq!(s.apply_refresh("system", false, true, &b), None);
+        assert_eq!(*b.calls.borrow(), [true, false]);
+
+        assert_eq!(s.apply_refresh("system", false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [true, false, true]);
+    }
+
+    #[test]
+    fn failed_backdrop_rollback_marks_applied_false_and_avoids_redundant_clear_calls() {
+        let s = GlassState::new();
+        s.set_system_effects(Some(true));
+        let b = Recorder::new(true);
+
+        assert_eq!(s.apply_refresh("on", false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [true, false]);
+
+        // Subsequent off refreshes see `applied_backdrop == Some(false)` and skip DWM.
+        assert_eq!(s.apply_refresh("off", false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [true, false]);
     }
 }

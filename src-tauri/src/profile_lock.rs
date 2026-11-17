@@ -24,6 +24,10 @@ pub struct ProfileLocks {
 }
 
 impl ProfileLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     fn map(&self) -> MutexGuard<'_, HashMap<String, Activity>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }

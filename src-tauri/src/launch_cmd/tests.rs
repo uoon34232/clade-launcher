@@ -113,6 +113,7 @@ async fn plan(
             sys: &sys,
             total_memory_mb: Some(16_384),
             default_memory_mb: None,
+            memory_snapshot: None,
         },
     )
     .await
@@ -165,11 +166,15 @@ async fn a_prepared_modern_vanilla_profile_plans_a_launch_for_the_selected_accou
             || args.len() > 5
     );
     assert!(t.calls().is_empty(), "fresh credentials need no network");
-    // The folders the game needs exist, inside the Clade folder.
+    // The folders the game needs exist, inside the Clade folder, with isolated cache/tmp/game/<id>.
     for k in ["TEMP", "APPDATA", "USERPROFILE"] {
         let dir = std::path::Path::new(&p.command.env[k]);
         assert!(dir.is_dir() && dir.starts_with(w.root.path()), "{k}");
     }
+    assert_eq!(
+        std::path::Path::new(&p.command.env["TEMP"]),
+        w.root.game_tmp_dir().join(id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -696,4 +701,123 @@ fn stay_hidden_can_only_ever_quit_after_a_clean_exit() {
             );
         }
     }
+}
+
+#[test]
+fn close_requested_and_finish_session_are_atomic_and_eliminate_the_zombie_race() {
+    let d = tempfile::tempdir().unwrap();
+    let s = LaunchState::new(PortableRoot::at(d.path()));
+    let a = InstanceId::new("alpha").unwrap();
+    let b = InstanceId::new("bravo").unwrap();
+
+    // No game or still before PID exists: CloseRequested lets Tauri close immediately.
+    assert!(!s.close_requested());
+    assert!(!s.exit_when_idle());
+    assert!(s.claim(&a));
+    assert!(!s.close_requested());
+    assert!(!s.exit_when_idle());
+
+    // Two live games: CloseRequested hides and sets exit_when_idle atomically; finishing the first
+    // reports another_running = true, finishing the second reports another_running = false.
+    s.set_pid(&a, 1001);
+    assert!(s.claim(&b));
+    s.set_pid(&b, 1002);
+    assert!(s.close_requested());
+    assert!(s.exit_when_idle());
+    assert_eq!(s.finish_session(&a), (true, true));
+    assert_eq!(s.finish_session(&b), (true, false));
+
+    // Stress both thread interleavings: a CloseRequested racing game exit can NEVER leave the
+    // launcher hidden with `close_requested == true` while `finish_session` saw `closed == false`.
+    for _ in 0..200 {
+        let state = LaunchState::new(PortableRoot::at(d.path()));
+        assert!(state.claim(&a));
+        state.set_pid(&a, 7777);
+        let barrier = std::sync::Barrier::new(2);
+        let (prevented_close, (saw_closed, another)) = std::thread::scope(|scope| {
+            let t1 = scope.spawn(|| {
+                barrier.wait();
+                state.close_requested()
+            });
+            let t2 = scope.spawn(|| {
+                barrier.wait();
+                state.finish_session(&a)
+            });
+            (t1.join().unwrap(), t2.join().unwrap())
+        });
+        assert!(!another);
+        assert!(
+            !(prevented_close && !saw_closed),
+            "zombie race detected: prevented_close={prevented_close}, saw_closed={saw_closed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn semicolons_in_the_clade_folder_map_to_unsupported_folder_path() {
+    let mut w = world("1.21.4", Era::Modern);
+    let semi_dir = tempfile::tempdir().unwrap();
+    w.root = PortableRoot::at(semi_dir.path().join("Clade;Folder"));
+    w.root.ensure_layout().unwrap();
+    let id = create(&w, NewInstance::vanilla("Profile", "1.21.4").unwrap());
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    let a = accounts(&w);
+    let err = plan(&w, &a, &FakeTransport::new(), &id)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code, "unsupported_folder_path");
+}
+
+#[tokio::test]
+async fn memory_snapshot_clamps_heap_down_when_commit_or_physical_ram_is_tight() {
+    let (w, id) = prepared("1.21.4", Era::Modern).await;
+    let a = accounts(&w);
+    let sys = SystemEnv::from_process();
+
+    // Plenty of available physical and commit memory: keeps the 4096 MiB target on a 16 GiB machine.
+    let roomy = plan_launch(
+        &w.root,
+        &FakeTransport::new(),
+        &a.vault,
+        &a.state,
+        &id,
+        &LaunchEnv {
+            now: NOW,
+            sys: &sys,
+            total_memory_mb: Some(16_384),
+            default_memory_mb: None,
+            memory_snapshot: Some(crate::system::MemorySnapshot {
+                total_mb: 16_384,
+                avail_phys_mb: 10_240,
+                avail_commit_mb: 12_288,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(roomy.command.args[0], "-Xmx4096M");
+
+    // Tight Windows commit charge (1920 MiB available -> 1920 - 512 = 1408 MiB cap): clamps down.
+    let tight = plan_launch(
+        &w.root,
+        &FakeTransport::new(),
+        &a.vault,
+        &a.state,
+        &id,
+        &LaunchEnv {
+            now: NOW,
+            sys: &sys,
+            total_memory_mb: Some(16_384),
+            default_memory_mb: None,
+            memory_snapshot: Some(crate::system::MemorySnapshot {
+                total_mb: 16_384,
+                avail_phys_mb: 2_048,
+                avail_commit_mb: 1_920,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(tight.command.args[0], "-Xmx1408M");
 }
