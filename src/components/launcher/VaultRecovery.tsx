@@ -1,7 +1,7 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
-import type { AccountsApi } from "@/lib/accounts/api";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { useT } from "@/lib/i18n";
-import { describeError } from "@/lib/i18n/errors";
+import { describeError, errorCode } from "@/lib/i18n/errors";
 import { playSound } from "@/lib/sound/soundService";
 import { ModalFooter, ModalHeader } from "./Modal";
 import {
@@ -18,8 +18,8 @@ interface Props {
    * it alone (like every other destructive confirmation): only its two buttons answer.
    */
   onAsking: (asking: boolean) => void;
-  /** The old encrypted sign-in store was archived. The caller carries on from there. */
-  onDone: () => void;
+  /** The old encrypted sign-in store was archived. Receives the updated accounts snapshot. */
+  onReset: (snapshot: AccountsSnapshot) => void;
   /** `modal`: the question is the whole dialog (title and footer). `inline`: a block inside one. */
   layout: "modal" | "inline";
   /** The normal passphrase form; it receives the quiet "Forgot passphrase?" link to place under its field. */
@@ -32,20 +32,43 @@ interface Props {
  * and makes every account sign in again; profiles, worlds, playtime and settings are untouched, and
  * nothing is revoked at Microsoft. The backend does the work (`vault_recovery.rs`).
  */
-export function VaultRecovery({ api, onAsking, onDone, layout, children }: Props) {
+export function VaultRecovery({ api, onAsking, onReset, layout, children }: Props) {
   const t = useT();
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [archived, setArchived] = useState(false);
   const titleId = useId();
+  const linkRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
 
   // Never leave the dialog around it locked if this goes away while the question is open.
   useEffect(() => () => onAsking(false), [onAsking]);
 
+  useEffect(() => {
+    if (!asking && restoreFocus.current) {
+      restoreFocus.current = false;
+      linkRef.current?.focus();
+    }
+  }, [asking]);
+
+  useEffect(() => {
+    if (asking && archived && !busy) {
+      confirmRef.current?.focus();
+    }
+  }, [asking, archived, busy]);
+
   const ask = (next: boolean) => {
     setAsking(next);
     setError(null);
+    if (!next) setArchived(false);
     onAsking(next);
+  };
+
+  const cancel = () => {
+    restoreFocus.current = true;
+    ask(false);
   };
 
   const startFresh = () => {
@@ -54,13 +77,14 @@ export function VaultRecovery({ api, onAsking, onDone, layout, children }: Props
     setError(null);
     playSound("click");
     api.resetVault().then(
-      () => {
+      (snap) => {
         setBusy(false);
         ask(false);
-        onDone();
+        onReset(snap);
       },
       (e: unknown) => {
         setBusy(false);
+        if (errorCode(e) === "accounts_not_updated") setArchived(true);
         setError(describeError("vault", e)); // the question stays: retry, or keep trying the passphrase
       },
     );
@@ -69,6 +93,7 @@ export function VaultRecovery({ api, onAsking, onDone, layout, children }: Props
   const link = (
     <div>
       <button
+        ref={linkRef}
         type="button"
         className={`${BUTTON_SMALL_QUIET} -ml-1 px-1`}
         onClick={() => {
@@ -99,16 +124,24 @@ export function VaultRecovery({ api, onAsking, onDone, layout, children }: Props
         {body}
         {alert}
         <ModalFooter>
+          {!archived && (
+            <button
+              type="button"
+              autoFocus
+              disabled={busy}
+              className={BUTTON_QUIET}
+              onClick={cancel}
+            >
+              {t("recovery.keep")}
+            </button>
+          )}
           <button
+            ref={confirmRef}
             type="button"
-            autoFocus
             disabled={busy}
-            className={BUTTON_QUIET}
-            onClick={() => ask(false)}
+            className={BUTTON_DANGER}
+            onClick={startFresh}
           >
-            {t("recovery.keep")}
-          </button>
-          <button type="button" disabled={busy} className={BUTTON_DANGER} onClick={startFresh}>
             {busy ? t("common.working") : t("recovery.confirm")}
           </button>
         </ModalFooter>
@@ -124,16 +157,24 @@ export function VaultRecovery({ api, onAsking, onDone, layout, children }: Props
       {body}
       {alert}
       <div className="flex flex-wrap items-center justify-end gap-3">
+        {!archived && (
+          <button
+            type="button"
+            autoFocus
+            disabled={busy}
+            className={BUTTON_SMALL_QUIET}
+            onClick={cancel}
+          >
+            {t("recovery.keep")}
+          </button>
+        )}
         <button
+          ref={confirmRef}
           type="button"
-          autoFocus
           disabled={busy}
-          className={BUTTON_SMALL_QUIET}
-          onClick={() => ask(false)}
+          className={BUTTON_SMALL_DANGER}
+          onClick={startFresh}
         >
-          {t("recovery.keep")}
-        </button>
-        <button type="button" disabled={busy} className={BUTTON_SMALL_DANGER} onClick={startFresh}>
           {busy ? t("common.working") : t("recovery.confirm")}
         </button>
       </div>

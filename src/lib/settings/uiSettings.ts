@@ -66,7 +66,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   onboardingDone: true,
   memoryMb: null,
   memory: { min: 1024, max: 16384, auto: 4096, total: null },
-  onLaunch: "keep_open",
+  onLaunch: "hide",
   onExit: "show",
   version: "",
 };
@@ -143,7 +143,7 @@ export function parseUiSettings(raw: unknown): UiSettings {
       auto: Math.min(max, Math.max(min, whole(m.auto, d.auto))),
       total: typeof m.total === "number" && m.total > 0 ? Math.round(m.total) : null,
     },
-    onLaunch: oneOf(o.onLaunch, ["keep_open", "hide"], "keep_open"),
+    onLaunch: oneOf(o.onLaunch, ["keep_open", "hide"], "hide"),
     onExit: oneOf(o.onExit, ["show", "stay_hidden"], "show"),
     version:
       typeof o.version === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(o.version) ? o.version : "",
@@ -288,7 +288,7 @@ export const resetUiSettings = () =>
       reducedMotion: "system",
       transparency: "system",
       memoryMb: null,
-      onLaunch: "keep_open",
+      onLaunch: "hide",
       onExit: "show",
     },
   );

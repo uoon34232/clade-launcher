@@ -16,7 +16,15 @@ const scripts = [
   ...list("scripts/qa", ".ps1").map((n) => ["scripts/qa", n]),
   ...list("qa/windows-sandbox", ".ps1").map((n) => ["qa/windows-sandbox", n]),
 ];
+const releasePsScripts = [
+  ["scripts", "package-portable.ps1"],
+  ["scripts", "smoke-test-package.ps1"],
+];
+const allPsScripts = [...scripts, ...releasePsScripts];
 const configs = list("qa/windows-sandbox", ".wsb");
+
+const LITERAL_PATH_CMDLETS =
+  /\b(Test-Path|Get-Item|Get-ItemProperty|Get-ChildItem|Get-Content|Set-Content|Copy-Item|Remove-Item|Get-FileHash|Get-AuthenticodeSignature)\b([^\n;|}]*)/g;
 
 /** Commands that would change the host (system, display, GPU, devices, registry, features). */
 const FORBIDDEN = [
@@ -82,7 +90,7 @@ describe("the QA scripts", () => {
       },
     );
     if (probe.error || probe.status !== 0) return; // not a Windows runner: the static checks above still ran
-    const files = scripts.map(([d, n]) => join(root, d, n).replaceAll("'", "''"));
+    const files = allPsScripts.map(([d, n]) => join(root, d, n).replaceAll("'", "''"));
     const cmd = files
       .map(
         (f) =>
@@ -93,6 +101,48 @@ describe("the QA scripts", () => {
     expect(r.stdout + r.stderr).toBe("");
     expect(r.status).toBe(0);
   }, 15_000);
+
+  it("uses -LiteralPath consistently on filesystem and registry item cmdlets across QA and packaging scripts", () => {
+    for (const [dir, name] of allPsScripts) {
+      const text = read(dir, name);
+      expect(
+        [...text].every((c) => c.charCodeAt(0) < 128),
+        `${dir}/${name} ASCII`,
+      ).toBe(true);
+      const code = text.replace(/<#[\s\S]*?#>/g, "").replace(/(^|\s)#.*$/gm, "$1");
+      const matches = [...code.matchAll(LITERAL_PATH_CMDLETS)];
+      expect(matches.length, `${dir}/${name}`).toBeGreaterThan(0);
+      for (const [, cmdlet, rest] of matches) {
+        expect(rest, `${dir}/${name}: ${cmdlet}${rest}`).toMatch(/\s-LiteralPath\b/);
+      }
+    }
+  });
+});
+
+describe("packaging and smoke-test PowerShell scripts", () => {
+  it("remaps $env:USERPROFILE and $repo via a TOML array in Cargo --config so paths with spaces work", () => {
+    const pkg = read("scripts", "package-portable.ps1");
+    const code = pkg.replace(/<#[\s\S]*?#>/g, "").replace(/(^|\s)#.*$/gm, "$1");
+    expect(code).not.toMatch(/CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS/);
+    expect(code).toMatch(/--config \$cargoCfg/);
+    expect(code).toMatch(/rustflags = \[/);
+    expect(code).toMatch(/\$env:USERPROFILE,\s*'\/user'/);
+    expect(code).toMatch(/\$repo,\s*'\/clade'/);
+  });
+
+  it("stops both Clade and its scoped msedgewebview2 child tree before removing the smoke-test folder", () => {
+    const smoke = read("scripts", "smoke-test-package.ps1");
+    const finallyBlock = smoke.slice(smoke.lastIndexOf("} finally {"));
+    expect(finallyBlock).toMatch(/msedgewebview2\.exe/);
+    expect(finallyBlock).toMatch(/ParentProcessId/);
+    expect(finallyBlock).toMatch(/StartsWith\(\$rootPrefix/);
+    expect(finallyBlock).toMatch(/Stop-Process -Id \$id/);
+    expect(finallyBlock).toMatch(/Wait-Process -Id \$id/);
+    expect(finallyBlock).toMatch(/Remove-Item -LiteralPath \$root/);
+    // Never indiscriminately kill all Edge/WebView2 processes on the developer's machine
+    expect(smoke).not.toMatch(/Stop-Process[^\n]*-Name[^\n]*webview/i);
+    expect(smoke).not.toMatch(/Get-Process[^\n]*webview[^\n]*\|\s*Stop-Process/i);
+  });
 });
 
 describe("portable-audit Compare: registry Run values", () => {

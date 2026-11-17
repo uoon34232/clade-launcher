@@ -67,7 +67,7 @@ describe("parseUiSettings", () => {
         onboardingDone: false,
         memoryMb: 6144,
         memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
-        onLaunch: "hide",
+        onLaunch: "keep_open",
         onExit: "stay_hidden",
         version: "0.1.0",
       }),
@@ -76,7 +76,7 @@ describe("parseUiSettings", () => {
       onboardingDone: false,
       memoryMb: 6144,
       memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
-      onLaunch: "hide",
+      onLaunch: "keep_open",
       onExit: "stay_hidden",
       version: "0.1.0",
     });
@@ -95,7 +95,7 @@ describe("parseUiSettings", () => {
     expect(bad.memory.max).toBeGreaterThanOrEqual(bad.memory.min);
     expect(bad.memory.auto).toBeLessThanOrEqual(bad.memory.max);
     expect(bad.memory.total).toBeNull();
-    expect([bad.onLaunch, bad.onExit]).toEqual(["keep_open", "show"]);
+    expect([bad.onLaunch, bad.onExit]).toEqual(["hide", "show"]);
     expect(bad.version).toBe("");
   });
 
@@ -276,12 +276,12 @@ describe("the live settings copy", () => {
     const off = subscribeUiSettings(() => seen.push(getUiSettings().memoryMb ?? -1));
     expect(await saveMemory(8192)).toEqual({ ok: true });
     expect(await saveReducedMotion("off")).toEqual({ ok: true });
-    await saveBehavior({ onLaunch: "hide", onExit: "stay_hidden" });
+    await saveBehavior({ onLaunch: "keep_open", onExit: "stay_hidden" });
     await completeOnboarding();
     expect(getUiSettings()).toMatchObject({
       memoryMb: 8192,
       reducedMotion: "off",
-      onLaunch: "hide",
+      onLaunch: "keep_open",
       onExit: "stay_hidden",
       onboardingDone: true,
     });
@@ -291,7 +291,7 @@ describe("the live settings copy", () => {
     expect(getUiSettings()).toMatchObject({
       memoryMb: null,
       reducedMotion: "system",
-      onLaunch: "keep_open",
+      onLaunch: "hide",
       onExit: "show",
       onboardingDone: true,
     });

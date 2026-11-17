@@ -23,11 +23,21 @@ export function CatEgg() {
     const el = ref.current;
     if (!el) return;
     const reduced = prefersReducedMotion();
+    const next = reduced ? "reduced" : "full";
     window.clearTimeout(timer.current);
-    // Removing and re-adding the attribute restarts the CSS animation, so a second click replays it.
-    el.removeAttribute("data-reaction");
-    void el.getBoundingClientRect();
-    el.setAttribute("data-reaction", reduced ? "reduced" : "full");
+    // Restart in-flight CSS animations via the Web Animations API without forcing a layout reflow.
+    if (el.getAttribute("data-reaction") === next) {
+      if (next === "full" && typeof el.getAnimations === "function") {
+        for (const a of el.getAnimations({ subtree: true })) {
+          if (typeof CSSAnimation === "undefined" || a instanceof CSSAnimation) {
+            a.cancel();
+            a.play();
+          }
+        }
+      }
+    } else {
+      el.setAttribute("data-reaction", next);
+    }
     timer.current = window.setTimeout(
       () => el.removeAttribute("data-reaction"),
       reduced ? REDUCED_MS : FULL_MS,

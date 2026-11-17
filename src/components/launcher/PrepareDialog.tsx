@@ -29,6 +29,24 @@ type Phase =
   | { kind: "done" }
   | { kind: "error"; message: string };
 
+function sameProgress(a: PrepareProgress | null, b: PrepareProgress): boolean {
+  if (!a) return false;
+  const aLabel = "label" in a ? (a as { label?: unknown }).label : undefined;
+  const bLabel = "label" in b ? (b as { label?: unknown }).label : undefined;
+  const sameOverall =
+    a.overall === b.overall ||
+    (a.overall !== null && b.overall !== null && Math.abs(a.overall - b.overall) < 1e-4);
+  return (
+    a.stage === b.stage &&
+    aLabel === bLabel &&
+    a.itemsDone === b.itemsDone &&
+    a.itemsTotal === b.itemsTotal &&
+    a.bytesDone === b.bytesDone &&
+    a.bytesTotal === b.bytesTotal &&
+    sameOverall
+  );
+}
+
 /**
  * Setting a profile up: one calm surface (the shared Modal) showing the real stage, real counts
  * and, only when the backend can measure it, a real progress bar. There is no downloads
@@ -82,14 +100,72 @@ function Run({
 }) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "working", progress: null });
+  const mountedRef = useRef(true);
+  const rafRef = useRef<number | null>(null);
+  const scheduledRef = useRef(false);
+  const pendingRef = useRef<PrepareProgress | null>(null);
+  const lastRenderedRef = useRef<PrepareProgress | null>(null);
+
+  const clearScheduledFrame = () => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    scheduledRef.current = false;
+    pendingRef.current = null;
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearScheduledFrame();
+    };
+  }, []);
 
   const start = () => {
+    clearScheduledFrame();
+    lastRenderedRef.current = null;
     let stop: (() => void) | null = null;
     let finished = false;
+    const finishRun = () => {
+      finished = true;
+      clearScheduledFrame();
+      stop?.();
+      stop = null;
+    };
+    const commitProgress = (next: PrepareProgress) => {
+      if (sameProgress(lastRenderedRef.current, next)) return;
+      lastRenderedRef.current = next;
+      setPhase((cur) => {
+        if (cur.kind !== "working" || sameProgress(cur.progress, next)) return cur;
+        return { kind: "working", progress: next };
+      });
+    };
+    const scheduleCoalesceWindow = () => {
+      if (scheduledRef.current) return;
+      scheduledRef.current = true;
+      const id = window.requestAnimationFrame(() => {
+        scheduledRef.current = false;
+        rafRef.current = null;
+        const next = pendingRef.current;
+        pendingRef.current = null;
+        if (finished || !mountedRef.current || !next) return;
+        commitProgress(next);
+      });
+      if (scheduledRef.current) rafRef.current = id;
+    };
     void api
       .onPrepareProgress((p) => {
-        if (p.instanceId === profile.id)
-          setPhase((cur) => (cur.kind === "working" ? { kind: "working", progress: p } : cur));
+        if (finished || !mountedRef.current || p.instanceId !== profile.id) return;
+        const stageChanged = lastRenderedRef.current?.stage !== p.stage;
+        if (!scheduledRef.current || stageChanged) {
+          pendingRef.current = null;
+          commitProgress(p);
+          scheduleCoalesceWindow();
+          return;
+        }
+        pendingRef.current = p;
       })
       .then((u) => {
         if (finished) u();
@@ -98,17 +174,17 @@ function Run({
     cancelRef.current = () => void api.cancelPrepare().catch(() => undefined);
     (verify ? api.prepare(profile.id, { verify: true }) : api.prepare(profile.id)).then(
       (snapshot) => {
-        finished = true;
-        stop?.();
+        finishRun();
         cancelRef.current = null;
+        if (!mountedRef.current) return;
         playSound("primary");
         onPrepared(snapshot);
         setPhase({ kind: "done" });
       },
       (e: unknown) => {
-        finished = true;
-        stop?.();
+        finishRun();
         cancelRef.current = null;
+        if (!mountedRef.current) return;
         if (e instanceof BackendError && e.code === "cancelled") return onClose();
         setPhase({ kind: "error", message: describeError("prepare", e) });
       },
@@ -208,8 +284,8 @@ function Run({
         >
           {p?.overall != null ? (
             <div
-              className="bg-clay h-full rounded-full transition-[width] duration-200 ease-out"
-              style={{ width: `${Math.max(2, p.overall * 100)}%` }}
+              className="bg-clay h-full w-full origin-left rounded-full transition-transform duration-150 ease-out"
+              style={{ transform: `scaleX(${Math.max(0, Math.min(1, p.overall))})` }}
             />
           ) : (
             <div className="indeterminate-bar bg-clay/70 h-full w-1/3 rounded-full" />

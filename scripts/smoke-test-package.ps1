@@ -34,8 +34,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$zipPath = (Resolve-Path $Zip).Path
+$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$zipPath = (Resolve-Path -LiteralPath $Zip).Path
 $failures = New-Object System.Collections.Generic.List[string]
 function Check($ok, $what) { if ($ok) { Write-Host "  ok    $what" } else { Write-Host "  FAIL  $what"; $failures.Add($what) } }
 
@@ -43,8 +43,8 @@ Write-Host "Smoke test: $zipPath"
 
 # ---- the checksum file
 $sidecar = "$zipPath.sha256"
-$hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
-$expected = if (Test-Path $sidecar) { ((Get-Content $sidecar -Raw) -split '\s+')[0].ToLower() } else { '' }
+$hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
+$expected = if (Test-Path -LiteralPath $sidecar) { ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLower() } else { '' }
 Check ($expected -eq $hash) 'the .sha256 file matches the ZIP'
 
 # ---- the allowlist
@@ -62,21 +62,21 @@ try {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $root)
   $dir = Join-Path $root 'Clade-Launcher'
-  Check (Test-Path (Join-Path $dir 'Clade.exe')) 'Clade.exe is at the package root after extraction'
-  if (-not (Test-Path (Join-Path $dir 'Clade.exe'))) { throw 'no Clade.exe' }
+  Check (Test-Path -LiteralPath (Join-Path $dir 'Clade.exe')) 'Clade.exe is at the package root after extraction'
+  if (-not (Test-Path -LiteralPath (Join-Path $dir 'Clade.exe'))) { throw 'no Clade.exe' }
   $exe = Join-Path $dir 'Clade.exe'
 
-  $v = (Get-Item $exe).VersionInfo
+  $v = (Get-Item -LiteralPath $exe).VersionInfo
   Check ($v.ProductVersion -eq $ExpectedVersion -and $v.FileVersion -eq $ExpectedVersion) "Clade.exe version is $ExpectedVersion (found $($v.ProductVersion))"
   Check ($v.ProductName -eq 'Clade Launcher') 'the product name is Clade Launcher'
-  Check (Test-Path (Join-Path $dir 'LICENSE')) 'LICENSE is present'
-  Check (Test-Path (Join-Path $dir 'THIRD-PARTY-NOTICES.txt')) 'THIRD-PARTY-NOTICES.txt is present'
-  if (-not $WithoutWebView2) { Check (Test-Path (Join-Path $dir 'runtimes\webview2\msedgewebview2.exe')) 'the bundled WebView2 runtime is present' }
+  Check (Test-Path -LiteralPath (Join-Path $dir 'LICENSE')) 'LICENSE is present'
+  Check (Test-Path -LiteralPath (Join-Path $dir 'THIRD-PARTY-NOTICES.txt')) 'THIRD-PARTY-NOTICES.txt is present'
+  if (-not $WithoutWebView2) { Check (Test-Path -LiteralPath (Join-Path $dir 'runtimes\webview2\msedgewebview2.exe')) 'the bundled WebView2 runtime is present' }
 
   $userData = 'data', 'instances', 'logs', 'cache', 'minecraft', 'libraries', 'assets', 'worlds'
-  $present = $userData | Where-Object { Test-Path (Join-Path $dir $_) }
+  $present = $userData | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) }
   Check (-not $present) 'no user data folders are in the package before the first start'
-  $loose = Get-ChildItem $dir -Force -File | Where-Object { $_.Name -notin 'Clade.exe', 'README.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt' }
+  $loose = Get-ChildItem -LiteralPath $dir -Force -File | Where-Object { $_.Name -notin 'Clade.exe', 'README.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt' }
   Check (-not $loose) 'no other loose files are in the package'
 
   # ---- start it, with a canary where a development server would be
@@ -89,23 +89,23 @@ try {
   Check (-not $process.HasExited) 'Clade is still running after the start'
 
   foreach ($d in 'data', 'instances', 'runtimes\java', 'minecraft', 'libraries', 'assets', 'cache', 'logs') {
-    Check (Test-Path (Join-Path $dir $d)) "the portable folder $d was created beside Clade.exe"
+    Check (Test-Path -LiteralPath (Join-Path $dir $d)) "the portable folder $d was created beside Clade.exe"
   }
-  Check (Test-Path (Join-Path $dir 'data\clade.lock')) 'the folder lock exists'
-  Check (-not (Test-Path (Join-Path $dir 'clade-root'))) 'no debug-style clade-root folder (this is a release build)'
+  Check (Test-Path -LiteralPath (Join-Path $dir 'data\clade.lock')) 'the folder lock exists'
+  Check (-not (Test-Path -LiteralPath (Join-Path $dir 'clade-root'))) 'no debug-style clade-root folder (this is a release build)'
 
   $logFile = Join-Path $dir 'logs\clade.log'
-  $log = if (Test-Path $logFile) { Get-Content $logFile -Raw } else { '' }
+  $log = if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Raw } else { '' }
   Check ($log -match 'launcher starting') 'the log says the launcher started'
   if ($WithoutWebView2) { Check ($log -match 'webview=System') 'the log says the system WebView2 is used (development package)' }
   else { Check ($log -match 'webview=Bundled') 'the log says the BUNDLED WebView2 runtime is used' }
   Check ($log -notmatch 'ERROR') 'the log has no errors'
 
   if (-not $WithoutWebView2) {
-    $wvRoot = (Join-Path $dir 'runtimes\webview2')
+    $wvRoot = (Join-Path $dir 'runtimes\webview2').TrimEnd('\') + '\'
     $children = Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" | Where-Object { $_.ExecutablePath }
     $mine = $children | Where-Object { $_.ExecutablePath.StartsWith($wvRoot, [System.StringComparison]::OrdinalIgnoreCase) }
-    $foreignUnderClade = $children | Where-Object { -not $_.ExecutablePath.StartsWith($wvRoot, [System.StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine -like "*$dir*" }
+    $foreignUnderClade = $children | Where-Object { -not $_.ExecutablePath.StartsWith($wvRoot, [System.StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine -and ($_.CommandLine.IndexOf($dir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) }
     Check (@($mine).Count -gt 0) 'WebView2 processes are running from the package runtimes\webview2 folder'
     Check (-not $foreignUnderClade) 'no other WebView2 runtime is used for Clade'
   }
@@ -115,9 +115,49 @@ try {
   }
 } finally {
   if ($canary) { $canary.Stop() }
-  Get-Process -Name 'Clade' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force
-  Start-Sleep -Milliseconds 1500
-  if (-not $KeepFolder) { Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue } else { Write-Host "  kept  $root" }
+  # Stop only this smoke test's Clade process and its spawned WebView2 process tree (never unrelated
+  # WebView2 instances on the machine) so data\webview2 file locks are released before folder cleanup.
+  $rootPrefix = $root.TrimEnd('\') + '\'
+  $treePids = New-Object 'System.Collections.Generic.HashSet[int]'
+  if ($process) { [void]$treePids.Add([int]$process.Id) }
+  Get-Process -Name 'Clade' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) } |
+    ForEach-Object { [void]$treePids.Add([int]$_.Id) }
+
+  $wvProcs = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue)
+  $added = $true
+  while ($added) {
+    $added = $false
+    foreach ($p in $wvProcs) {
+      $procId = [int]$p.ProcessId
+      if ($treePids.Contains($procId)) { continue }
+      $inTree = ($null -ne $p.ParentProcessId) -and $treePids.Contains([int]$p.ParentProcessId)
+      $inRootExe = $p.ExecutablePath -and $p.ExecutablePath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+      $inRootCmd = $p.CommandLine -and ($p.CommandLine.IndexOf($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+      if ($inTree -or $inRootExe -or $inRootCmd) {
+        [void]$treePids.Add($procId)
+        $added = $true
+      }
+    }
+  }
+
+  foreach ($id in $treePids) {
+    Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  }
+  foreach ($id in $treePids) {
+    Wait-Process -Id $id -Timeout 5 -ErrorAction SilentlyContinue
+  }
+
+  if (-not $KeepFolder) {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+      if (-not (Test-Path -LiteralPath $root)) { break }
+      Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+      if (-not (Test-Path -LiteralPath $root)) { break }
+      Start-Sleep -Milliseconds 500
+    }
+  } else {
+    Write-Host "  kept  $root"
+  }
 }
 
 if ($failures.Count) {

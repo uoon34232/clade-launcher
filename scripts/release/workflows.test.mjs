@@ -23,6 +23,47 @@ function job(text, name) {
   return next < 0 ? text.slice(start) : text.slice(start, start + 1 + next);
 }
 
+/** Top-level job names inside the `jobs:` section of a workflow file. */
+function jobNames(text) {
+  const jobsIdx = text.search(/^jobs:\s*$/m);
+  expect(jobsIdx).toBeGreaterThanOrEqual(0);
+  return [...text.slice(jobsIdx).matchAll(/^ {2}([a-z][a-z0-9-]*):/gm)].map((m) => m[1]);
+}
+
+/** Parsed steps (`{ raw, shell, run, lines }`) from one job's `steps:` block. */
+function stepsOf(jobText) {
+  const stepsIdx = jobText.search(/^ {4}steps:\s*$/m);
+  expect(stepsIdx).toBeGreaterThanOrEqual(0);
+  const body = jobText.slice(stepsIdx).replace(/^ {4}steps:\s*\n/, "");
+  return body
+    .split(/^ {6}- /m)
+    .slice(1)
+    .map((chunk) => {
+      const normalized = `        ${chunk}`;
+      const shellMatch = normalized.match(/^ {8}shell:\s*(\S+)\s*$/m);
+      const blockRun = normalized.match(/^ {8}run:\s*\|\s*\n([\s\S]*)$/m);
+      if (blockRun) {
+        const lines = [];
+        for (const l of blockRun[1].split("\n")) {
+          if (l.trim() === "") continue;
+          const indent = l.match(/^ */)[0].length;
+          if (indent < 10) break;
+          const trimmed = l.slice(10).trim();
+          if (!trimmed.startsWith("#")) lines.push(trimmed);
+        }
+        return { raw: normalized, shell: shellMatch?.[1] ?? null, run: lines.join("\n"), lines };
+      }
+      const inlineRun = normalized.match(/^ {8}run:\s*(.+)$/m);
+      if (inlineRun) {
+        const cmd = inlineRun[1].trim();
+        return { raw: normalized, shell: shellMatch?.[1] ?? null, run: cmd, lines: [cmd] };
+      }
+      return { raw: normalized, shell: shellMatch?.[1] ?? null, run: null, lines: [] };
+    });
+}
+
+const NATIVE_CMD_RE = /^(?:\$[A-Za-z_]\w*\s*=\s*)?(?:node|git|cargo|pnpm|rustup|\.\/scripts\/)\b/;
+
 describe("every workflow", () => {
   it("pins every action to a full commit SHA", () => {
     for (const f of readdirSync(workflowDir).filter((n) => n.endsWith(".yml"))) {
@@ -39,6 +80,49 @@ describe("every workflow", () => {
         refs.filter((r) => r !== "GITHUB_TOKEN"),
         f,
       ).toEqual([]);
+    }
+  });
+
+  it("never interpolates ${{ ... }} expressions directly inside run: scripts", () => {
+    for (const f of readdirSync(workflowDir).filter((n) => n.endsWith(".yml"))) {
+      const wf = read(f);
+      let checked = 0;
+      for (const j of jobNames(wf)) {
+        for (const s of stepsOf(job(wf, j))) {
+          if (s.run === null) continue;
+          checked++;
+          expect(s.run, `${f} (${j})`).not.toContain("${{");
+        }
+      }
+      expect(checked, f).toBeGreaterThan(0);
+    }
+  });
+
+  it("uses $env: syntax and checks $LASTEXITCODE after native commands in multi-line Windows pwsh steps", () => {
+    for (const f of readdirSync(workflowDir).filter((n) => n.endsWith(".yml"))) {
+      const wf = read(f);
+      for (const j of jobNames(wf)) {
+        const jobText = job(wf, j);
+        if (!/runs-on:\s*windows-/.test(jobText)) continue;
+        for (const s of stepsOf(jobText)) {
+          if (s.run === null) continue;
+          const isPwsh = s.shell === null || s.shell === "pwsh" || s.shell === "powershell";
+          if (!isPwsh) continue;
+          expect(s.run, `${f} (${j}): bare POSIX env var in pwsh`).not.toMatch(
+            /\$(?!env:)(?:GITHUB_|RUNNER_)/,
+          );
+          if (s.lines.length > 1) {
+            expect(s.shell, `${f} (${j}): explicit shell: pwsh on multi-line step`).toBe("pwsh");
+            for (let i = 0; i < s.lines.length; i++) {
+              if (!NATIVE_CMD_RE.test(s.lines[i])) continue;
+              expect(
+                s.lines[i + 1] ?? "",
+                `${f} (${j}): missing $LASTEXITCODE check after "${s.lines[i]}"`,
+              ).toMatch(/^if\s*\(\$LASTEXITCODE\)/);
+            }
+          }
+        }
+      }
     }
   });
 });
@@ -156,7 +240,11 @@ describe("normal CI", () => {
     expect(toolchain).toMatch(/components = \["rustfmt", "clippy"\]/);
   });
 
-  it("checks that the version is the same everywhere", () => {
-    expect(ci).toMatch(/node scripts\/release\/check-versions\.mjs/);
+  it("checks that the version is the same everywhere and verifies third-party notices in --strict mode", () => {
+    const frontend = job(ci, "frontend");
+    expect(frontend).toMatch(/node scripts\/release\/check-versions\.mjs/);
+    expect(frontend).toMatch(
+      /node scripts\/release\/generate-notices\.mjs --out "\$env:RUNNER_TEMP\/THIRD-PARTY-NOTICES\.txt" --strict/,
+    );
   });
 });

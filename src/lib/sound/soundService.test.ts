@@ -8,7 +8,17 @@ import {
 
 // A just-enough fake of the Web Audio API that records what gets built and started.
 function fakeAudio() {
-  const rec = { contexts: 0, started: 0, resumed: 0, peaks: [] as number[], masterGain: 0 };
+  const rec = {
+    contexts: 0,
+    started: 0,
+    resumed: 0,
+    suspended: 0,
+    disconnected: 0,
+    startTimes: [] as number[],
+    sources: [] as Array<{ onended: (() => void) | null }>,
+    peaks: [] as number[],
+    masterGain: 0,
+  };
   const param = (isGain = false) => ({
     value: 0,
     setValueAtTime: vi.fn(),
@@ -23,21 +33,36 @@ function fakeAudio() {
   const node = (extra: object = {}) => {
     const n: Record<string, unknown> = {
       connect: (x: unknown) => x,
-      start: () => {
+      disconnect: vi.fn(() => {
+        rec.disconnected++;
+      }),
+      start: (when = 0) => {
         rec.started++;
+        rec.startTimes.push(when);
       },
       stop: vi.fn(),
       ...extra,
     };
     return n;
   };
+  const sourceNode = (extra: object = {}) => {
+    const src = node({ onended: null, ...extra }) as unknown as { onended: (() => void) | null };
+    rec.sources.push(src);
+    return src;
+  };
   const ctx = {
     sampleRate: 48000,
     currentTime: 0,
-    state: "suspended",
+    state: "suspended" as AudioContextState,
     destination: node(),
     resume: () => {
       rec.resumed++;
+      ctx.state = "running";
+      return Promise.resolve();
+    },
+    suspend: () => {
+      rec.suspended++;
+      ctx.state = "suspended";
       return Promise.resolve();
     },
     createBuffer: (_c: number, length: number) => ({
@@ -45,12 +70,13 @@ function fakeAudio() {
     }),
     createGain: () => node({ gain: param(true) }),
     createDynamicsCompressor: () => node(),
-    createBufferSource: () => node({ buffer: null }),
+    createBufferSource: () => sourceNode({ buffer: null }),
     createBiquadFilter: () => node({ frequency: param(), Q: { value: 0 }, type: "" }),
-    createOscillator: () => node({ frequency: param(), type: "" }),
+    createOscillator: () => sourceNode({ frequency: param(), type: "" }),
   };
   return {
     rec,
+    ctx,
     createContext: () => {
       rec.contexts++;
       return ctx as unknown as AudioContext;
@@ -71,7 +97,10 @@ function setup(clockStart = 1000, extra: Partial<Parameters<typeof createSoundSe
   return { audio, svc, persist, advance: (ms: number) => (t += ms) };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("sound service", () => {
   it("defaults to enabled at a restrained volume", () => {
@@ -235,5 +264,95 @@ describe("sound service", () => {
     }
     expect(fetchSpy).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it("auto-suspends after silence and extends the idle timer when a new sound plays", () => {
+    vi.useFakeTimers();
+    const { audio, svc, advance } = setup();
+    expect(svc.play("click")).toBe(true); // DURATION.click = 70 ms -> idle after 1570 ms
+    expect(audio.rec.suspended).toBe(0);
+
+    vi.advanceTimersByTime(1000);
+    advance(1000);
+    expect(audio.rec.suspended).toBe(0);
+
+    // Playing another sound resets the idle window so the earlier timer does not cut it off.
+    expect(svc.play("headline")).toBe(true); // DURATION.headline = 170 ms -> idle after 1670 ms
+    vi.advanceTimersByTime(1000);
+    advance(1000);
+    expect(audio.rec.suspended).toBe(0);
+
+    vi.advanceTimersByTime(670);
+    advance(670);
+    expect(audio.rec.suspended).toBe(1);
+    expect(audio.ctx.state).toBe("suspended");
+  });
+
+  it("suspends immediately when disabled or set to zero volume", () => {
+    vi.useFakeTimers();
+    const { audio, svc, advance } = setup();
+    expect(svc.play("click")).toBe(true);
+    expect(audio.ctx.state).toBe("running");
+
+    svc.setSettings({ enabled: false });
+    expect(audio.rec.suspended).toBe(1);
+    expect(audio.ctx.state).toBe("suspended");
+
+    svc.setSettings({ enabled: true, volume: 0.5 });
+    advance(500);
+    expect(svc.play("click")).toBe(true);
+    expect(audio.ctx.state).toBe("running");
+
+    svc.setSettings({ volume: 0 });
+    expect(audio.rec.suspended).toBe(2);
+    expect(audio.ctx.state).toBe("suspended");
+
+    // Cleared idle timer does not suspend again later.
+    vi.advanceTimersByTime(3000);
+    expect(audio.rec.suspended).toBe(2);
+  });
+
+  it("disconnects source, filter and envelope gain nodes when voices finish", () => {
+    const { audio, svc, advance } = setup();
+    expect(svc.play("click")).toBe(true); // 1 buffer source + 1 oscillator = 2 chains (6 nodes)
+    expect(audio.rec.sources).toHaveLength(2);
+    expect(audio.rec.disconnected).toBe(0);
+
+    for (const src of audio.rec.sources) {
+      expect(typeof src.onended).toBe("function");
+      src.onended?.();
+    }
+    // Each voice chain disconnects (source/osc + filter + gain) = 3 nodes * 2 voices = 6.
+    expect(audio.rec.disconnected).toBe(6);
+
+    // Master chain remains intact for subsequent sounds.
+    advance(500);
+    expect(svc.play("select")).toBe(true);
+    expect(audio.rec.sources).toHaveLength(4);
+  });
+
+  it("schedules voices relative to post-resume currentTime when waking an async suspended context", async () => {
+    const audio = fakeAudio();
+    let resolveResume!: () => void;
+    audio.ctx.resume = () => {
+      audio.rec.resumed++;
+      return new Promise<void>((resolve) => {
+        resolveResume = () => {
+          audio.ctx.state = "running";
+          audio.ctx.currentTime = 4.25;
+          resolve();
+        };
+      });
+    };
+
+    const svc = createSoundService({ createContext: audio.createContext });
+    expect(svc.play("click")).toBe(true);
+    expect(audio.rec.resumed).toBe(1);
+    expect(audio.rec.started).toBe(0); // waiting for hardware resume
+
+    resolveResume();
+    await Promise.resolve();
+    expect(audio.rec.started).toBe(2);
+    expect(audio.rec.startTimes[0]).toBeCloseTo(4.255, 5);
   });
 });

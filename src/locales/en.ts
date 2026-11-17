@@ -308,6 +308,7 @@ export const en = {
   "error.settings.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
   "error.settings.unsupported_value": "That setting isn't supported.",
+  "error.settings.unsupported_language": "That language isn't supported.",
   "error.settings.open_failed": "Windows couldn't open that folder.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
@@ -317,6 +318,8 @@ export const en = {
   "error.common.not_found": "That profile no longer exists.",
   "error.common.network_unavailable": "Networking is unavailable.",
   "error.common.backend_unavailable": "The launcher backend is not available here.",
+  "error.common.unsupported_folder_path":
+    "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
 
   "error.launch.unknown": "Minecraft couldn't be started.",
   "error.launch.no_account": "Sign in with a Microsoft account to play.",
@@ -383,6 +386,7 @@ export const en = {
   "error.signIn.wrong_account":
     "That is a different Minecraft account from the one being signed in again.",
   "error.signIn.unknown_account": "That account no longer exists.",
+  "error.signIn.sign_in_unavailable": "Microsoft sign-in isn't available in this build yet.",
 
   "error.vault.unknown": "That didn't work.",
   "error.vault.passphrase_mismatch": "That passphrase doesn't match.",
@@ -441,4 +445,6 @@ export const en = {
   "error.profile.busy": "This profile is being set up. Wait for it to finish.",
 
   "error.catalog.unknown": "Could not load the version list.",
+  "error.catalog.catalog_unavailable":
+    "Could not load the version list. Check your connection and try again.",
 } satisfies Record<string, Message>;

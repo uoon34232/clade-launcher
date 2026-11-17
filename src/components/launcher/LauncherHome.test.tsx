@@ -9,7 +9,7 @@ import type {
 } from "@/lib/profiles/api";
 import { BackendError } from "@/lib/ipc";
 import { LauncherHome } from "./LauncherHome";
-import { readyAccountsClient } from "@/lib/accounts/testAccounts";
+import { readyAccountsClient } from "@/test/testAccounts";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
 

@@ -10,8 +10,8 @@
 // is `vX.Y.Z`, optionally followed by `-preview` / `-preview.N` / `-rc.N`. The core must equal the file
 // version; the suffix only says what kind of release it is.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -144,8 +144,10 @@ function main(argv) {
     process.exit(1);
   }
   if (notes && version) {
+    const outPath = resolve(notes);
+    mkdirSync(dirname(outPath), { recursive: true });
     const text = changelogSection(readFileSync(join(root, "CHANGELOG.md"), "utf8"), version);
-    writeFileSync(notes, `${text ?? ""}\n`, "utf8");
+    writeFileSync(outPath, `${text ?? ""}\n`, "utf8");
   }
   console.log(
     `version ${version}${tag ? ` matches tag ${tag}` : ""}${tag ? (isPrerelease(tag) ? " (pre-release)" : " (stable)") : ""}`,

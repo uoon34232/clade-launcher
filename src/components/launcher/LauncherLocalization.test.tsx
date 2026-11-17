@@ -5,13 +5,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BASE_PHRASES, phraseText } from "@/features/launcher/phrases";
 import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
-import { appearanceStubs, recoveryStubs } from "@/lib/accounts/testAccounts";
 import { getLocale, resolveLocale, setLocale } from "@/lib/i18n";
 import { chooseLanguage } from "@/lib/i18n/language";
 import { BackendError } from "@/lib/ipc";
 import type { LaunchApi } from "@/lib/launch/api";
 import type { ProfileSummary, ProfilesApi, ProfilesSnapshot } from "@/lib/profiles/api";
 import { loadUiSettings } from "@/lib/settings/uiSettings";
+import { appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 
 const invoke = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({

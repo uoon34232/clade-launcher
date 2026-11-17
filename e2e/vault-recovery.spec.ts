@@ -55,9 +55,10 @@ test.describe("in the sign-in dialog", () => {
     await stillOpen(page, d);
     await expect(d.getByRole("heading", { name: text("recovery.title") })).toBeVisible();
 
-    // Cancel changes nothing, and the passphrase form is back
+    // Cancel changes nothing, and the passphrase form is back with focus restored
     await keepTrying(d).click();
     await expect(d.getByLabel(text("common.passphrase"))).toBeVisible();
+    await expect(forgot(d)).toBeFocused();
     expect(await backend.calls("reset_vault")).toHaveLength(0);
     expect((await backend.state()).vault).toEqual({ exists: true, unlocked: false });
 
@@ -86,6 +87,24 @@ test.describe("in the sign-in dialog", () => {
     await expect(d.getByRole("alert")).toHaveText(text("error.vault.game_starting"));
     await expect(startFresh(d)).toBeEnabled();
     // and it can be answered again
+    await startFresh(d).click();
+    await expect(d.getByRole("heading", { name: text("signin.createTitle") })).toBeVisible();
+  });
+
+  test("hides Keep trying when the vault was already archived (accounts_not_updated), leaving Start fresh to retry", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await openAddAccount(page);
+    const d = dialog(page);
+    await forgot(d).click();
+    await backend.failNext("reset_vault", "accounts_not_updated");
+    await startFresh(d).click();
+    await expect(d.getByRole("alert")).toHaveText(text("error.vault.accounts_not_updated"));
+    await expect(keepTrying(d)).toHaveCount(0);
+    await expect(startFresh(d)).toBeEnabled();
     await startFresh(d).click();
     await expect(d.getByRole("heading", { name: text("signin.createTitle") })).toBeVisible();
   });
@@ -127,6 +146,7 @@ test.describe("in the launch dialog", () => {
     await stillOpen(page, d);
     await keepTrying(d).click();
     await expect(d.getByLabel(text("common.passphrase"))).toBeVisible();
+    await expect(forgot(d)).toBeFocused();
     expect(await backend.calls("reset_vault")).toHaveLength(0);
 
     await forgot(d).click();
@@ -167,6 +187,10 @@ test.describe("in the account dialog", () => {
 
     await forgot(d).click();
     await expect(d.getByRole("group", { name: text("recovery.title") })).toBeVisible();
+    await expect(
+      d.getByRole("button", { name: text("accountModal.signOutRemove") }),
+    ).toBeDisabled();
+    await expect(d.getByRole("button", { name: text("common.done") })).toBeDisabled();
     // the dialog around it holds still
     await page.keyboard.press("Escape");
     await stillOpen(page, d);
@@ -174,6 +198,8 @@ test.describe("in the account dialog", () => {
     await stillOpen(page, d);
     await keepTrying(d).click();
     await expect(d.getByLabel(text("common.passphrase"))).toBeVisible();
+    await expect(forgot(d)).toBeFocused();
+    await expect(d.getByRole("button", { name: text("common.done") })).toBeEnabled();
     expect(await backend.calls("reset_vault")).toHaveLength(0);
 
     await forgot(d).click();
@@ -199,7 +225,7 @@ test.describe("in Russian", () => {
     await accountTrigger(page).click();
     await page.getByRole("menuitem", { name: /Добавить аккаунт/ }).click();
     const d = dialog(page);
-    await d.getByRole("button", { name: "Забыл парольную фразу?" }).click();
+    await d.getByRole("button", { name: "Не помнишь парольную фразу?" }).click();
     await expect(d.getByRole("heading", { name: "Начать заново?" })).toBeVisible();
     await expect(d.getByText(/Профили, миры, время игры и настройки сохранятся\./)).toBeVisible();
     await expect(d.getByRole("button", { name: "Продолжить попытки" })).toBeFocused();

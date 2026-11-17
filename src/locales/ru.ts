@@ -12,7 +12,7 @@ export const ru: Record<MessageKey, Message> = {
   "common.close": "Закрыть",
   "common.done": "Готово",
   "common.tryAgain": "Повторить",
-  "common.working": "Подождите…",
+  "common.working": "Выполняется…",
   "common.continue": "Продолжить",
   "common.unlock": "Разблокировать",
   "common.passphrase": "Парольная фраза",
@@ -28,7 +28,7 @@ export const ru: Record<MessageKey, Message> = {
   "hero.subtitle": "Выбери профиль и войди в свой мир.",
   "hero.shuffleHint": "Показывает другое сообщение",
   "hero.played": "В игре {time}",
-  "phrase.ready-when-you-are": "Когда будешь готов.",
+  "phrase.ready-when-you-are": "Начнём, когда захочешь.",
   "phrase.your-world-is-waiting": "Твой мир ждёт.",
   "phrase.welcome-back": "С возвращением.",
   "phrase.pick-up-where-you-left-off": "Продолжим с того же места.",
@@ -96,7 +96,7 @@ export const ru: Record<MessageKey, Message> = {
   "create.type": "Тип",
   "create.typeLabel": "Тип профиля",
   "create.vanillaNote": "Обычный Minecraft, ничего не добавлено.",
-  "create.moddedNote": "Minecraft с загрузчиком модов. Моды ты добавляешь сам.",
+  "create.moddedNote": "Minecraft с загрузчиком модов. Моды добавляются отдельно.",
   "create.loader": "Загрузчик",
   "create.loaderLabel": "Загрузчик модов",
   "create.loaderCheckFailed":
@@ -196,7 +196,7 @@ export const ru: Record<MessageKey, Message> = {
   "signin.createDescription":
     "Данные для входа шифруются в этой папке парольной фразой, которую ты выберешь. Восстановить её нельзя, поэтому храни её надёжно.",
   "signin.unlockTitle": "Разблокировать аккаунты",
-  "recovery.link": "Забыл парольную фразу?",
+  "recovery.link": "Не помнишь парольную фразу?",
   "recovery.title": "Начать заново?",
   "recovery.body":
     "Clade не может восстановить забытую парольную фразу. Если начать заново, старое зашифрованное хранилище входов будет убрано в архив, и эти сохранённые входы перестанут использоваться в этой папке Clade. Тебе придётся снова войти в аккаунты Microsoft. Профили, миры, время игры и настройки сохранятся.",
@@ -312,6 +312,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.settings.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
   "error.settings.unsupported_value": "Такая настройка не поддерживается.",
+  "error.settings.unsupported_language": "Этот язык не поддерживается.",
   "error.settings.open_failed": "Windows не смог открыть эту папку.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
@@ -321,6 +322,8 @@ export const ru: Record<MessageKey, Message> = {
   "error.common.not_found": "Этого профиля больше нет.",
   "error.common.network_unavailable": "Сеть недоступна.",
   "error.common.backend_unavailable": "Здесь лаунчер недоступен.",
+  "error.common.unsupported_folder_path":
+    "Clade не может работать из этой папки. Перемести папку Clade на обычный локальный диск и попробуй снова.",
 
   "error.launch.unknown": "Не удалось запустить Minecraft.",
   "error.launch.no_account": "Войди через аккаунт Microsoft, чтобы играть.",
@@ -387,6 +390,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.signIn.wrong_account":
     "Это другой аккаунт Minecraft, не тот, в который нужно войти снова.",
   "error.signIn.unknown_account": "Этого аккаунта больше нет.",
+  "error.signIn.sign_in_unavailable": "Вход через Microsoft пока недоступен в этой сборке.",
 
   "error.vault.unknown": "Не получилось.",
   "error.vault.passphrase_mismatch": "Парольная фраза не подходит.",
@@ -397,7 +401,7 @@ export const ru: Record<MessageKey, Message> = {
     "Зашифрованное хранилище аккаунтов не найдено в этой папке. Начни заново, чтобы войти снова.",
   "error.vault.sign_in_in_progress": "Идёт вход. Сначала заверши или отмени его.",
   "error.vault.appearance_busy":
-    "Смена скина или плаща ещё выполняется. Попробуй через минуту.",
+    "Смена скина или плаща ещё выполняется. Попробуй через пару секунд.",
   "error.vault.game_starting": "Игра запускается. Попробуй, когда она запустится.",
   "error.vault.vault_unlocked": "Аккаунты уже разблокированы.",
   "error.vault.reset_failed":
@@ -444,4 +448,6 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.busy": "Этот профиль сейчас готовится. Дождись завершения.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",
+  "error.catalog.catalog_unavailable":
+    "Не удалось загрузить список версий. Проверь подключение и повтори.",
 };

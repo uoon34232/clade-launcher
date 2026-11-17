@@ -99,23 +99,51 @@ export function formatPlaytime(seconds: number): string {
     : t("playtime.hoursMinutes", { hours, minutes });
 }
 
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getNumberFormatter(
+  localeTag: string,
+  minimumFractionDigits: number,
+  maximumFractionDigits: number,
+): Intl.NumberFormat {
+  const key = `${localeTag}:${minimumFractionDigits}:${maximumFractionDigits}`;
+  let fmt = numberFormatters.get(key);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(localeTag, {
+      minimumFractionDigits,
+      maximumFractionDigits,
+    });
+    numberFormatters.set(key, fmt);
+  }
+  return fmt;
+}
+
+function getDateFormatter(localeTag: string, includeYear: boolean): Intl.DateTimeFormat {
+  const key = `${localeTag}:${includeYear ? "ymd" : "md"}`;
+  let fmt = dateFormatters.get(key);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(localeTag, {
+      day: "numeric",
+      month: "short",
+      ...(includeYear ? { year: "numeric" } : {}),
+    });
+    dateFormatters.set(key, fmt);
+  }
+  return fmt;
+}
+
 /** "184 MB", "1.4 GB" (a decimal comma in Russian). */
 export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return t("size.kb", { value: Math.max(1, Math.round(n / 1024)) });
   if (n < 1024 * 1024 * 1024) return t("size.mb", { value: Math.round(n / (1024 * 1024)) });
-  const gb = new Intl.NumberFormat(INTL_TAG[getLocale()], {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  }).format(n / (1024 * 1024 * 1024));
+  const gb = getNumberFormatter(INTL_TAG[getLocale()], 1, 1).format(n / (1024 * 1024 * 1024));
   return t("size.gb", { value: gb });
 }
 
 /** Memory given in MiB, as "4 GB" / "4,5 ГБ" (at most one decimal, none when it is a whole number). */
 export function formatGigabytes(mib: number): string {
-  const value = new Intl.NumberFormat(INTL_TAG[getLocale()], {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  }).format(mib / 1024);
+  const value = getNumberFormatter(INTL_TAG[getLocale()], 0, 1).format(mib / 1024);
   return t("settings.memory.gb", { value });
 }
 
@@ -134,11 +162,7 @@ export function staleNote(fetchedAt: number, now = Date.now()): string {
   if (!fetchedAt) return t("catalog.staleUnknown");
   const d = new Date(fetchedAt * 1000);
   const sameYear = d.getFullYear() === new Date(now).getFullYear();
-  const date = d.toLocaleDateString(INTL_TAG[getLocale()], {
-    day: "numeric",
-    month: "short",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
+  const date = getDateFormatter(INTL_TAG[getLocale()], !sameYear).format(d);
   // Russian short months end in a dot ("сент."); the sentence supplies its own full stop.
   return t("catalog.stale", { date: date.replace(/\.$/, "") });
 }

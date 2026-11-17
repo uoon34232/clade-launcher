@@ -69,6 +69,16 @@ describe("the title wordmark", () => {
     render(<TitleWordmark />);
     expect(wordmark().textContent).toContain("Просто. Портативно. Твоё.");
   });
+
+  it("sizes the clay underline to 100% of the tagline wrapper", () => {
+    render(<TitleWordmark />);
+    const line = wordmark().querySelector(".wordmark-line");
+    const tagline = wordmark().querySelector(".wordmark-tagline");
+    expect(line).toBeTruthy();
+    expect(tagline).toBeTruthy();
+    expect(line?.className).toContain("w-full");
+    expect(line?.parentElement).toBe(tagline?.parentElement);
+  });
 });
 
 describe("Settings Done", () => {

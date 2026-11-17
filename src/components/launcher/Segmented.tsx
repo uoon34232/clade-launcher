@@ -67,8 +67,8 @@ export function Segmented<T extends string>({
       aria-label={label}
       className={cn(
         variant === "track"
-          ? "bg-sand/45 inline-flex gap-1 rounded-[0.9rem] p-1"
-          : "inline-flex gap-4",
+          ? "bg-sand/45 inline-flex max-w-full flex-wrap gap-1 rounded-[0.9rem] p-1"
+          : "inline-flex max-w-full flex-wrap gap-x-4 gap-y-1",
         className,
       )}
     >
@@ -89,11 +89,12 @@ export function Segmented<T extends string>({
             onClick={() => onChange(o.value)}
             onKeyDown={(e) => onKeyDown(e, o.value)}
             className={cn(
-              "ease-out-soft focus-visible:ring-clay/45 cursor-default transition-[background-color,color,box-shadow,opacity] duration-200 outline-none focus-visible:ring-2 disabled:opacity-40",
+              "ease-out-soft focus-visible:ring-clay/45 min-w-0 cursor-default transition-[background-color,color,box-shadow,opacity] duration-200 outline-none focus-visible:ring-2 disabled:opacity-40",
               variant === "track"
                 ? cn(
+                    "truncate",
                     compact
-                      ? "h-8 rounded-[0.65rem] px-3 text-[0.8125rem] font-medium"
+                      ? "h-8 rounded-[0.65rem] px-2.5 text-[0.8125rem] font-medium"
                       : "h-9 rounded-[0.7rem] px-3.5 text-[0.875rem] font-medium",
                     selected
                       ? "bg-card text-graphite shadow-[0_1px_2px_rgb(43_38_34/0.12)]"

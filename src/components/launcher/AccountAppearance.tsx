@@ -9,6 +9,7 @@ import {
 import {
   MAX_SKIN_BYTES,
   type AccountsApi,
+  type AccountsSnapshot,
   type Appearance,
   type Cape,
   type SkinModel,
@@ -50,6 +51,7 @@ interface Props {
   setConfirmingReset: (confirming: boolean) => void;
   /** "Start fresh?" (forgotten passphrase) is showing: held by the dialog, like the question above. */
   setRecovering: (recovering: boolean) => void;
+  onVaultReset?: (snapshot: AccountsSnapshot) => void;
 }
 
 /**
@@ -65,6 +67,7 @@ export function AccountAppearance({
   confirmingReset,
   setConfirmingReset,
   setRecovering,
+  onVaultReset,
 }: Props) {
   const t = useT();
   const [load, setLoad] = useState<Load>({ kind: "loading" });
@@ -77,6 +80,8 @@ export function AccountAppearance({
   const placed = useRef(false);
   const alive = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
+  const restoreDefaultRef = useRef<HTMLButtonElement>(null);
+  const restoreDefaultFocus = useRef(false);
   const needsSignIn = account.needsSignIn;
 
   useEffect(() => {
@@ -85,6 +90,13 @@ export function AccountAppearance({
       alive.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!confirmingReset && restoreDefaultFocus.current) {
+      restoreDefaultFocus.current = false;
+      restoreDefaultRef.current?.focus();
+    }
+  }, [confirmingReset]);
 
   const show = useCallback((look: Appearance) => {
     setLoad({ kind: "ready", look });
@@ -172,6 +184,7 @@ export function AccountAppearance({
         onRetry={reload}
         onUnlocked={reload}
         onAsking={setRecovering}
+        onVaultReset={onVaultReset}
       />
     ) : null;
 
@@ -210,6 +223,7 @@ export function AccountAppearance({
           </div>
           <div>
             <button
+              ref={restoreDefaultRef}
               type="button"
               disabled={!idle}
               // The same two rows in every language: the model and the upload on the first, this on
@@ -230,7 +244,10 @@ export function AccountAppearance({
                 autoFocus
                 disabled={busy !== null}
                 className={BUTTON_SMALL_QUIET}
-                onClick={() => setConfirmingReset(false)}
+                onClick={() => {
+                  restoreDefaultFocus.current = true;
+                  setConfirmingReset(false);
+                }}
               >
                 {t("accountModal.keepSkin")}
               </button>
@@ -358,6 +375,7 @@ function Notice({
   onRetry,
   onUnlocked,
   onAsking,
+  onVaultReset,
 }: {
   needsSignIn: boolean;
   failure: unknown;
@@ -366,6 +384,7 @@ function Notice({
   onRetry: () => void;
   onUnlocked: () => void;
   onAsking: (asking: boolean) => void;
+  onVaultReset?: (snapshot: AccountsSnapshot) => void;
 }) {
   const t = useT();
   const [pass, setPass] = useState("");
@@ -409,10 +428,11 @@ function Notice({
           api={api}
           layout="inline"
           onAsking={onAsking}
-          onDone={() => {
+          onReset={(snap) => {
             // Every account has to sign in again now; the dialog's own state follows from the list.
             setPass("");
             setUnlockError(null);
+            onVaultReset?.(snap);
           }}
         >
           {(recoveryLink) => (

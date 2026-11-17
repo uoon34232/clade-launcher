@@ -1,10 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi, AccountsSnapshot, SignInStage, VaultStatus } from "@/lib/accounts/api";
-import { appearanceStubs, recoveryStubs } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { ProfilesApi } from "@/lib/profiles/api";
+import { appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 import { LauncherHome } from "./LauncherHome";
 
 vi.mock("@/lib/sound/soundService", () => {
@@ -321,6 +321,8 @@ describe("signing in", () => {
     const pass = screen.getByLabelText<HTMLInputElement>("Passphrase");
     const again = screen.getByLabelText<HTMLInputElement>("Repeat passphrase");
     const go = screen.getByRole<HTMLButtonElement>("button", { name: "Continue" });
+    expect(pass.getAttribute("aria-describedby")).toBe("vault-pass-note");
+    expect(again.getAttribute("aria-invalid")).toBeNull();
     expect(go.disabled).toBe(true);
     fireEvent.change(pass, { target: { value: "short" } });
     fireEvent.change(again, { target: { value: "short" } });
@@ -328,8 +330,12 @@ describe("signing in", () => {
     fireEvent.change(pass, { target: { value: "long enough words" } });
     fireEvent.change(again, { target: { value: "different words!!" } });
     expect(go.disabled).toBe(true);
+    expect(again.getAttribute("aria-invalid")).toBe("true");
+    expect(again.getAttribute("aria-describedby")).toBe("vault-confirm-error");
     expect(dialog.textContent).toContain("match");
     fireEvent.change(again, { target: { value: "long enough words" } });
+    expect(again.getAttribute("aria-invalid")).toBeNull();
+    expect(again.getAttribute("aria-describedby")).toBeNull();
     expect(go.disabled).toBe(false);
     fireEvent.click(go);
     await waitFor(() => expect(accounts.createVault).toHaveBeenCalledWith("long enough words"));
@@ -341,6 +347,7 @@ describe("signing in", () => {
     const { accounts } = await setup(two, { exists: true, unlocked: false });
     const dialog = await clickAdd();
     await screen.findByText("Unlock your accounts");
+    expect(screen.getByLabelText("Passphrase").getAttribute("aria-describedby")).toBeNull();
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "wrong wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
     await waitFor(() => expect(dialog.textContent).toContain("doesn't match"));
@@ -410,6 +417,11 @@ describe("account management modal", () => {
     fireEvent.click(screen.getByRole("button", { name: /Sign out and remove/ }));
     expect(accounts.remove).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog").textContent).toContain("profiles, worlds and playtime stay");
+    fireEvent.click(screen.getByRole("button", { name: "Keep account" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /Sign out and remove/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Sign out and remove/ }));
     fireEvent.click(screen.getByRole("button", { name: "Remove account" }));
     await waitFor(() => expect(accounts.remove).toHaveBeenCalledWith("b"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());

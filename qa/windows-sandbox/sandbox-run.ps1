@@ -47,8 +47,8 @@ Write-Host ('Extracted to: ' + $cladeRoot)
 $after = @"
 `$ErrorActionPreference = 'Stop'
 & '$qa\portable-audit.ps1' -Action Snapshot -Label after -OutDir '$results' -CladeRoot '$cladeRoot'
-`$b = (Get-ChildItem '$results' -Filter 'snapshot-before-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
-`$a = (Get-ChildItem '$results' -Filter 'snapshot-after-*.json'  | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+`$b = (Get-ChildItem -LiteralPath '$results' -Filter 'snapshot-before-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+`$a = (Get-ChildItem -LiteralPath '$results' -Filter 'snapshot-after-*.json'  | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
 # Windows PowerShell 5.1: Tee-Object / Out-File default to UTF-16LE, so write the text explicitly as UTF-8.
 `$out = (& '$qa\portable-audit.ps1' -Action Compare -Before `$b -After `$a *>&1 | Out-String)
 `$code = `$LASTEXITCODE

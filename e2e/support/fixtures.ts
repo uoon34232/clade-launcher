@@ -217,7 +217,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     onboardingDone: true,
     memoryMb: null,
     memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
-    onLaunch: "keep_open",
+    onLaunch: "hide",
     onExit: "show",
     version: "0.1.0",
   },

@@ -190,8 +190,31 @@ test.describe("memory saved as Custom", () => {
   });
 });
 
+test.describe("memory saved above what a smaller computer allows", () => {
+  test.use({
+    backendConfig: {
+      ui: {
+        ...DEFAULT_CONFIG.ui,
+        memoryMb: 16384,
+        memory: { min: 1024, max: 6144, auto: 4096, total: 8192 },
+      },
+    },
+  });
+
+  test("clamps the displayed slider value and label to this computer's safe range", async ({
+    page,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    const slider = dialog.getByRole("slider", { name: text("settings.memory.slider") });
+    await expect(slider).toHaveAttribute("aria-valuetext", "6 GB");
+    await expect(dialog.getByText("6 GB", { exact: true })).toBeVisible();
+  });
+});
+
 test.describe("behavior around the game", () => {
-  test("keeps Clade open and shows it again by default, and saves each choice", async ({
+  test("hides Clade on launch and shows it again on exit by default, and saves each choice", async ({
     page,
     backend,
     openApp,
@@ -201,24 +224,24 @@ test.describe("behavior around the game", () => {
     const onLaunch = dialog.getByRole("radiogroup", { name: text("settings.onLaunch") });
     const onExit = dialog.getByRole("radiogroup", { name: text("settings.onExit") });
     await expect(
-      onLaunch.getByRole("radio", { name: text("settings.onLaunch.keep") }),
+      onLaunch.getByRole("radio", { name: text("settings.onLaunch.hide") }),
     ).toBeChecked();
     await expect(onExit.getByRole("radio", { name: text("settings.onExit.show") })).toBeChecked();
     await expect(dialog.getByText(text("settings.onExit.hiddenNote"))).toHaveCount(0);
 
-    await onLaunch.getByRole("radio", { name: text("settings.onLaunch.hide") }).click();
-    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("hide");
+    await onLaunch.getByRole("radio", { name: text("settings.onLaunch.keep") }).click();
+    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("keep_open");
     await onExit.getByRole("radio", { name: text("settings.onExit.hidden") }).click();
     await expect.poll(async () => (await backend.state()).ui.onExit).toBe("stay_hidden");
     // being honest about what staying hidden means
     await expect(dialog.getByText(text("settings.onExit.hiddenNote"))).toBeVisible();
 
-    await onLaunch.getByRole("radio", { name: text("settings.onLaunch.keep") }).click();
-    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("keep_open");
+    await onLaunch.getByRole("radio", { name: text("settings.onLaunch.hide") }).click();
+    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("hide");
     expect((await backend.calls("set_behavior")).map((c) => c.args)).toEqual([
-      { onLaunch: "hide" },
-      { onExit: "stay_hidden" },
       { onLaunch: "keep_open" },
+      { onExit: "stay_hidden" },
+      { onLaunch: "hide" },
     ]);
   });
 });
@@ -294,6 +317,7 @@ test.describe("reset settings", () => {
 
     await dialog.getByRole("button", { name: text("settings.resetKeep") }).click();
     await expect(dialog.getByText(text("settings.resetConfirm"))).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: text("settings.reset") })).toBeFocused();
     await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
     expect(await backend.calls("reset_settings")).toHaveLength(0);
   });
@@ -317,9 +341,9 @@ test.describe("reset settings", () => {
       .click();
     await dialog
       .getByRole("radiogroup", { name: text("settings.onLaunch") })
-      .getByRole("radio", { name: text("settings.onLaunch.hide") })
+      .getByRole("radio", { name: text("settings.onLaunch.keep") })
       .click();
-    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("hide");
+    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("keep_open");
 
     await dialog.getByRole("button", { name: text("settings.reset") }).click();
     await dialog.getByRole("button", { name: text("settings.resetDo") }).click();
@@ -337,14 +361,14 @@ test.describe("reset settings", () => {
         .getByRole("radio", { name: text("settings.transparency.system") }),
     ).toBeChecked();
     await expect(dialog.getByRole("radio", { name: text("settings.memory.auto") })).toBeChecked();
-    await expect(dialog.getByRole("radio", { name: text("settings.onLaunch.keep") })).toBeChecked();
+    await expect(dialog.getByRole("radio", { name: text("settings.onLaunch.hide") })).toBeChecked();
     await expect(page.locator("html")).toHaveAttribute("data-motion", "system");
     const ui = (await backend.state()).ui;
     expect([ui.soundEnabled, ui.reducedMotion, ui.memoryMb, ui.onLaunch]).toEqual([
       true,
       "system",
       null,
-      "keep_open",
+      "hide",
     ]);
     // the introduction stays seen, and the change touched nothing but the settings
     expect(ui.onboardingDone).toBe(true);

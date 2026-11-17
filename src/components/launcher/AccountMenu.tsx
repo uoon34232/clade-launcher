@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { SettingsIcon } from "lucide-react";
 import {
   DropdownMenu,
@@ -34,9 +35,18 @@ const ROW_ITEM =
 export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: Props) {
   const t = useT();
   const active = accounts.find((a) => a.id === activeId) ?? accounts[0];
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (!open) {
+          setHoveredId(null);
+          setFocusedId(null);
+        }
+      }}
+    >
       <DropdownMenuTrigger
         onClick={() => playSound("click")}
         aria-label={
@@ -48,7 +58,7 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
           account={active}
           className="ring-cream/10 size-8 shrink-0 rounded-[0.5rem] ring-1"
         />
-        <span className="text-cream/75 group-hover:text-cream -translate-y-px text-[0.875rem] leading-none font-medium tracking-[0.005em] transition-colors duration-200">
+        <span className="text-cream/75 group-hover:text-cream max-w-[9.5rem] -translate-y-px truncate text-[0.875rem] leading-tight font-medium tracking-[0.005em] transition-colors duration-200">
           {active ? active.username : t("account.signIn")}
         </span>
       </DropdownMenuTrigger>
@@ -60,19 +70,33 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
       >
         {active && (
           <>
-            <DropdownMenuRadioGroup
-              value={active.id}
-              onValueChange={(id: string) => {
-                playSound("select");
-                onSelect(id);
-              }}
+            <div
+              role="presentation"
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1"
+              style={{ gridTemplateRows: `repeat(${accounts.length}, auto)` }}
             >
-              {accounts.map((a) => (
-                <div key={a.id} role="presentation" className="group/row flex items-center gap-1">
+              <DropdownMenuRadioGroup
+                value={active.id}
+                onValueChange={(id: string) => {
+                  playSound("select");
+                  onSelect(id);
+                }}
+                className="col-start-1 grid"
+                style={{
+                  gridRow: `1 / span ${accounts.length}`,
+                  gridTemplateRows: "subgrid",
+                }}
+              >
+                {accounts.map((a) => (
                   <DropdownMenuRadioItem
+                    key={a.id}
                     value={a.id}
                     closeOnClick
-                    className={`${ROW_ITEM} data-[checked]:bg-cream/[0.06] flex-1 pr-9`}
+                    onPointerEnter={() => setHoveredId(a.id)}
+                    onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
+                    onFocus={() => setFocusedId(a.id)}
+                    onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
+                    className={`${ROW_ITEM} data-[checked]:bg-cream/[0.06] min-w-0 pr-9`}
                   >
                     <PlayerHead
                       account={a}
@@ -87,9 +111,20 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
                       )}
                     </span>
                   </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              {accounts.map((a, i) => {
+                const revealed = hoveredId === a.id || focusedId === a.id;
+                return (
                   <DropdownMenuItem
+                    key={a.id}
+                    style={{ gridColumnStart: 2, gridRowStart: i + 1 }}
                     aria-label={t("account.manage", { name: a.username })}
-                    className="text-cream/55 focus:bg-cream/[0.1] focus:text-cream size-9 shrink-0 justify-center rounded-[0.75rem] p-0 opacity-0 transition-[opacity,background-color,color] duration-150 group-focus-within/row:opacity-100 group-hover/row:opacity-100 focus:opacity-100"
+                    onPointerEnter={() => setHoveredId(a.id)}
+                    onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
+                    onFocus={() => setFocusedId(a.id)}
+                    onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
+                    className={`text-cream/55 focus:bg-cream/[0.1] focus:text-cream size-9 shrink-0 justify-center rounded-[0.75rem] p-0 transition-[opacity,background-color,color] duration-150 hover:opacity-100 focus:opacity-100 data-[highlighted]:opacity-100 ${revealed ? "opacity-100" : "opacity-0"}`}
                     onClick={() => {
                       playSound("click");
                       window.setTimeout(() => onManage(a.id), 0); // after the menu has closed and returned focus
@@ -97,9 +132,9 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
                   >
                     <SettingsIcon aria-hidden strokeWidth={1.75} className="size-4" />
                   </DropdownMenuItem>
-                </div>
-              ))}
-            </DropdownMenuRadioGroup>
+                );
+              })}
+            </div>
             <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5" />
           </>
         )}

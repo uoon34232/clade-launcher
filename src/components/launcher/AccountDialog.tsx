@@ -1,4 +1,4 @@
-import { useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Account, AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
@@ -15,6 +15,7 @@ interface Props {
   onClose: () => void;
   onSignInAgain: (id: string) => void;
   onRemoved: (snapshot: AccountsSnapshot) => void;
+  onVaultReset?: (snapshot: AccountsSnapshot) => void;
   api: AccountsApi;
 }
 
@@ -30,6 +31,7 @@ export function AccountDialog({
   onClose,
   onRemoved,
   onSignInAgain,
+  onVaultReset,
   api,
 }: Props) {
   // Keep the last account while the closing animation runs.
@@ -69,11 +71,13 @@ export function AccountDialog({
           setConfirming={setConfirming}
           confirmingReset={confirmingReset}
           setConfirmingReset={setConfirmingReset}
+          recovering={recovering}
           setRecovering={setRecovering}
           capabilities={capabilities}
           onClose={onClose}
           onRemoved={onRemoved}
           onSignInAgain={onSignInAgain}
+          onVaultReset={onVaultReset}
           api={api}
           doneRef={doneRef}
         />
@@ -88,11 +92,13 @@ function Body({
   setConfirming,
   confirmingReset,
   setConfirmingReset,
+  recovering,
   setRecovering,
   capabilities,
   onClose,
   onSignInAgain,
   onRemoved,
+  onVaultReset,
   api,
   doneRef,
 }: Omit<Props, "account"> & {
@@ -101,12 +107,23 @@ function Body({
   setConfirming: (confirming: boolean) => void;
   confirmingReset: boolean;
   setConfirmingReset: (confirming: boolean) => void;
+  recovering: boolean;
   setRecovering: (recovering: boolean) => void;
   doneRef: RefObject<HTMLButtonElement | null>;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const removeTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreRemoveFocus = useRef(false);
+  const inlineConfirming = confirmingReset || recovering;
+
+  useEffect(() => {
+    if (!confirming && restoreRemoveFocus.current) {
+      restoreRemoveFocus.current = false;
+      removeTriggerRef.current?.focus();
+    }
+  }, [confirming]);
 
   const remove = () => {
     setBusy(true);
@@ -164,32 +181,39 @@ function Body({
         confirmingReset={confirmingReset}
         setConfirmingReset={setConfirmingReset}
         setRecovering={setRecovering}
+        onVaultReset={onVaultReset}
       />
 
       <ModalFooter>
         {confirming ? (
-          <>
-            <p className="text-graphite mr-auto text-[0.8125rem]">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-2.5 gap-y-2">
+            <p className="text-graphite mr-auto min-w-[12rem] flex-1 text-[0.8125rem]">
               {t("accountModal.confirmRemove", { name: account.username })}
             </p>
-            <button
-              type="button"
-              autoFocus
-              disabled={busy}
-              className={BUTTON_QUIET}
-              onClick={() => setConfirming(false)}
-            >
-              {t("accountModal.keep")}
-            </button>
-            <button type="button" disabled={busy} className={BUTTON_DANGER} onClick={remove}>
-              {busy ? t("accountModal.removing") : t("accountModal.remove")}
-            </button>
-          </>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                autoFocus
+                disabled={busy}
+                className={BUTTON_QUIET}
+                onClick={() => {
+                  restoreRemoveFocus.current = true;
+                  setConfirming(false);
+                }}
+              >
+                {t("accountModal.keep")}
+              </button>
+              <button type="button" disabled={busy} className={BUTTON_DANGER} onClick={remove}>
+                {busy ? t("accountModal.removing") : t("accountModal.remove")}
+              </button>
+            </div>
+          </div>
         ) : (
-          <>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-2.5 gap-y-2">
             <button
+              ref={removeTriggerRef}
               type="button"
-              disabled={confirmingReset}
+              disabled={inlineConfirming}
               className={`${BUTTON_DANGER} mr-auto`}
               onClick={() => setConfirming(true)}
             >
@@ -198,6 +222,7 @@ function Body({
             {account.needsSignIn && (
               <button
                 type="button"
+                disabled={inlineConfirming}
                 className={BUTTON_PRIMARY}
                 onClick={() => onSignInAgain(account.id)}
               >
@@ -207,6 +232,7 @@ function Body({
             <button
               ref={doneRef}
               type="button"
+              disabled={inlineConfirming}
               className={BUTTON_SOFT}
               onClick={() => {
                 playSound("click");
@@ -215,7 +241,7 @@ function Body({
             >
               {t("common.done")}
             </button>
-          </>
+          </div>
         )}
       </ModalFooter>
       {error && (

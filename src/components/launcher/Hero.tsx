@@ -16,6 +16,7 @@ import { playSound } from "@/lib/sound/soundService";
 const OUT_MS = 170;
 const IN_MS = 230; // OUT + IN = 400 ms
 const REDUCED_FADE_MS = 100;
+const SAVE_DEBOUNCE_MS = 800;
 
 interface HeroProps {
   /** Facts for future contextual messages (last instance, playtime, time since last session). */
@@ -33,9 +34,42 @@ export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) 
     pickPhrase(candidates(context), lastPhraseId ?? undefined),
   );
 
+  const initialSavedRef = useRef(false);
+  const lastSavedRef = useRef<string | null>(lastPhraseId ?? null);
+  const pendingSaveRef = useRef<string | null>(null);
+  const saveTimerRef = useRef<number | undefined>(undefined);
+
   // Whatever is on screen is what gets remembered (saved by the launcher's settings service).
+  // The startup phrase is saved right away; rapid headline shuffles are debounced by 800 ms.
   useEffect(() => {
-    saveLastPhrase(phrase.id);
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = undefined;
+
+    if (!initialSavedRef.current) {
+      initialSavedRef.current = true;
+      pendingSaveRef.current = null;
+      if (lastSavedRef.current !== phrase.id) {
+        lastSavedRef.current = phrase.id;
+        saveLastPhrase(phrase.id);
+      }
+      return;
+    }
+
+    if (lastSavedRef.current === phrase.id) {
+      pendingSaveRef.current = null;
+      return;
+    }
+
+    pendingSaveRef.current = phrase.id;
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = undefined;
+      const id = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (id && lastSavedRef.current !== id) {
+        lastSavedRef.current = id;
+        saveLastPhrase(id);
+      }
+    }, SAVE_DEBOUNCE_MS);
   }, [phrase.id]);
 
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -113,6 +147,14 @@ export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) 
 
   useEffect(
     () => () => {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = undefined;
+      const pending = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (pending && lastSavedRef.current !== pending) {
+        lastSavedRef.current = pending;
+        saveLastPhrase(pending);
+      }
       outAnim.current?.cancel();
       pressAnim.current?.cancel();
       busy.current = false;

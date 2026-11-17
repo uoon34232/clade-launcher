@@ -44,7 +44,9 @@ $rootFull = [System.IO.Path]::GetFullPath($StagingRoot).TrimEnd('\')
 foreach ($forbidden in @($env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, (Join-Path $env:APPDATA '.minecraft'), [Environment]::GetFolderPath('MyDocuments'))) {
   if ($forbidden -and ($rootFull -ieq $forbidden.TrimEnd('\'))) { throw "Refusing to stage directly in $forbidden. Use a temp folder." }
 }
-if ($rootFull -like ($repo.TrimEnd('\') + '*')) { throw 'Refusing to stage inside the repository.' }
+$repoClean = $repo.TrimEnd('\')
+$repoPrefix = $repoClean + '\'
+if (($rootFull -ieq $repoClean) -or $rootFull.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to stage inside the repository.' }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $staging = Join-Path $rootFull ('clade-qa-' + $stamp)

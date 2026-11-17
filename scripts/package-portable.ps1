@@ -43,22 +43,25 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $target = 'x86_64-pc-windows-msvc'
 $outDir = [System.IO.Path]::GetFullPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
 $rel = Join-Path $repo 'scripts\release'
 function Run-Node { & node @args; if ($LASTEXITCODE) { throw "node $($args -join ' ') failed" } }
+function ConvertTo-TomlString([string] $value) {
+  return '"' + $value.Replace('\', '\\').Replace('"', '\"') + '"'
+}
 
 # ---- 1. one version everywhere
 $checkArgs = @((Join-Path $rel 'check-versions.mjs'), '--root', $repo)
 if ($Tag) { $checkArgs += @('--tag', $Tag) }
 Run-Node @checkArgs
-$version = (Get-Content (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
+$version = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
 
 # ---- 1b. the pinned WebView2 runtime is checked FIRST, so a missing pin or a wrong CAB fails in seconds, not after a build
 if (-not $WithoutWebView2) {
   Run-Node (Join-Path $rel 'webview2.mjs') status                  # says exactly what is not configured yet
-  $cab = (Resolve-Path $WebView2Cab).Path
+  $cab = (Resolve-Path -LiteralPath $WebView2Cab).Path
   Run-Node (Join-Path $rel 'webview2.mjs') verify --cab $cab       # SHA-256 against the pin, before anything is extracted
 }
 
@@ -69,59 +72,82 @@ $exe = Join-Path $repo "src-tauri\target\$target\release\clade-launcher.exe"
 $shortPath = { param($p) try { (New-Object -ComObject Scripting.FileSystemObject).GetFolder($p).ShortPath } catch { $null } }
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
 $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
-$forbid = @($env:USERPROFILE, $repo, $cargoHome, $rustupHome) + @($env:USERPROFILE, $repo, $cargoHome, $rustupHome | ForEach-Object { if (Test-Path $_) { & $shortPath $_ } }) |
+$forbid = @($env:USERPROFILE, $repo, $cargoHome, $rustupHome) + @($env:USERPROFILE, $repo, $cargoHome, $rustupHome | ForEach-Object { if ($_ -and (Test-Path -LiteralPath $_)) { & $shortPath $_ } }) |
   Where-Object { $_ } | Sort-Object -Unique
 if (-not $SkipBuild) {
-  Push-Location $repo
+  $cargoCfg = Join-Path ([System.IO.Path]::GetTempPath()) ('clade-cargo-' + [guid]::NewGuid().ToString('N') + '.toml')
+  Push-Location -LiteralPath $repo
   try {
-    $flags = "-C target-feature=+crt-static --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$rustupHome=/rustup --remap-path-prefix=$repo=/clade"
-    # Static CRT and path remapping only for the final target artifacts. Passing --target keeps build scripts
-    # and proc-macros on the normal host toolchain path.
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+    # Static CRT and path remapping only for the final target artifacts via a TOML array in Cargo --config
+    # (never space-split RUSTFLAGS), so paths in $repo or $env:USERPROFILE containing spaces remap cleanly
+    # while host build scripts and proc-macros stay on the normal toolchain path.
+    $rustFlags = New-Object System.Collections.Generic.List[string]
+    $rustFlags.Add('-C')
+    $rustFlags.Add('target-feature=+crt-static')
+    foreach ($pair in @(
+        @($env:USERPROFILE, '/user'),
+        @($cargoHome, '/cargo'),
+        @($rustupHome, '/rustup'),
+        @($repo, '/clade')
+      )) {
+      $from = $pair[0]
+      $to = $pair[1]
+      if (-not $from) { continue }
+      $rustFlags.Add("--remap-path-prefix=$from=$to")
+      if (Test-Path -LiteralPath $from) {
+        $short = & $shortPath $from
+        if ($short -and ($short -ne $from)) { $rustFlags.Add("--remap-path-prefix=$short=$to") }
+      }
+    }
+    $tomlItems = ($rustFlags | ForEach-Object { ConvertTo-TomlString $_ }) -join ', '
+    $tomlText = "[target.$target]`nrustflags = [$tomlItems]`n"
+    [System.IO.File]::WriteAllText($cargoCfg, $tomlText, (New-Object System.Text.UTF8Encoding($false)))
+
     # The C code that is compiled into the binary (the TLS library) records its source paths too; MSVC's
     # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered.
     $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE) { throw 'pnpm install failed' }
-    pnpm tauri build --no-bundle --target $target -- -- --locked
+    pnpm tauri build --no-bundle --target $target -- -- --locked --config $cargoCfg
     if ($LASTEXITCODE) { throw 'tauri build failed' }
   } finally {
-    Remove-Item Env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS, Env:CFLAGS -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:CFLAGS -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $cargoCfg) { Remove-Item -LiteralPath $cargoCfg -Force -ErrorAction SilentlyContinue }
     Pop-Location
   }
 }
-if (-not (Test-Path $exe)) { throw "Release binary not found: $exe" }
+if (-not (Test-Path -LiteralPath $exe)) { throw "Release binary not found: $exe" }
 
 # ---- 3. the WebView2 Fixed Version Runtime
 $wvDir = $null
 if (-not $WithoutWebView2) {
-  $cfg = Get-Content (Join-Path $rel 'webview2-runtime.json') -Raw | ConvertFrom-Json
+  $cfg = Get-Content -LiteralPath (Join-Path $rel 'webview2-runtime.json') -Raw | ConvertFrom-Json
   $work = Join-Path ([System.IO.Path]::GetTempPath()) ('clade-wv2-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $work | Out-Null
   try {
     & (Join-Path $env:windir 'System32\expand.exe') -F:* $cab $work | Out-Null
     if ($LASTEXITCODE) { throw "expand.exe failed on $cab" }
-    $found = Get-ChildItem $work -Recurse -Filter msedgewebview2.exe | Select-Object -First 1
+    $found = Get-ChildItem -LiteralPath $work -Recurse -Filter msedgewebview2.exe | Select-Object -First 1
     if (-not $found) { throw "msedgewebview2.exe not found inside $cab" }
     $wvSource = $found.Directory.FullName
-    $sig = Get-AuthenticodeSignature (Join-Path $wvSource 'msedgewebview2.exe')
+    $sig = Get-AuthenticodeSignature -LiteralPath (Join-Path $wvSource 'msedgewebview2.exe')
     if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
       throw "msedgewebview2.exe is not validly signed by Microsoft Corporation (status: $($sig.Status))."
     }
-    $wvVersion = (Get-Item (Join-Path $wvSource 'msedgewebview2.exe')).VersionInfo.ProductVersion
+    $wvVersion = (Get-Item -LiteralPath (Join-Path $wvSource 'msedgewebview2.exe')).VersionInfo.ProductVersion
     if ($wvVersion -ne $cfg.version) { throw "WebView2 runtime is $wvVersion but the pinned version is $($cfg.version)." }
     Write-Host "WebView2 Fixed Version ${wvVersion}: SHA-256 matches the pin, Authenticode signature valid"
     $wvDir = Join-Path $outDir 'webview2-extracted'
-    if (Test-Path $wvDir) { Remove-Item $wvDir -Recurse -Force }
+    if (Test-Path -LiteralPath $wvDir) { Remove-Item -LiteralPath $wvDir -Recurse -Force }
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-    Copy-Item $wvSource $wvDir -Recurse
-  } finally { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+    Copy-Item -LiteralPath $wvSource -Destination $wvDir -Recurse
+  } finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # ---- 4. notices, 5. package + validation
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $notices = Join-Path $outDir 'THIRD-PARTY-NOTICES.txt'
-Push-Location $repo
+Push-Location -LiteralPath $repo
 try { Run-Node (Join-Path $rel 'generate-notices.mjs') --out $notices --strict } finally { Pop-Location }
 
 $pkgArgs = @((Join-Path $rel 'package.mjs'), '--exe', $exe, '--license', (Join-Path $repo 'LICENSE'), '--notices', $notices,
@@ -136,11 +162,11 @@ foreach ($f in $forbid) { $valArgs += @('--forbid-string', $f) }
 if ($WithoutWebView2) { $valArgs += '--allow-missing-webview2' }
 Run-Node @valArgs
 
-if ($wvDir -and (Test-Path $wvDir)) { Remove-Item $wvDir -Recurse -Force }   # large and already inside the ZIP
-$hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-$expected = ((Get-Content "$zip.sha256" -Raw) -split '\s+')[0]
+if ($wvDir -and (Test-Path -LiteralPath $wvDir)) { Remove-Item -LiteralPath $wvDir -Recurse -Force }   # large and already inside the ZIP
+$hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+$expected = ((Get-Content -LiteralPath "$zip.sha256" -Raw) -split '\s+')[0]
 if ($hash -ne $expected) { throw "SHA-256 file ($expected) does not match the ZIP ($hash)." }
 Write-Host ""
-Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+Write-Host "Created $zip ($([math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1)) MB)"
 Write-Host "SHA-256 $hash"
 if ($WithoutWebView2) { Write-Warning 'This build has NO bundled WebView2 runtime and is for development only; it fails the release validation.' }

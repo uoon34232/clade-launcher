@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { testSkin } from "@/lib/accounts/testSkin";
+import { parseAccounts } from "@/lib/accounts/api";
+import { testSkin } from "@/test/testSkin";
 import { PlayerHead } from "./PlayerHead";
 
 afterEach(cleanup);
@@ -58,5 +59,27 @@ describe("PlayerHead", () => {
     // A later, different skin gets its own chance.
     view.rerender(<PlayerHead account={{ username: "A", skin: testSkin(64, 64, 2) }} />);
     expect(view.container.querySelector("image")).not.toBeNull();
+  });
+
+  it("uses pre-parsed skinDimensions from Account without re-parsing the PNG header on render", () => {
+    const parsed = parseAccounts({
+      accounts: [{ id: "a", username: "Alex", uuid: "u", skin: testSkin(128, 128) }],
+      active: "a",
+      capabilities: {},
+    });
+    expect(parsed.accounts[0].skinDimensions).toEqual({ width: 128, height: 128 });
+
+    // Pre-parsed skinDimensions is read directly without running skinSize(skin) on render.
+    const view = render(
+      <PlayerHead
+        account={{
+          username: "Alex",
+          skin: "data:image/png;base64,pre-parsed",
+          skinDimensions: { width: 128, height: 128 },
+        }}
+      />,
+    );
+    expect(layers(view.container).map((l) => l.viewBox)).toEqual(["16 16 16 16", "80 16 16 16"]);
+    expect(view.container.querySelector("image")?.getAttribute("width")).toBe("128");
   });
 });

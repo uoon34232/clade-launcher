@@ -273,6 +273,37 @@ describe("structured backend errors are worded in the current language", () => {
     expect(describeCode("vault", "never_heard_of_it")).toBe("Не получилось.");
   });
 
+  it("words catalog, sign-in, language and folder-path codes in both languages", () => {
+    expect(describeCode("catalog", "catalog_unavailable")).toBe(
+      "Could not load the version list. Check your connection and try again.",
+    );
+    expect(describeCode("signIn", "sign_in_unavailable")).toBe(
+      "Microsoft sign-in isn't available in this build yet.",
+    );
+    expect(describeCode("settings", "unsupported_language")).toBe("That language isn't supported.");
+    expect(describeCode("launch", "unsupported_folder_path")).toBe(
+      "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
+    );
+    expect(describeCode("settings", "unsupported_folder_path")).toBe(
+      "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
+    );
+
+    setLocale("ru");
+    expect(describeCode("catalog", "catalog_unavailable")).toBe(
+      "Не удалось загрузить список версий. Проверь подключение и повтори.",
+    );
+    expect(describeCode("signIn", "sign_in_unavailable")).toBe(
+      "Вход через Microsoft пока недоступен в этой сборке.",
+    );
+    expect(describeCode("settings", "unsupported_language")).toBe("Этот язык не поддерживается.");
+    expect(describeCode("launch", "unsupported_folder_path")).toBe(
+      "Clade не может работать из этой папки. Перемести папку Clade на обычный локальный диск и попробуй снова.",
+    );
+    expect(describeCode("settings", "unsupported_folder_path")).toBe(
+      "Clade не может работать из этой папки. Перемести папку Clade на обычный локальный диск и попробуй снова.",
+    );
+  });
+
   it("has wording for every code the Rust backend can send", () => {
     const dir = join(process.cwd(), "src-tauri", "src");
     const sources = readdirSync(dir, { recursive: true })
@@ -325,6 +356,7 @@ describe("structured backend errors are worded in the current language", () => {
         "storage",
         "open_failed",
         "unsupported_language",
+        "unsupported_folder_path",
         "unknown_account",
         "sign_in_unavailable",
         "unsupported_value",
@@ -377,12 +409,16 @@ describe("structured backend errors are worded in the current language", () => {
     expect(
       wanted("settings", [
         "unsupported_value",
+        "unsupported_language",
+        "unsupported_folder_path",
         "invalid_memory",
         "diagnostics_failed",
         "open_failed",
         "storage",
       ]),
     ).toEqual([]);
+    expect(wanted("catalog", ["catalog_unavailable"])).toEqual([]);
+    expect(wanted("signIn", ["sign_in_unavailable"])).toEqual([]);
     expect(
       wanted("vault", [
         "passphrase_mismatch",

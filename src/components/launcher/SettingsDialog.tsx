@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatGigabytes } from "@/features/launcher/profileUi";
 import { COPYRIGHT_LINE, versionLabel } from "@/lib/appInfo";
 import { LANGUAGE_NAMES, LOCALES, useLocale, useT } from "@/lib/i18n";
@@ -82,12 +82,12 @@ function SettingsBody({
 
   return (
     <>
-      <div className="grid gap-x-8 sm:grid-cols-2">
-        <div className="flex flex-col">
+      <div className="grid gap-x-6 sm:grid-cols-2 lg:gap-x-8">
+        <div className="flex min-w-0 flex-col">
           <InterfaceSection />
           <MinecraftSection />
         </div>
-        <div className="flex flex-col">
+        <div className="flex min-w-0 flex-col">
           <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} />
           <SupportSection support={support} confirming={confirming} setConfirming={setConfirming} />
         </div>
@@ -130,7 +130,13 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className={stacked ? "flex flex-col gap-1.5" : "flex items-center justify-between gap-4"}>
+    <div
+      className={
+        stacked
+          ? "flex min-w-0 flex-col gap-1.5"
+          : "flex min-w-0 items-center justify-between gap-4"
+      }
+    >
       <span id={id} className="text-graphite text-[0.9375rem]">
         {label}
       </span>
@@ -249,7 +255,7 @@ function MinecraftSection() {
   const custom = ui.memoryMb !== null;
   const [draft, setDraft] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const value = draft ?? ui.memoryMb ?? auto;
+  const value = Math.min(max, Math.max(min, draft ?? ui.memoryMb ?? auto));
 
   const report = (r: SaveResult) => setError(r.ok ? null : describeError("settings", r.error));
   const commit = (mb: number) => {
@@ -369,6 +375,15 @@ function SupportSection({
   const t = useT();
   const [notice, setNotice] = useState<Notice>(null);
   const [exporting, setExporting] = useState(false);
+  const resetTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreResetFocus = useRef(false);
+
+  useEffect(() => {
+    if (!confirming && restoreResetFocus.current) {
+      restoreResetFocus.current = false;
+      resetTriggerRef.current?.focus();
+    }
+  }, [confirming]);
 
   const fail = (e: unknown) => setNotice({ kind: "error", text: describeError("settings", e) });
   const run = (action: () => Promise<void>) => {
@@ -407,13 +422,14 @@ function SupportSection({
           <p role="alert" className="text-graphite text-[0.9375rem]">
             {t("settings.resetConfirm")}
           </p>
-          <div className="flex items-center justify-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <button
               type="button"
               autoFocus
               className={BUTTON_QUIET}
               onClick={() => {
                 playSound("click");
+                restoreResetFocus.current = true;
                 setConfirming(false);
               }}
             >
@@ -429,29 +445,30 @@ function SupportSection({
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              className={BUTTON_SMALL_SOFT}
+              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
               onClick={() => run(() => support.openCladeFolder())}
             >
               {t("settings.openFolder")}
             </button>
             <button
               type="button"
-              className={BUTTON_SMALL_SOFT}
+              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
               onClick={() => run(() => support.openLogsFolder())}
             >
               {t("common.openLogs")}
             </button>
             <button
               type="button"
-              className={BUTTON_SMALL_SOFT}
+              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
               disabled={exporting}
               onClick={exportDiagnostics}
             >
               {exporting ? t("settings.exporting") : t("settings.exportDiagnostics")}
             </button>
             <button
+              ref={resetTriggerRef}
               type="button"
-              className={BUTTON_SMALL_QUIET}
+              className={`${BUTTON_SMALL_QUIET} min-w-0 truncate px-2.5`}
               onClick={() => {
                 playSound("click");
                 setNotice(null);

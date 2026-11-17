@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { READY_ACCOUNTS, readyAccountsClient } from "@/lib/accounts/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
+import { READY_ACCOUNTS, readyAccountsClient } from "@/test/testAccounts";
 import { Modal } from "./Modal";
 import { VaultRecovery } from "./VaultRecovery";
 
@@ -12,10 +12,10 @@ function setup(layout: "inline" | "modal", resetVault?: () => Promise<typeof REA
   const api = readyAccountsClient();
   if (resetVault) api.resetVault = vi.fn(resetVault);
   const onAsking = vi.fn();
-  const onDone = vi.fn();
+  const onReset = vi.fn();
   const view = render(
     <Modal open onOpenChange={() => undefined}>
-      <VaultRecovery api={api} layout={layout} onAsking={onAsking} onDone={onDone}>
+      <VaultRecovery api={api} layout={layout} onAsking={onAsking} onReset={onReset}>
         {(link) => (
           <form>
             <label>
@@ -28,7 +28,7 @@ function setup(layout: "inline" | "modal", resetVault?: () => Promise<typeof REA
       </VaultRecovery>
     </Modal>,
   );
-  return { api, onAsking, onDone, ...view };
+  return { api, onAsking, onReset, ...view };
 }
 
 const question =
@@ -49,19 +49,20 @@ describe.each(["inline", "modal"] as const)("Forgot passphrase (%s)", (layout) =
     expect(api.resetVault).not.toHaveBeenCalled();
   });
 
-  it("puts focus on the safe answer, and Keep trying brings the form back untouched", () => {
+  it("puts focus on the safe answer, and Keep trying brings the form back and restores focus", () => {
     const { api, onAsking } = setup(layout);
     fireEvent.click(screen.getByRole("button", { name: "Forgot passphrase?" }));
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep trying" }));
     fireEvent.click(screen.getByRole("button", { name: "Keep trying" }));
     expect(onAsking).toHaveBeenLastCalledWith(false);
     expect(screen.getByLabelText("Passphrase")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Forgot passphrase?" }));
     expect(api.resetVault).not.toHaveBeenCalled();
   });
 
   it("only Start fresh resets, once, while a second click is ignored", async () => {
     let done: (v: typeof READY_ACCOUNTS) => void = () => undefined;
-    const { api, onDone, onAsking } = setup(layout, () => new Promise((r) => (done = r)));
+    const { api, onReset, onAsking } = setup(layout, () => new Promise((r) => (done = r)));
     fireEvent.click(screen.getByRole("button", { name: "Forgot passphrase?" }));
     const confirm = screen.getByRole("button", { name: "Start fresh" });
     fireEvent.click(confirm);
@@ -70,7 +71,8 @@ describe.each(["inline", "modal"] as const)("Forgot passphrase (%s)", (layout) =
     expect(screen.getByRole("button", { name: "Working…" })).toHaveProperty("disabled", true);
     expect(screen.getByRole("button", { name: "Keep trying" })).toHaveProperty("disabled", true);
     await act(() => Promise.resolve(done(READY_ACCOUNTS)));
-    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onReset).toHaveBeenCalledTimes(1));
+    expect(onReset).toHaveBeenCalledWith(READY_ACCOUNTS);
     expect(onAsking).toHaveBeenLastCalledWith(false);
   });
 
@@ -79,15 +81,34 @@ describe.each(["inline", "modal"] as const)("Forgot passphrase (%s)", (layout) =
       .fn<() => Promise<typeof READY_ACCOUNTS>>()
       .mockRejectedValueOnce(new BackendError("no", "reset_failed"))
       .mockResolvedValue(READY_ACCOUNTS);
-    const { api, onDone } = setup(layout, fail);
+    const { api, onReset } = setup(layout, fail);
     fireEvent.click(screen.getByRole("button", { name: "Forgot passphrase?" }));
     fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Clade couldn’t archive the old sign-in store, so nothing was changed. Close anything using the Clade folder and try again.",
     );
-    expect(onDone).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Keep trying" })).toHaveProperty("disabled", false);
+    expect(onReset).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
-    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onReset).toHaveBeenCalledWith(READY_ACCOUNTS));
+    expect(api.resetVault).toHaveBeenCalledTimes(2);
+  });
+
+  it("hides Keep trying when the vault was already archived (accounts_not_updated), leaving Start fresh to retry", async () => {
+    const fail = vi
+      .fn<() => Promise<typeof READY_ACCOUNTS>>()
+      .mockRejectedValueOnce(new BackendError("no", "accounts_not_updated"))
+      .mockResolvedValue(READY_ACCOUNTS);
+    const { api, onReset } = setup(layout, fail);
+    fireEvent.click(screen.getByRole("button", { name: "Forgot passphrase?" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The old sign-in store was archived, but the account list couldn’t be updated. Try Start fresh again.",
+    );
+    expect(screen.queryByRole("button", { name: "Keep trying" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Start fresh" })).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+    await waitFor(() => expect(onReset).toHaveBeenCalledWith(READY_ACCOUNTS));
     expect(api.resetVault).toHaveBeenCalledTimes(2);
   });
 });
@@ -96,7 +117,7 @@ describe("Forgot passphrase wording and cleanup", () => {
   it("is worded in Russian", () => {
     setLocale("ru");
     setup("inline");
-    fireEvent.click(screen.getByRole("button", { name: "Забыл парольную фразу?" }));
+    fireEvent.click(screen.getByRole("button", { name: "Не помнишь парольную фразу?" }));
     expect(screen.getByText("Начать заново?")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Продолжить попытки" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Начать заново" })).toBeTruthy();

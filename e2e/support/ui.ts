@@ -13,11 +13,11 @@ export function text(key: EnKey, params: Record<string, string | number> = {}): 
   return raw.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? `{${k}}`));
 }
 
-/** Russian catalog text (plain messages only). */
-export function textRu(key: keyof typeof ru): string {
+/** Russian catalog text with `{params}` filled in. */
+export function textRu(key: keyof typeof ru, params: Record<string, string | number> = {}): string {
   const raw = ru[key];
   if (typeof raw !== "string") throw new Error(`"${String(key)}" is not a plain message`);
-  return raw;
+  return raw.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? `{${k}}`));
 }
 
 export const dock = (page: Page) => page.getByRole("navigation", { name: "Clade" });

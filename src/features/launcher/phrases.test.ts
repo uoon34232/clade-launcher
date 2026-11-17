@@ -42,7 +42,7 @@ describe("phrase pool", () => {
   it("has a curated Russian wording for every id", () => {
     setLocale("ru");
     const texts = BASE_PHRASES.map(phraseText);
-    expect(texts).toContain("Когда будешь готов.");
+    expect(texts).toContain("Начнём, когда захочешь.");
     expect(new Set(texts).size).toBe(BASE_PHRASES.length);
     for (const text of texts) expect(text).toMatch(/[А-Яа-яЁё]/); // never an English fallback
   });

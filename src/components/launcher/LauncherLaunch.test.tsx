@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountsApi } from "@/lib/accounts/api";
-import { READY_ACCOUNTS, appearanceStubs, recoveryStubs } from "@/lib/accounts/testAccounts";
+import { READY_ACCOUNTS, appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import { LaunchRefused, type LaunchApi, type LaunchEvent, type LaunchExit } from "@/lib/launch/api";

@@ -8,6 +8,11 @@ import { listen } from "@tauri-apps/api/event";
 import { call } from "@/lib/ipc";
 import { inTauri } from "@/lib/settings/uiSettings";
 
+export interface SkinDimensions {
+  width: number;
+  height: number;
+}
+
 export interface Account {
   id: string;
   /** The Minecraft Java profile name. */
@@ -19,6 +24,8 @@ export interface Account {
    * account's own profile. The avatar is cut out of it (see PlayerHead); null draws a placeholder.
    */
   skin: string | null;
+  /** Pre-parsed pixel dimensions of `skin`, when `skin` is a valid skin PNG. */
+  skinDimensions?: SkinDimensions | null;
 }
 
 export interface Capabilities {
@@ -39,17 +46,37 @@ export const NO_ACCOUNTS: AccountsSnapshot = {
   capabilities: { signIn: false, skin: false, cape: false },
 };
 
+/** The largest skin file the launcher sends (the backend enforces the same bound). */
+export const MAX_SKIN_BYTES = 256 * 1024;
+
+const SKIN_PREFIX = "data:image/png;base64,";
+const MAX_SKIN_BASE64_LEN = Math.ceil((MAX_SKIN_BYTES * 4) / 3) + 64;
+
+function isValidBase64Payload(s: string, start: number): boolean {
+  let pad = 0;
+  if (s.charCodeAt(s.length - 1) === 61) pad++;
+  if (pad === 1 && s.charCodeAt(s.length - 2) === 61) pad++;
+  for (let i = start, end = s.length - pad; i < end; i++) {
+    const c = s.charCodeAt(i);
+    const ok =
+      (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47;
+    if (!ok) return false;
+  }
+  return true;
+}
+
 /**
  * The pixel size of an inline skin PNG, read from its header: 64 times a whole factor wide, as
  * tall as wide or (the old format) half as tall. Null when it is not such an image. The head and
  * hat layers are cut out of it with `width / 64` as the scale.
  */
-export function skinSize(dataUri: string): { width: number; height: number } | null {
-  const m = /^data:image\/png;base64,([A-Za-z0-9+/]{32,}={0,2})$/.exec(dataUri);
-  if (!m) return null;
+export function skinSize(dataUri: string): SkinDimensions | null {
+  if (!dataUri.startsWith(SKIN_PREFIX)) return null;
+  const b64Len = dataUri.length - SKIN_PREFIX.length;
+  if (b64Len < 32 || b64Len > MAX_SKIN_BASE64_LEN || b64Len % 4 !== 0) return null;
   let bytes: string;
   try {
-    bytes = atob(m[1].slice(0, 32)); // the first 24 bytes: signature, IHDR length and type, width, height
+    bytes = atob(dataUri.slice(22, 54)); // the first 24 bytes: signature, IHDR length and type, width, height
   } catch {
     return null;
   }
@@ -63,7 +90,8 @@ export function skinSize(dataUri: string): { width: number; height: number } | n
   const w = u32(16);
   const h = u32(20);
   const ok = w >= 64 && w <= 1024 && w % 64 === 0 && (h === w || h * 2 === w);
-  return ok ? { width: w, height: h } : null;
+  if (!ok || !isValidBase64Payload(dataUri, SKIN_PREFIX.length)) return null;
+  return { width: w, height: h };
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -77,14 +105,16 @@ export function parseAccounts(raw: unknown): AccountsSnapshot {
     const id = str(a.id);
     const username = str(a.username);
     if (!id || !username) continue;
-    const skin = str(a.skin);
+    const rawSkin = str(a.skin);
+    const dimensions = rawSkin ? skinSize(rawSkin) : null;
     accounts.push({
       id,
       username,
       uuid: str(a.uuid) ?? "",
       needsSignIn: a.needsSignIn === true,
       // Only an inline PNG of a plausible skin size is ever drawn; nothing is loaded from a URL.
-      skin: skin && skinSize(skin) !== null ? skin : null,
+      skin: dimensions ? rawSkin : null,
+      skinDimensions: dimensions,
     });
   }
   const c = isObj(o.capabilities) ? o.capabilities : {};
@@ -113,9 +143,6 @@ export interface Appearance {
   skinModel: SkinModel | null;
   capes: Cape[];
 }
-
-/** The largest skin file the launcher sends (the backend enforces the same bound). */
-export const MAX_SKIN_BYTES = 256 * 1024;
 
 const CAPE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

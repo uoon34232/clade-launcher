@@ -53,14 +53,11 @@ export function TitleWordmark() {
         </span>
         <span
           aria-hidden
-          className="wordmark-tagline wm-fade pointer-events-none absolute inset-0 flex items-center justify-center"
+          className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 py-0.5 whitespace-nowrap"
         >
-          {t("onboarding.tagline")}
+          <span className="wordmark-tagline wm-fade block">{t("onboarding.tagline")}</span>
+          <span className="wordmark-line pointer-events-none absolute inset-x-0 bottom-0 w-full" />
         </span>
-        <span
-          aria-hidden
-          className="wordmark-line pointer-events-none absolute bottom-0 left-1/2 -ml-[5.75rem] w-[11.5rem]"
-        />
       </button>
     </div>
   );

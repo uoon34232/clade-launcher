@@ -16,14 +16,16 @@ const COLORS: Record<string, string> = {
   M: "#a8604a",
 };
 
+const RECTS = GRID.flatMap((row, y) =>
+  [...row].map((c, x) => (
+    <rect key={`${x}-${y}`} x={x} y={y} width="1.02" height="1.02" fill={COLORS[c]} />
+  )),
+);
+
 export function PixelAvatar({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 8 8" shapeRendering="crispEdges" className={className} aria-hidden>
-      {GRID.flatMap((row, y) =>
-        [...row].map((c, x) => (
-          <rect key={`${x}-${y}`} x={x} y={y} width="1.02" height="1.02" fill={COLORS[c]} />
-        )),
-      )}
+      {RECTS}
     </svg>
   );
 }

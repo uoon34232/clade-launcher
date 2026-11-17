@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, AccountsSnapshot } from "@/lib/accounts/api";
-import { readyAccountsClient } from "@/lib/accounts/testAccounts";
-import { testSkin } from "@/lib/accounts/testSkin";
+import { readyAccountsClient } from "@/test/testAccounts";
+import { testSkin } from "@/test/testSkin";
 import { setLocale } from "@/lib/i18n";
 import type { LaunchApi } from "@/lib/launch/api";
 import type { ProfileSummary, ProfilesApi, ProfilesSnapshot } from "@/lib/profiles/api";

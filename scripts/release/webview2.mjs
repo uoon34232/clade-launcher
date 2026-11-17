@@ -29,31 +29,72 @@ export const CONFIG_PATH = join(HERE, "webview2-runtime.json");
 
 export const WEBVIEW2_VERSION_RE = /^\d+\.\d+\.\d+\.\d+$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const APPROVED_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const DEFAULT_FETCH_TIMEOUT_MS = 300_000;
+export const ALLOWED_WEBVIEW2_HOST_SUFFIXES = [".microsoft.com", ".msecnd.net", ".azureedge.net"];
 
 export function loadConfig(path = CONFIG_PATH) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+/** True when `value` is a strict YYYY-MM-DD calendar date that is not in the future. */
+export function isValidApprovedDate(value, { now = new Date() } = {}) {
+  if (typeof value !== "string" || !APPROVED_DATE_RE.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() + 1 !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return false;
+  }
+  const latestAllowed = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return parsed.getTime() <= latestAllowed;
+}
+
+/** True when `rawUrl` is an https URL without credentials on an official Microsoft CDN/download host. */
+export function isAllowedWebview2Url(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl) return false;
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  if (!host || host.startsWith(".") || host.includes("..")) return false;
+  return (
+    host === "microsoft.com" ||
+    ALLOWED_WEBVIEW2_HOST_SUFFIXES.some(
+      (suffix) => host.length > suffix.length && host.endsWith(suffix),
+    )
+  );
+}
+
 /** What is still missing or malformed. An empty list means the configuration can be used. */
-export function configProblems(config, { needUrl = true } = {}) {
+export function configProblems(config, { needUrl = true, now = new Date() } = {}) {
   const problems = [];
   if (config.architecture !== "x64") problems.push('"architecture" must be "x64"');
   if (typeof config.version !== "string" || !WEBVIEW2_VERSION_RE.test(config.version))
     problems.push('"version" is not set (an exact four-part version such as 1.2.3.4 is required)');
   if (typeof config.sha256 !== "string" || !SHA256_RE.test(config.sha256))
     problems.push('"sha256" is not set (the 64-hex SHA-256 of the CAB is required)');
-  if (needUrl) {
-    let ok = false;
-    try {
-      const u = new URL(config.downloadUrl);
-      ok = u.protocol === "https:" && !u.username && !u.password;
-    } catch {
-      /* not a URL */
+  const hasUrl =
+    config.downloadUrl !== null && config.downloadUrl !== undefined && config.downloadUrl !== "";
+  if (needUrl || hasUrl) {
+    if (!isAllowedWebview2Url(config.downloadUrl)) {
+      problems.push(
+        '"downloadUrl" is not set to an official Microsoft https URL (*.microsoft.com, *.msecnd.net, *.azureedge.net)',
+      );
     }
-    if (!ok) problems.push('"downloadUrl" is not set (an https URL from Microsoft is required)');
   }
   if (typeof config.approvedBy !== "string" || !config.approvedBy.trim())
     problems.push('"approvedBy" is not set (who accepted the redistribution terms)');
+  if (!isValidApprovedDate(config.approvedOn, { now }))
+    problems.push('"approvedOn" is not set (a valid YYYY-MM-DD approval date is required)');
   return problems;
 }
 
@@ -79,8 +120,14 @@ export async function verifyCab(path, expected) {
 }
 
 /** Downloads the pinned CAB into `outDir`, verifies it, and returns its path. Nothing is kept on mismatch. */
-export async function fetchCab(config, outDir, { fetchImpl = fetch } = {}) {
-  const problems = configProblems(config);
+export async function fetchCab(
+  config,
+  outDir,
+  { fetchImpl = fetch, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, now } = {},
+) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new Error("timeoutMs must be a positive number");
+  const problems = configProblems(config, { needUrl: true, now });
   if (problems.length)
     throw new Error(`the WebView2 runtime is not configured: ${problems.join("; ")}`);
   const url = new URL(config.downloadUrl);
@@ -88,10 +135,15 @@ export async function fetchCab(config, outDir, { fetchImpl = fetch } = {}) {
   const name = basename(url.pathname) || `webview2-${config.version}.cab`;
   const part = join(outDir, `${name}.part`);
   const dest = join(outDir, name);
-  const res = await fetchImpl(url, { redirect: "follow" });
+  const signal = AbortSignal.timeout(timeoutMs);
+  const res = await fetchImpl(url, { redirect: "follow", signal });
+  if (res.url && !isAllowedWebview2Url(res.url)) {
+    await res.body?.cancel?.().catch(() => {});
+    throw new Error(`download redirected to an untrusted URL: ${res.url}`);
+  }
   if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(part));
   try {
+    await pipeline(Readable.fromWeb(res.body), createWriteStream(part), { signal });
     await verifyCab(part, config.sha256);
   } catch (e) {
     rmSync(part, { force: true });

@@ -13,6 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { crc32 } from "node:zlib";
 import { PACKAGE_ROOT, readZipEntry, readZipFile } from "./common.mjs";
 
 export const REQUIRED_FILES = [
@@ -150,6 +151,49 @@ export function validateNames(names, { allowMissingWebview2 = false } = {}) {
   return [...new Set(problems)];
 }
 
+/** Problems with explicit directory entries inside the package (paths without the top folder, with or without trailing `/`). */
+export function validateDirectoryNames(dirNames) {
+  const problems = [];
+  const seen = new Set();
+  for (const raw of dirNames) {
+    const rel = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+    if (rel === "") {
+      if (seen.has("")) problems.push(`duplicate entry: ${PACKAGE_ROOT}/`);
+      seen.add("");
+      continue;
+    }
+    if (seen.has(rel.toLowerCase())) problems.push(`duplicate entry: ${rel}/`);
+    seen.add(rel.toLowerCase());
+    if (
+      rel.startsWith("/") ||
+      rel.includes("\\") ||
+      /^[A-Za-z]:/.test(rel) ||
+      rel.split("/").some((s) => s === ".." || s === "." || s === "")
+    ) {
+      problems.push(`unsafe entry name: ${JSON.stringify(`${rel}/`)}`);
+      continue;
+    }
+    const segments = rel.split("/");
+    const top = segments[0];
+    const inRuntime = rel === "runtimes/webview2" || rel.startsWith("runtimes/webview2/");
+    for (const dir of segments) {
+      if (FORBIDDEN_DIRS.has(dir.toLowerCase()) && !(inRuntime && dir.toLowerCase() === "src"))
+        problems.push(`forbidden folder in the package: ${rel}/`);
+      for (const re of FORBIDDEN_NAMES) {
+        if (re.test(dir)) {
+          problems.push(`forbidden folder in the package: ${rel}/`);
+          break;
+        }
+      }
+    }
+    if (USER_DATA_DIRS.has(top.toLowerCase()))
+      problems.push(`user data folder in the package: ${rel}/`);
+    const allowed = rel === "licenses" || rel === "runtimes" || inRuntime;
+    if (!allowed) problems.push(`not on the allowlist: ${rel}/`);
+  }
+  return [...new Set(problems)];
+}
+
 /** Scans one text file's content for developer paths and secrets. */
 export function scanText(name, text) {
   const problems = [];
@@ -160,18 +204,32 @@ export function scanText(name, text) {
   return problems;
 }
 
-/** Looks for each developer-specific string, as ASCII/UTF-8 and as UTF-16LE, in the executable's bytes. */
+/**
+ * Looks for each developer-specific string, case-insensitively in UTF-8/ASCII and UTF-16LE
+ * (at both even and odd byte alignments), in the executable's bytes.
+ */
 export function scanExecutable(buf, forbidStrings) {
+  const filtered = forbidStrings.filter(Boolean);
+  if (filtered.length === 0) return [];
+  const utf8Lower = buf.toString("utf8").toLowerCase();
+  const latin1Lower = buf.toString("latin1").toLowerCase();
+  const utf16EvenLower = buf.toString("utf16le").toLowerCase();
+  const utf16OddLower = buf.length > 1 ? buf.subarray(1).toString("utf16le").toLowerCase() : "";
   const problems = [];
-  for (const s of forbidStrings.filter(Boolean)) {
-    const variants = [
-      Buffer.from(s, "utf8"),
-      Buffer.from(s, "utf16le"),
-      Buffer.from(s.toLowerCase(), "utf8"),
-      Buffer.from(s.replace(/\\/g, "/"), "utf8"),
-    ];
-    if (variants.some((v) => buf.includes(v)))
-      problems.push(`Clade.exe contains the developer-specific text "${s}"`);
+  for (const s of filtered) {
+    const slashVariants = [...new Set([s, s.replace(/\\/g, "/"), s.replace(/\//g, "\\")])];
+    const found = slashVariants.some((v) => {
+      const lower = v.toLowerCase();
+      return (
+        buf.includes(Buffer.from(v, "utf8")) ||
+        buf.includes(Buffer.from(v, "utf16le")) ||
+        utf8Lower.includes(lower) ||
+        latin1Lower.includes(lower) ||
+        utf16EvenLower.includes(lower) ||
+        utf16OddLower.includes(lower)
+      );
+    });
+    if (found) problems.push(`Clade.exe contains the developer-specific text "${s}"`);
   }
   return problems;
 }
@@ -202,45 +260,160 @@ export function embeddedCsp(buf, csp) {
   return Boolean(csp) && buf.includes(Buffer.from(csp, "utf8"));
 }
 
+function validateZipStructure(buf, entries, cdOffset) {
+  const problems = [];
+  const contents = new Map();
+  const spans = [];
+  for (const e of entries) {
+    const unixType = ((e.externalAttr ?? 0) >>> 16) & 0o170000;
+    const isDirAttr = ((e.externalAttr ?? 0) & 0x10) !== 0 || unixType === 0o040000;
+    if (unixType === 0o120000 || ((e.externalAttr ?? 0) & 0x0400) !== 0) {
+      problems.push(`symlink or reparse point in the package: ${e.name}`);
+    } else if (unixType !== 0 && unixType !== 0o100000 && unixType !== 0o040000) {
+      problems.push(`special file entry in the package: ${e.name}`);
+    }
+    if (isDirAttr && !e.name.endsWith("/")) {
+      problems.push(`malformed directory entry (missing trailing "/"): ${e.name}`);
+    }
+    if (e.name.endsWith("/") && (e.size !== 0 || e.compressedSize !== 0)) {
+      problems.push(`directory entry has non-empty payload: ${e.name}`);
+    }
+    const flags = e.flags ?? 0;
+    if ((flags & 0x0001) !== 0) problems.push(`encrypted ZIP entry is not allowed: ${e.name}`);
+    if ((flags & 0x0008) !== 0) problems.push(`ZIP data descriptor is not allowed: ${e.name}`);
+
+    const p = e.offset;
+    if (p + 30 > cdOffset || p + 30 > buf.length || buf.readUInt32LE(p) !== 0x04034b50) {
+      problems.push(`local/central header mismatch for ${e.name}: invalid local header`);
+      continue;
+    }
+    const localFlags = buf.readUInt16LE(p + 6);
+    const localMethod = buf.readUInt16LE(p + 8);
+    const localCrc = buf.readUInt32LE(p + 14);
+    const localCompressedSize = buf.readUInt32LE(p + 18);
+    const localSize = buf.readUInt32LE(p + 22);
+    const localNameLen = buf.readUInt16LE(p + 26);
+    const localExtraLen = buf.readUInt16LE(p + 28);
+    const nameEnd = p + 30 + localNameLen;
+    const dataStart = nameEnd + localExtraLen;
+    const dataEnd = dataStart + e.compressedSize;
+    if (nameEnd > cdOffset || dataStart > cdOffset || dataEnd > cdOffset || dataEnd > buf.length) {
+      problems.push(
+        `local/central header mismatch for ${e.name}: entry extends past central directory`,
+      );
+      continue;
+    }
+    spans.push({ name: e.name, start: p, end: dataEnd });
+
+    if ((localFlags & 0x0001) !== 0)
+      problems.push(`local/central header mismatch for ${e.name}: encrypted local header`);
+    if ((localFlags & 0x0008) !== 0)
+      problems.push(
+        `local/central header mismatch for ${e.name}: data descriptor flag in local header`,
+      );
+    if ((localFlags & 0x0800) !== (flags & 0x0800))
+      problems.push(`local/central header mismatch for ${e.name}: UTF-8 flag mismatch`);
+
+    const localName = buf.toString(localFlags & 0x0800 ? "utf8" : "latin1", p + 30, nameEnd);
+    if (localName !== e.name)
+      problems.push(
+        `local/central header mismatch for ${e.name}: local header names "${localName}"`,
+      );
+    if (localMethod !== e.method)
+      problems.push(
+        `local/central header mismatch for ${e.name}: compression method ${localMethod} != ${e.method}`,
+      );
+    if (e.crc !== undefined && localCrc !== e.crc)
+      problems.push(`local/central header mismatch for ${e.name}: CRC-32 mismatch`);
+    if (localCompressedSize !== e.compressedSize)
+      problems.push(
+        `local/central header mismatch for ${e.name}: compressed size ${localCompressedSize} != ${e.compressedSize}`,
+      );
+    if (localSize !== e.size)
+      problems.push(
+        `local/central header mismatch for ${e.name}: uncompressed size ${localSize} != ${e.size}`,
+      );
+
+    try {
+      const content = readZipEntry(buf, e);
+      if (content.length !== e.size) {
+        problems.push(
+          `local/central header mismatch for ${e.name}: inflated size ${content.length} != ${e.size}`,
+        );
+      } else if (e.crc !== undefined && crc32(content) >>> 0 !== e.crc) {
+        problems.push(`corrupt ZIP entry payload (CRC-32 mismatch): ${e.name}`);
+      } else {
+        contents.set(e, content);
+      }
+    } catch (err) {
+      problems.push(`corrupt ZIP entry ${e.name}: ${err.message}`);
+    }
+  }
+
+  const ordered = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 1; i < ordered.length; i++) {
+    if (ordered[i].start < ordered[i - 1].end) {
+      problems.push(`overlapping ZIP entries: ${ordered[i - 1].name} and ${ordered[i].name}`);
+    }
+  }
+  return { problems, contents };
+}
+
 /** Validates a ZIP file on disk. Returns `{ problems, entries }`. */
 export function validateZipFile(
   zipPath,
   { version = null, forbidStrings = [], allowMissingWebview2 = false, csp = null } = {},
 ) {
-  const problems = [];
-  const { buf, entries } = readZipFile(zipPath);
+  let zip;
+  try {
+    zip = readZipFile(zipPath);
+  } catch (e) {
+    return { problems: [e.message], entries: [] };
+  }
+  const { buf, entries, cdOffset } = zip;
+  const structure = validateZipStructure(buf, entries, cdOffset);
+  const problems = [...structure.problems];
   const prefix = `${PACKAGE_ROOT}/`;
   const names = [];
+  const dirNames = [];
+  const byName = new Map();
   for (const e of entries) {
     if (!e.name.startsWith(prefix)) {
       problems.push(`outside the ${PACKAGE_ROOT}/ folder: ${e.name}`);
       continue;
     }
-    if (e.name.endsWith("/")) continue; // an explicit folder entry carries no file
-    names.push(e.name.slice(prefix.length));
+    if (e.name.endsWith("/")) {
+      dirNames.push(e.name.slice(prefix.length));
+      continue;
+    }
+    const rel = e.name.slice(prefix.length);
+    names.push(rel);
+    byName.set(rel, e);
   }
+  problems.push(...validateDirectoryNames(dirNames));
   problems.push(...validateNames(names, { allowMissingWebview2 }));
-  const byName = new Map(entries.map((e) => [e.name.slice(prefix.length), e]));
   for (const name of names) {
     if (!TEXT_SCANNED(name)) continue;
-    problems.push(...scanText(name, readZipEntry(buf, byName.get(name)).toString("utf8")));
+    const entry = byName.get(name);
+    const bytes = entry ? structure.contents.get(entry) : null;
+    if (bytes) problems.push(...scanText(name, bytes.toString("utf8")));
   }
   const exe = byName.get("Clade.exe");
-  if (exe) {
-    const bytes = readZipEntry(buf, exe);
-    if (forbidStrings.length) problems.push(...scanExecutable(bytes, forbidStrings));
-    if (csp && !embeddedCsp(bytes, csp))
+  const exeBytes = exe ? structure.contents.get(exe) : null;
+  if (exeBytes) {
+    if (forbidStrings.length) problems.push(...scanExecutable(exeBytes, forbidStrings));
+    if (csp && !embeddedCsp(exeBytes, csp))
       problems.push(
         "Clade.exe does not contain the release Content Security Policy from tauri.conf.json",
       );
     if (version) {
-      const found = executableVersion(bytes);
+      const found = executableVersion(exeBytes);
       if (found === null) problems.push("Clade.exe has no readable version resource");
       else if (found !== version)
         problems.push(`Clade.exe says version ${found}, expected ${version}`);
     }
   }
-  return { problems, entries: names };
+  return { problems: [...new Set(problems)], entries: names };
 }
 
 function main(argv) {

@@ -24,6 +24,7 @@ beforeEach(() => {
   saveLastPhrase.mockClear();
 });
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.restoreAllMocks();
   delete (HTMLElement.prototype as { animate?: unknown }).animate;
@@ -50,14 +51,45 @@ describe("Hero headline without animation support (instant swap)", () => {
     }
   });
 
-  it("asks the launcher's settings service to remember whatever is on screen", () => {
+  it("asks the launcher's settings service to remember whatever is on screen, debouncing shuffles", () => {
+    vi.useFakeTimers();
     render(<Hero />);
     const shown = BASE_PHRASES.find((p) => phraseText(p) === headline());
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
     expect(saveLastPhrase).toHaveBeenLastCalledWith(shown?.id);
-    fireEvent.click(heading().querySelector("button") as HTMLButtonElement, { detail: 1 });
+
+    const button = heading().querySelector("button") as HTMLButtonElement;
+    fireEvent.click(button, { detail: 1 });
     const next = BASE_PHRASES.find((p) => phraseText(p) === headline());
     expect(next?.id).not.toBe(shown?.id);
+
+    // Debounced by 800 ms while shuffling.
+    vi.advanceTimersByTime(799);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(2);
     expect(saveLastPhrase).toHaveBeenLastCalledWith(next?.id);
+
+    // Rapid shuffles coalesce into at most one save (and skip if landing back on the last saved id).
+    saveLastPhrase.mockClear();
+    for (let i = 0; i < 5; i++) {
+      if (i > 0) vi.advanceTimersByTime(200);
+      fireEvent.click(button, { detail: 1 });
+    }
+    let final = BASE_PHRASES.find((p) => phraseText(p) === headline());
+    if (final?.id === next?.id) {
+      // Landing back on the already-saved phrase skips redundant IPC even after 800 ms.
+      vi.advanceTimersByTime(800);
+      expect(saveLastPhrase).not.toHaveBeenCalled();
+      fireEvent.click(button, { detail: 1 });
+      final = BASE_PHRASES.find((p) => phraseText(p) === headline());
+    }
+    expect(saveLastPhrase).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(799);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(0);
+    vi.advanceTimersByTime(1);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
+    expect(saveLastPhrase).toHaveBeenLastCalledWith(final?.id);
   });
 
   it("does not touch any WebView storage", () => {
