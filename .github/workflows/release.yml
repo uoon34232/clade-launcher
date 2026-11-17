@@ -42,6 +42,7 @@ jobs:
           node scripts/release/check-versions.mjs --tag "$env:GITHUB_REF_NAME"
           if ($LASTEXITCODE) { exit 1 }
           git fetch --no-tags origin main
+          if ($LASTEXITCODE) { exit 1 }
           git merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE) { throw "The tagged commit is not on main; a release is only built from main." }
 
@@ -60,11 +61,15 @@ jobs:
       # The same gates as normal CI, on the tagged commit.
       - run: pnpm check
       - name: Rust gates
+        shell: pwsh
         working-directory: src-tauri
         run: |
           cargo fmt --check
+          if ($LASTEXITCODE) { exit 1 }
           cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit 1 }
           cargo test --locked
+          if ($LASTEXITCODE) { exit 1 }
       - run: pnpm exec playwright install chromium
       - run: pnpm test:e2e
 
@@ -80,16 +85,24 @@ jobs:
 
       - name: Build and package (production Tauri build, notices, ZIP, validation)
         shell: pwsh
-        run: ./scripts/package-portable.ps1 -WebView2Cab "${{ steps.webview2.outputs.cab }}" -Tag "$env:GITHUB_REF_NAME" -OutDir dist-portable
+        env:
+          WEBVIEW2_CAB: ${{ steps.webview2.outputs.cab }}
+        run: |
+          ./scripts/package-portable.ps1 -WebView2Cab "$env:WEBVIEW2_CAB" -Tag "$env:GITHUB_REF_NAME" -OutDir dist-portable
+          if ($LASTEXITCODE) { exit 1 }
 
       - name: Smoke test the package
         shell: pwsh
         run: |
-          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $v = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
           ./scripts/smoke-test-package.ps1 -Zip dist-portable/Clade-Launcher-Portable.zip -ExpectedVersion $v
+          if ($LASTEXITCODE) { exit 1 }
 
       - name: Release notes from the changelog
-        run: node scripts/release/check-versions.mjs --tag "$GITHUB_REF_NAME" --notes dist-portable/release-notes.md
+        shell: pwsh
+        run: |
+          node scripts/release/check-versions.mjs --tag "$env:GITHUB_REF_NAME" --notes dist-portable/release-notes.md
+          if ($LASTEXITCODE) { exit 1 }
 
       # Only these three files leave the build job.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

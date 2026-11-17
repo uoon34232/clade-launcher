@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { MinusIcon, XIcon } from "lucide-react";
 import type { Window } from "@tauri-apps/api/window";
 import { useT } from "@/lib/i18n";
+import { inTauri } from "@/lib/settings/uiSettings";
 import { TitleWordmark } from "./TitleWordmark";
-
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // Frameless window: a drag strip with the quiet product name centred in it, plus the window controls.
 // Renders nothing in a plain browser.
@@ -12,11 +11,14 @@ export function WindowChrome() {
   const t = useT();
   const [win, setWin] = useState<Window | null>(null);
   const strip = useRef<HTMLDivElement>(null);
+  const tauri = inTauri();
 
   useEffect(() => {
-    if (!inTauri) return;
-    void import("@tauri-apps/api/window").then((m) => setWin(m.getCurrentWindow()));
-  }, []);
+    if (!tauri) return;
+    void import("@tauri-apps/api/window")
+      .then((m) => setWin(m.getCurrentWindow()))
+      .catch(() => undefined);
+  }, [tauri]);
 
   // Clade is never maximized. Tauri's injected drag script turns a double click on the strip into a
   // toggle-maximize command, which the window refuses (the capability denies it); swallow the second
@@ -33,12 +35,22 @@ export function WindowChrome() {
     };
     el.addEventListener("mousedown", ignoreDoubleClick);
     return () => el.removeEventListener("mousedown", ignoreDoubleClick);
-  }, []);
+  }, [tauri]);
 
-  if (!inTauri) return null;
+  if (!tauri) return null;
+
+  const withWindow = (action: (w: Window) => Promise<void>) => {
+    void (
+      win
+        ? Promise.resolve(win)
+        : import("@tauri-apps/api/window").then((m) => m.getCurrentWindow())
+    )
+      .then(action)
+      .catch(() => undefined);
+  };
 
   const btn =
-    "window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite opacity-30 transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-clay active:bg-graphite/[0.12]";
+    "window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite opacity-45 transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-clay active:bg-graphite/[0.12]";
 
   return (
     <div
@@ -52,7 +64,7 @@ export function WindowChrome() {
         type="button"
         aria-label={t("window.minimize")}
         className={btn}
-        onClick={() => void win?.minimize()}
+        onClick={() => withWindow((w) => w.minimize())}
       >
         <MinusIcon aria-hidden className="size-4" />
       </button>
@@ -60,7 +72,7 @@ export function WindowChrome() {
         type="button"
         aria-label={t("window.close")}
         className={btn}
-        onClick={() => void win?.close()}
+        onClick={() => withWindow((w) => w.close())}
       >
         <XIcon aria-hidden className="size-4" />
       </button>

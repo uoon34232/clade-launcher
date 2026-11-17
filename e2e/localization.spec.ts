@@ -1,6 +1,14 @@
-import { DEFAULT_CONFIG } from "./support/fixtures";
+import { ALEX, DEFAULT_CONFIG } from "./support/fixtures";
 import { expect, test } from "./support/test";
-import { dock, playButton, profileTrigger, settingsButton, text, textRu } from "./support/ui";
+import {
+  accountTrigger,
+  dock,
+  playButton,
+  profileTrigger,
+  settingsButton,
+  text,
+  textRu,
+} from "./support/ui";
 
 test.describe("language", () => {
   test("English -> Русский -> English updates the whole interface live, without a reload", async ({
@@ -105,5 +113,43 @@ test.describe("an explicit English choice on a Russian Windows", () => {
   test("is never overridden by the system language", async ({ page, openApp }) => {
     await openApp();
     await expect(page.getByText(text("hero.subtitle"))).toBeVisible();
+  });
+});
+
+test.describe("Russian layout at the smallest 960x600 window", () => {
+  test.use({
+    backendConfig: { ui: { ...DEFAULT_CONFIG.ui, language: "ru" } },
+  });
+
+  test("fits Settings and Account dialogs cleanly without horizontal overflow", async ({
+    page,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+    const pageFits = await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    );
+    expect(pageFits).toBe(true);
+
+    await settingsButton(page).click();
+    const settings = page.getByRole("dialog", { name: textRu("settings.title") });
+    await expect(settings).toBeVisible();
+    const settingsFit = await settings.evaluate((el) => ({
+      vertical: el.scrollHeight <= el.clientHeight + 1,
+      horizontal: el.scrollWidth <= el.clientWidth + 1,
+    }));
+    expect(settingsFit).toEqual({ vertical: true, horizontal: true });
+    await settings.getByRole("button", { name: textRu("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await accountTrigger(page).click();
+    await page
+      .getByRole("menuitem", { name: textRu("account.manage", { name: ALEX.username }) })
+      .click();
+    const account = page.getByRole("dialog", { name: ALEX.username });
+    await expect(account).toBeVisible();
+    const accountFits = await account.evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
+    expect(accountFits).toBe(true);
   });
 });

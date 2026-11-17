@@ -1,5 +1,5 @@
 import { useState, type ReactNode, type SubmitEvent } from "react";
-import type { AccountsApi } from "@/lib/accounts/api";
+import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { hasMessage, tDynamic, useT, type MessageKey } from "@/lib/i18n";
 import { describeCode, describeError } from "@/lib/i18n/errors";
 import type { LaunchExit } from "@/lib/launch/api";
@@ -21,7 +21,7 @@ interface Props {
   onRetry: (profileId: string) => void;
   onOpenLogs: (profileId: string) => void;
   /** "Start fresh" archived the old vault: every account has to sign in again now. */
-  onVaultReset: () => void;
+  onVaultReset: (snapshot: AccountsSnapshot) => void;
   accountsClient: AccountsApi;
 }
 
@@ -189,10 +189,10 @@ function Body({
         api={accountsClient}
         layout="modal"
         onAsking={onAsking}
-        onDone={() => {
+        onReset={(snap) => {
           setPass("");
           setError(null);
-          onVaultReset(); // the accounts must sign in again: the dialog says so next
+          onVaultReset(snap); // the accounts must sign in again: the dialog says so next
         }}
       >
         {form}

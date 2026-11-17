@@ -93,6 +93,12 @@
     cursor: default;
     -webkit-user-select: none;
     user-select: none;
+  }
+  h1,
+  h2,
+  h3,
+  .font-serif,
+  .font-heading {
     text-rendering: optimizeLegibility;
   }
 }
@@ -141,7 +147,6 @@
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-direction: alternate;
-  will-change: transform;
 }
 .bg-sway {
   position: absolute;
@@ -153,6 +158,14 @@
   border-radius: 9999px;
   animation-name: sway-y;
 }
+[data-bg-paused="true"] .bg-sway,
+[data-bg-paused="true"] .bg-bob {
+  animation-play-state: paused !important;
+}
+[data-bg-hidden="true"] .bg-sway,
+[data-bg-hidden="true"] .bg-bob {
+  display: none !important;
+}
 
 /* Shared dock interaction. `scale`/`translate` are their own properties in
    modern CSS, so they must be listed explicitly to animate. */
@@ -163,7 +176,6 @@
     box-shadow 180ms var(--ease-out-soft),
     scale 180ms var(--ease-out-soft),
     translate 180ms var(--ease-out-soft);
-  will-change: scale;
 }
 .dock-item:hover {
   scale: 1.025;
@@ -238,7 +250,6 @@
   transition:
     color 190ms var(--ease-out-soft),
     translate 190ms var(--ease-out-soft);
-  will-change: translate;
 }
 .hero-link:hover {
   color: #43362f;
@@ -268,7 +279,8 @@ html[data-input="keyboard"] .hero-link:focus-visible {
   html:not([data-motion="full"]) .bg-sway,
   html:not([data-motion="full"]) .bg-bob,
   html:not([data-motion="full"]) .hero-rise,
-  html:not([data-motion="full"]) .dock-rise {
+  html:not([data-motion="full"]) .dock-rise,
+  html:not([data-motion="full"]) .animate-spin {
     animation: none !important;
   }
   html:not([data-motion="full"]) *,
@@ -276,12 +288,14 @@ html[data-input="keyboard"] .hero-link:focus-visible {
   html:not([data-motion="full"]) *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
 html[data-motion="reduce"] .bg-sway,
 html[data-motion="reduce"] .bg-bob,
 html[data-motion="reduce"] .hero-rise,
-html[data-motion="reduce"] .dock-rise {
+html[data-motion="reduce"] .dock-rise,
+html[data-motion="reduce"] .animate-spin {
   animation: none !important;
 }
 html[data-motion="reduce"] *,
@@ -289,6 +303,7 @@ html[data-motion="reduce"] *::before,
 html[data-motion="reduce"] *::after {
   transition-duration: 0.01ms !important;
   animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
 }
 
 /* Setup progress when the total cannot be measured: a slow, quiet sweep (static under reduced motion). */
@@ -536,8 +551,7 @@ html[data-glass="on"] {
   /* dock popovers (account and profile menus) are mostly graphite: they sit over the large headline, so
      only a faint hint of the window material may show through, or the text behind muddies the list */
   --glass-menu-bg: rgb(43 38 34 / 0.98);
-  --glass-menu-edge:
-    inset 0 1px 0 rgb(255 255 255 / 0.12), 0 0 0 1px rgb(255 255 255 / 0.07);
+  --glass-menu-edge: inset 0 1px 0 rgb(255 255 255 / 0.12), 0 0 0 1px rgb(255 255 255 / 0.07);
   --glass-menu-shadow: 0 22px 54px -20px rgb(43 38 34 / 0.55);
   --glass-spec: linear-gradient(to bottom, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0) 62%);
 }

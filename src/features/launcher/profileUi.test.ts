@@ -1,16 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { setLocale } from "@/lib/i18n";
 import type { CatalogEntry, ProfileSummary } from "@/lib/profiles/api";
 import {
   buildLabel,
   defaultVersion,
   filterVersions,
+  formatBytes,
+  formatGigabytes,
   formatPlaytime,
+  itemsText,
   profileDetail,
   profileLabel,
   releaseDay,
   staleNote,
   validateName,
 } from "./profileUi";
+
+afterEach(() => {
+  setLocale("en");
+  vi.restoreAllMocks();
+});
 
 const p = (over: Partial<ProfileSummary> = {}): ProfileSummary => ({
   id: "a",
@@ -138,8 +147,7 @@ describe("small helpers", () => {
 });
 
 describe("preparation text", () => {
-  it("formats sizes and counts without inventing totals", async () => {
-    const { formatBytes, itemsText } = await import("./profileUi");
+  it("formats sizes and counts without inventing totals", () => {
     expect(formatBytes(512)).toBe("1 KB");
     expect(formatBytes(184 * 1024 * 1024)).toBe("184 MB");
     expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1.4 GB");
@@ -147,5 +155,46 @@ describe("preparation text", () => {
     expect(itemsText(null, 640)).toBeNull();
     expect(itemsText(3, null)).toBeNull();
     expect(itemsText(0, 0)).toBeNull();
+  });
+
+  it("caches Intl.NumberFormat and Intl.DateTimeFormat instances across progress ticks and locales", () => {
+    const OriginalNumberFormat = Intl.NumberFormat;
+    const OriginalDateTimeFormat = Intl.DateTimeFormat;
+    let nfCalls = 0;
+    let dfCalls = 0;
+    vi.spyOn(Intl, "NumberFormat").mockImplementation(function (
+      ...args: ConstructorParameters<typeof Intl.NumberFormat>
+    ) {
+      nfCalls++;
+      return new OriginalNumberFormat(...args);
+    });
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function (
+      ...args: ConstructorParameters<typeof Intl.DateTimeFormat>
+    ) {
+      dfCalls++;
+      return new OriginalDateTimeFormat(...args);
+    });
+
+    // Cold cache for (en, 0..1) and (ru, 0..1) + (ru, 1..1) + (ru, date).
+    expect(formatGigabytes(4096)).toBe("4 GB");
+    expect(formatGigabytes(4608)).toBe("4.5 GB");
+    for (let i = 0; i < 20; i++) {
+      formatGigabytes(2048 + i * 512);
+      formatBytes((1.1 + i * 0.1) * 1024 * 1024 * 1024);
+    }
+    expect(nfCalls).toBe(1); // formatBytes(en) was already cached above; formatGigabytes(en) constructed once
+
+    setLocale("ru");
+    expect(formatGigabytes(4608)).toBe("4,5 ГБ");
+    expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1,4 ГБ");
+    const now = Date.UTC(2026, 9, 4);
+    for (let i = 0; i < 10; i++) {
+      formatGigabytes(4096);
+      formatBytes(2.2 * 1024 * 1024 * 1024);
+      staleNote(Date.UTC(2026, 9, 3) / 1000, now);
+    }
+    // Only 2 more NumberFormat constructions for Russian (0..1 and 1..1) and 1 DateTimeFormat for Russian (md).
+    expect(nfCalls).toBe(3);
+    expect(dfCalls).toBe(1);
   });
 });

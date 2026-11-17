@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installInputModality } from "./inputModality";
 
 let uninstall: () => void;
@@ -45,5 +45,14 @@ describe("input modality", () => {
     pointer();
     key("Tab");
     expect(mode()).toBe("pointer"); // no longer tracking: left as it was
+  });
+
+  it("registers pointer listeners as passive capture so pointer events never block scrolling", () => {
+    uninstall();
+    const addSpy = vi.spyOn(document, "addEventListener");
+    uninstall = installInputModality(document);
+    const pointerCall = addSpy.mock.calls.find(([type]) => type === "pointerdown");
+    expect(pointerCall?.[2]).toEqual({ capture: true, passive: true });
+    addSpy.mockRestore();
   });
 });

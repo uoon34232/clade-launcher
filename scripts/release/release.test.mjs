@@ -17,7 +17,9 @@ import {
 } from "./common.mjs";
 import { changelogSection, checkVersions, isPrerelease, parseTag } from "./check-versions.mjs";
 import {
+  forbiddenFrontendRoots,
   frontendRoots,
+  generate,
   groupByLicenseText,
   loadLicenseSources,
   packageNameOf,
@@ -29,10 +31,17 @@ import {
   executableVersion,
   scanExecutable,
   scanText,
+  validateDirectoryNames,
   validateNames,
   validateZipFile,
 } from "./validate-package.mjs";
-import { configProblems, fetchCab, verifyCab } from "./webview2.mjs";
+import {
+  configProblems,
+  fetchCab,
+  isAllowedWebview2Url,
+  isValidApprovedDate,
+  verifyCab,
+} from "./webview2.mjs";
 
 let tmp;
 beforeEach(() => {
@@ -307,16 +316,161 @@ describe("package allowlist", () => {
     ).toBe(0);
   });
 
-  it("looks for developer-specific strings in the executable without changing it", () => {
+  it("looks for developer-specific strings in the executable case-insensitively in UTF-8 and UTF-16LE", () => {
     const exe = Buffer.from("MZ....C:\\Users\\devname\\.cargo\\registry....");
     expect(scanExecutable(exe, ["C:\\Users\\devname"]).join()).toMatch(/developer-specific text/);
+    // Mixed-case UTF-8 (for example lowercase drive letter from Windows path canonicalization)
+    expect(
+      scanExecutable(Buffer.from("MZ....c:\\USERS\\DevName\\repo...."), ["C:\\Users\\devname"])
+        .length,
+    ).toBe(1);
+    // Exact and mixed-case UTF-16LE at both even and odd byte offsets, and forward-slash variants
     expect(
       scanExecutable(Buffer.from("C:\\Users\\devname", "utf16le"), ["C:\\Users\\devname"]).length,
     ).toBe(1);
+    const oddUtf16 = Buffer.concat([
+      Buffer.from([0x4d, 0x5a, 0xff]),
+      Buffer.from("c:\\USERS\\devname\\project", "utf16le"),
+    ]);
+    expect(scanExecutable(oddUtf16, ["C:\\Users\\DevName"]).length).toBe(1);
+    const slashUtf16 = Buffer.concat([
+      Buffer.from([0x4d]),
+      Buffer.from("c:/Users/DEVNAME/project", "utf16le"),
+    ]);
+    expect(scanExecutable(slashUtf16, ["C:\\Users\\devname"]).length).toBe(1);
     expect(scanExecutable(exe, ["somebody-else"]).length).toBe(0);
     expect(problemsOf(goodEntries(), { forbidStrings: ["fake executable"] }).join()).toMatch(
       /Clade\.exe contains/,
     );
+    const utf16ExeEntries = goodEntries().map((e) =>
+      e.name.endsWith("Clade.exe") ? { ...e, data: oddUtf16 } : e,
+    );
+    expect(problemsOf(utf16ExeEntries, { forbidStrings: ["C:\\Users\\DevName"] }).join()).toMatch(
+      /Clade\.exe contains the developer-specific text/,
+    );
+  });
+
+  it("validates explicit directory entries against the allowlist instead of skipping them", () => {
+    const dir = (rel) => ({ name: `Clade-Launcher/${rel}/`, data: Buffer.alloc(0) });
+    expect(
+      problemsOf([
+        ...goodEntries(),
+        { name: "Clade-Launcher/", data: Buffer.alloc(0) },
+        dir("licenses"),
+        dir("runtimes"),
+        dir("runtimes/webview2"),
+        dir("runtimes/webview2/Locales"),
+      ]),
+    ).toEqual([]);
+    for (const badDir of [
+      "extra",
+      "docs",
+      "data",
+      "instances",
+      ".git",
+      "node_modules",
+      "src",
+      "licenses/sub",
+      "runtimes/java",
+      "runtimes/webview2/node_modules",
+    ]) {
+      const p = problemsOf([...goodEntries(), dir(badDir)]);
+      expect(p.join(), badDir).toMatch(/not on the allowlist|forbidden folder|user data folder/);
+    }
+    expect(validateDirectoryNames(["../escape"]).join()).toMatch(/unsafe entry name/);
+  });
+
+  it("rejects ZIP symlinks, reparse points, and local/central header mismatches", () => {
+    const findCdEntry = (zipBuf, targetName) => {
+      let eocd = -1;
+      for (let i = zipBuf.length - 22; i >= 0; i--) {
+        if (zipBuf.readUInt32LE(i) === 0x06054b50) {
+          eocd = i;
+          break;
+        }
+      }
+      let p = zipBuf.readUInt32LE(eocd + 16);
+      const count = zipBuf.readUInt16LE(eocd + 10);
+      for (let i = 0; i < count; i++) {
+        const nameLen = zipBuf.readUInt16LE(p + 28);
+        const extraLen = zipBuf.readUInt16LE(p + 30);
+        const commentLen = zipBuf.readUInt16LE(p + 32);
+        const name = zipBuf.toString("utf8", p + 46, p + 46 + nameLen);
+        if (name === targetName) return p;
+        p += 46 + nameLen + extraLen + commentLen;
+      }
+      throw new Error(`entry not found: ${targetName}`);
+    };
+    const writeMutated = (name, mutate) => {
+      const buf = Buffer.from(buildZip(goodEntries()));
+      mutate(buf, findCdEntry(buf, "Clade-Launcher/README.txt"));
+      const p = join(tmp, name);
+      writeFileSync(p, buf);
+      return validateZipFile(p).problems.join("\n");
+    };
+
+    // Unix symlink (S_IFLNK = 0o120000 in upper 16 bits of external attributes)
+    expect(
+      writeMutated("unix-symlink.zip", (buf, cd) => {
+        buf.writeUInt32LE(((0o120777 << 16) | 0x20) >>> 0, cd + 38);
+      }),
+    ).toMatch(/symlink or reparse point/);
+
+    // Windows reparse point (FILE_ATTRIBUTE_REPARSE_POINT = 0x0400)
+    expect(
+      writeMutated("win-reparse.zip", (buf, cd) => {
+        buf.writeUInt32LE(0x0420, cd + 38);
+      }),
+    ).toMatch(/symlink or reparse point/);
+
+    // Local header file name differs from central directory file name
+    expect(
+      writeMutated("name-mismatch.zip", (buf, cd) => {
+        const local = buf.readUInt32LE(cd + 42);
+        Buffer.from("Clade-Launcher/SECRET.txt", "utf8").copy(buf, local + 30);
+      }),
+    ).toMatch(/local\/central header mismatch.*local header names/);
+
+    // Local header compression method differs from central directory
+    expect(
+      writeMutated("method-mismatch.zip", (buf, cd) => {
+        const local = buf.readUInt32LE(cd + 42);
+        buf.writeUInt16LE(8, local + 8);
+      }),
+    ).toMatch(/local\/central header mismatch.*compression method/);
+
+    // Local header CRC-32 differs from central directory
+    expect(
+      writeMutated("crc-mismatch.zip", (buf, cd) => {
+        const local = buf.readUInt32LE(cd + 42);
+        buf.writeUInt32LE((buf.readUInt32LE(local + 14) ^ 0xffffffff) >>> 0, local + 14);
+      }),
+    ).toMatch(/local\/central header mismatch.*CRC-32/);
+
+    // Local header uncompressed size differs from central directory
+    expect(
+      writeMutated("size-mismatch.zip", (buf, cd) => {
+        const local = buf.readUInt32LE(cd + 42);
+        buf.writeUInt32LE(9999, local + 22);
+      }),
+    ).toMatch(/local\/central header mismatch.*uncompressed size/);
+
+    // Data descriptor bit (0x0008) set
+    expect(
+      writeMutated("data-descriptor.zip", (buf, cd) => {
+        const local = buf.readUInt32LE(cd + 42);
+        buf.writeUInt16LE(0x0808, cd + 8);
+        buf.writeUInt16LE(0x0808, local + 6);
+      }),
+    ).toMatch(/data descriptor/);
+
+    // Overlapping entries (README.txt central directory offset pointed to Clade.exe local header)
+    expect(
+      writeMutated("overlap.zip", (buf, cd) => {
+        const exeCd = findCdEntry(buf, "Clade-Launcher/Clade.exe");
+        buf.writeUInt32LE(buf.readUInt32LE(exeCd + 42), cd + 42);
+      }),
+    ).toMatch(/overlapping ZIP entries/);
   });
 
   it("reads the product version from a version resource", () => {
@@ -472,7 +626,9 @@ describe("building the package", () => {
       expect(text, needle).toContain(needle);
     // honest about the platform and the missing signature, and never advises weakening Windows security
     expect(text).toContain("Please do not disable or bypass Smart App Control");
-    expect(text).not.toMatch(/Windows 10 (is|are) supported|run as administrator|disable (Smart App Control|Defender)/i);
+    expect(text).not.toMatch(
+      /Windows 10 (is|are) supported|run as administrator|disable (Smart App Control|Defender)/i,
+    );
     expect(scanText("README.txt", text)).toEqual([]);
   });
 
@@ -494,9 +650,11 @@ describe("the WebView2 Fixed Version Runtime input", () => {
   const complete = {
     architecture: "x64",
     version: "130.0.2849.80",
-    downloadUrl: "https://example.test/runtime.cab",
+    downloadUrl:
+      "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/runtime.cab",
     sha256: "a".repeat(64),
     approvedBy: "someone",
+    approvedOn: "2026-01-15",
   };
 
   it("is unusable until every value is supplied", () => {
@@ -508,15 +666,74 @@ describe("the WebView2 Fixed Version Runtime input", () => {
         downloadUrl: null,
         sha256: null,
         approvedBy: null,
+        approvedOn: null,
       }).length,
-    ).toBe(4);
+    ).toBe(5);
     expect(configProblems({ ...complete, version: "130" }).join()).toMatch(/"version"/);
     expect(configProblems({ ...complete, sha256: "xyz" }).join()).toMatch(/"sha256"/);
     expect(
-      configProblems({ ...complete, downloadUrl: "http://example.test/a.cab" }).join(),
+      configProblems({ ...complete, downloadUrl: "http://download.microsoft.com/a.cab" }).join(),
     ).toMatch(/"downloadUrl"/);
     expect(configProblems({ ...complete, approvedBy: " " }).join()).toMatch(/"approvedBy"/);
+    expect(configProblems({ ...complete, approvedOn: "" }).join()).toMatch(/"approvedOn"/);
     expect(configProblems({ ...complete, architecture: "arm64" }).join()).toMatch(/"architecture"/);
+  });
+
+  it("validates approvedOn as a strict YYYY-MM-DD calendar date that is not in the future", () => {
+    const fixedNow = new Date("2026-06-15T12:00:00Z");
+    expect(isValidApprovedDate("2026-01-15", { now: fixedNow })).toBe(true);
+    expect(isValidApprovedDate("2024-02-29", { now: fixedNow })).toBe(true);
+    for (const bad of [
+      null,
+      "",
+      "2026/01/15",
+      "15-01-2026",
+      "2026-1-5",
+      "2026-99-99",
+      "2026-02-29",
+      "2026-04-31",
+      "2026-00-10",
+      "2026-12-00",
+      "2099-01-01",
+      "2026-06-20",
+    ]) {
+      expect(isValidApprovedDate(bad, { now: fixedNow }), String(bad)).toBe(false);
+      expect(
+        configProblems({ ...complete, approvedOn: bad }, { now: fixedNow }).join(),
+        String(bad),
+      ).toMatch(/"approvedOn"/);
+    }
+  });
+
+  it("restricts downloadUrl to https without credentials on official Microsoft hosts", () => {
+    for (const ok of [
+      "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/runtime.cab",
+      "https://download.microsoft.com/download/runtime.cab",
+      "https://microsoft.com/edge/runtime.cab",
+      "https://MSEdge.SF.DL.Delivery.MP.Microsoft.com/a.cab",
+      "https://vo.msecnd.net/edge/runtime.cab",
+      "https://edge.azureedge.net/edge/runtime.cab",
+    ]) {
+      expect(isAllowedWebview2Url(ok), ok).toBe(true);
+      expect(configProblems({ ...complete, downloadUrl: ok }), ok).toEqual([]);
+    }
+    for (const bad of [
+      "http://download.microsoft.com/runtime.cab",
+      "ftp://download.microsoft.com/runtime.cab",
+      "https://user:pass@download.microsoft.com/runtime.cab",
+      "https://user@download.microsoft.com/runtime.cab",
+      "https://evilmicrosoft.com/runtime.cab",
+      "https://microsoft.com.evil.example/runtime.cab",
+      "https://msecnd.net/runtime.cab",
+      "https://azureedge.net/runtime.cab",
+      "https://example.test/runtime.cab",
+      "",
+    ]) {
+      expect(isAllowedWebview2Url(bad), bad).toBe(false);
+      expect(configProblems({ ...complete, downloadUrl: bad }).join(), bad).toMatch(
+        /"downloadUrl"/,
+      );
+    }
   });
 
   it("verifies a CAB against the pinned hash and rejects any mismatch", async () => {
@@ -526,9 +743,12 @@ describe("the WebView2 Fixed Version Runtime input", () => {
     await expect(verifyCab(cab, "nope")).rejects.toThrow(/no valid expected SHA-256/);
   });
 
-  it("downloads only the pinned URL and keeps nothing that fails verification", async () => {
+  it("downloads only the pinned URL, enforces a timeout and redirect host check, and keeps nothing on failure", async () => {
     const bytes = Buffer.from("pretend this is a cab");
-    const ok = async () => new Response(bytes);
+    const ok = async (_url, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(bytes);
+    };
     const cfg = { ...complete, sha256: sha256Hex(bytes) };
     const path = await fetchCab(cfg, join(tmp, "dl"), { fetchImpl: ok });
     expect(readFileSync(path).equals(bytes)).toBe(true);
@@ -546,6 +766,26 @@ describe("the WebView2 Fixed Version Runtime input", () => {
         fetchImpl: async () => new Response("no", { status: 404 }),
       }),
     ).rejects.toThrow(/HTTP 404/);
+
+    // Redirect to an untrusted host is refused even if the initial URL was on microsoft.com
+    const redirected = async () => {
+      const res = new Response(bytes);
+      Object.defineProperty(res, "url", { value: "https://evil.example/runtime.cab" });
+      return res;
+    };
+    await expect(fetchCab(cfg, join(tmp, "dl5"), { fetchImpl: redirected })).rejects.toThrow(
+      /redirected to an untrusted URL/,
+    );
+
+    // Stalled connection aborts cleanly when timeoutMs elapses
+    const stalled = (_url, init) =>
+      new Promise((_, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      });
+    await expect(
+      fetchCab(cfg, join(tmp, "dl6"), { fetchImpl: stalled, timeoutMs: 25 }),
+    ).rejects.toThrow();
+    expect(() => readFileSync(join(tmp, "dl6", "runtime.cab.part"))).toThrow();
   });
 });
 
@@ -641,12 +881,20 @@ describe("third-party notices", () => {
         appliesTo: [{ crate: "bare", version: "1.0.0" }],
       },
     ];
-    const pkg = (version) => ({ name: "bare", version, license: "BSD-3-Clause", repository: "", dir: join(tmp, "nothing") });
+    const pkg = (version) => ({
+      name: "bare",
+      version,
+      license: "BSD-3-Clause",
+      repository: "",
+      dir: join(tmp, "nothing"),
+    });
     const ok = groupByLicenseText([pkg("1.0.0")], sources);
     expect(ok.uncovered).toEqual([]);
     expect(ok.groups[0].origin).toBe("https://example.test/LICENSE");
     // a different version must be reviewed again, not silently inherit the text
-    expect(groupByLicenseText([pkg("1.0.1")], sources).uncovered.map((p) => p.name)).toEqual(["bare"]);
+    expect(groupByLicenseText([pkg("1.0.1")], sources).uncovered.map((p) => p.name)).toEqual([
+      "bare",
+    ]);
   });
 
   it("carries a linked component's own licence text", () => {
@@ -688,14 +936,33 @@ describe("third-party notices", () => {
     expect(text).toMatch(/INCOMPLETE[\s\S]*ghost-package/);
   });
 
-  it("finds the packages the shipped source imports, and ignores tests and relative imports", () => {
+  it("finds the packages the shipped source imports, and ignores tests, type-only imports and relative imports", () => {
     put(
       "src/a.ts",
-      'import React from "react";\nimport { x } from "@base-ui/react/dialog";\nimport "./local";\nimport y from "@/lib/y";\nconst z = import("lucide-react");',
+      [
+        'import React from "react";',
+        'import { type DialogProps, x } from "@base-ui/react/dialog";',
+        'import type { Mock } from "vitest";',
+        'import type DefaultOnly from "@playwright/test";',
+        'import type * as TestingLib from "@testing-library/react";',
+        'import { type A, type B } from "only-type-specifiers";',
+        'export type { HelperType } from "exported-type-only";',
+        'import "./local";',
+        'import y from "@/lib/y";',
+        'const z = import("lucide-react");',
+      ].join("\n"),
     );
     put("src/styles.css", '@import "tailwindcss";\n@import "tw-animate-css";');
     put("src/a.test.ts", 'import "only-in-tests";');
+    put("src/a.spec.tsx", 'import "only-in-specs";');
+    put("src/lib/testAccounts.ts", 'import { vi } from "vitest";');
+    put("src/lib/testSkin.ts", 'import "test-skin-pkg";');
+    put("src/lib/test_helper.ts", 'import "test-underscore-pkg";');
+    put("src/lib/test-helper.ts", 'import "test-dash-pkg";');
     put("src/test/setup.ts", 'import "also-only-tests";');
+    put("src/tests/helper.ts", 'import "in-tests-dir";');
+    put("src/__tests__/unit.ts", 'import "in-dunder-tests";');
+    put("src/__mocks__/ipc.ts", 'import "in-dunder-mocks";');
     expect(frontendRoots(join(tmp, "src"))).toEqual({
       scripts: ["@base-ui/react", "lucide-react", "react"],
       styles: ["tailwindcss", "tw-animate-css"],
@@ -704,5 +971,45 @@ describe("third-party notices", () => {
     expect(packageNameOf("@scope/pkg/deep/file")).toBe("@scope/pkg");
     for (const none of ["./a", "../a", "@/lib/a", "node:fs", "https://x"])
       expect(packageNameOf(none)).toBeNull();
+  });
+
+  it("refuses to ship dev/test tooling in THIRD-PARTY-NOTICES.txt if imported by shipped src/", () => {
+    const pkgJson = {
+      name: "clade-launcher",
+      version: "0.1.0",
+      dependencies: { react: "^19.0.0" },
+      devDependencies: {
+        vitest: "^4.0.0",
+        "@testing-library/react": "^16.0.0",
+        "@playwright/test": "^1.50.0",
+        tailwindcss: "^4.0.0",
+        "custom-dev-helper": "^1.0.0",
+      },
+    };
+    // CSS framework in styles is fine, while any test runner or pure devDependency in scripts is refused
+    expect(
+      forbiddenFrontendRoots({ scripts: ["react"], styles: ["tailwindcss"] }, pkgJson),
+    ).toEqual([]);
+    expect(
+      forbiddenFrontendRoots(
+        {
+          scripts: [
+            "react",
+            "vitest",
+            "@testing-library/react",
+            "@playwright/test",
+            "custom-dev-helper",
+          ],
+          styles: ["tailwindcss"],
+        },
+        pkgJson,
+      ),
+    ).toEqual(["@playwright/test", "@testing-library/react", "custom-dev-helper", "vitest"]);
+
+    put("package.json", JSON.stringify(pkgJson));
+    put("src/oops.ts", 'import { vi } from "vitest";\nexport const x = vi;\n');
+    expect(() => generate(tmp, { cargoMetadata: metadata(), licenseSources: [] })).toThrow(
+      /refusing to include dev\/test tooling.*vitest/,
+    );
   });
 });

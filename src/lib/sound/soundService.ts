@@ -32,6 +32,8 @@ const MIN_GAP_MS = 55;
 const SAME_KIND_GAP_MS = 140;
 /** At most this many sounds may ring at once. */
 const MAX_VOICES = 3;
+/** Silence after the last sound ends before suspending the AudioContext so idle audio threads sleep. */
+const IDLE_SUSPEND_MS = 1500;
 
 export interface SoundStats {
   played: number;
@@ -86,6 +88,18 @@ function env(ctx: AudioContext, t: number, peak: number, attack: number, decay: 
   return g;
 }
 
+function disconnectNodes(...nodes: AudioNode[]) {
+  for (const node of nodes) {
+    if (typeof node.disconnect === "function") {
+      try {
+        node.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+    }
+  }
+}
+
 function tick(
   ctx: AudioContext,
   out: AudioNode,
@@ -106,6 +120,7 @@ function tick(
   bp.Q.value = q;
   const g = env(ctx, t, peak, 0.002, decay);
   src.connect(bp).connect(g).connect(out);
+  src.onended = () => disconnectNodes(src, bp, g);
   src.start(t);
   src.stop(t + decay + 0.02);
 }
@@ -130,6 +145,7 @@ function tone(
   lp.frequency.value = lowpass;
   const g = env(ctx, t, peak, attack, decay);
   osc.connect(lp).connect(g).connect(out);
+  osc.onended = () => disconnectNodes(osc, lp, g);
   osc.start(t);
   osc.stop(t + attack + decay + 0.02);
 }
@@ -190,6 +206,34 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
   let ctx: AudioContext | null = null;
   let master: GainNode | null = null;
   let noise: AudioBuffer | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearIdleSuspend() {
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  }
+
+  function suspendContext() {
+    clearIdleSuspend();
+    if (ctx && ctx.state !== "closed" && typeof ctx.suspend === "function") {
+      void ctx.suspend().catch(() => undefined);
+    }
+  }
+
+  function scheduleIdleSuspend(durationSec: number) {
+    clearIdleSuspend();
+    idleTimer = setTimeout(
+      () => {
+        idleTimer = null;
+        if (ctx && ctx.state !== "closed" && typeof ctx.suspend === "function") {
+          void ctx.suspend().catch(() => undefined);
+        }
+      },
+      durationSec * 1000 + IDLE_SUSPEND_MS,
+    );
+  }
 
   function ensureAudio(): boolean {
     if (ctx && master && noise) return true;
@@ -228,10 +272,33 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
         return false;
       }
       if (!ensureAudio() || !ctx || !master || !noise) return false;
+      const scheduleVoice = () => {
+        if (!ctx || !master || !noise || !settings.enabled || settings.volume <= 0) return;
+        try {
+          applyVolume();
+          VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+          scheduleIdleSuspend(DURATION[kind]);
+        } catch {
+          /* audio is a nicety: never let it break the UI */
+        }
+      };
       try {
-        if (ctx.state === "suspended") void ctx.resume();
-        applyVolume();
-        VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+        if (ctx.state === "suspended") {
+          clearIdleSuspend();
+          const resuming = ctx.resume();
+          if ((ctx.state as AudioContextState) === "running") {
+            void Promise.resolve(resuming).catch(() => undefined);
+            applyVolume();
+            VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+            scheduleIdleSuspend(DURATION[kind]);
+          } else {
+            void Promise.resolve(resuming).then(scheduleVoice, () => undefined);
+          }
+        } else {
+          applyVolume();
+          VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+          scheduleIdleSuspend(DURATION[kind]);
+        }
       } catch {
         return false;
       }
@@ -255,6 +322,7 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
         /* not saved; still applies for this session */
       }
       applyVolume();
+      if (!settings.enabled || settings.volume <= 0) suspendContext();
       for (const l of listeners) l({ ...settings });
       return { ...settings };
     },
@@ -262,6 +330,7 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
     hydrate(next) {
       settings = normalize(next);
       applyVolume();
+      if (!settings.enabled || settings.volume <= 0) suspendContext();
       for (const l of listeners) l({ ...settings });
     },
 

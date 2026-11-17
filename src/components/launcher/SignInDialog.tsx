@@ -21,6 +21,7 @@ interface Props {
   /** Set to sign an existing account in again (it must be the same Minecraft account). */
   account: { id: string; username: string } | null;
   onSignedIn: (snapshot: AccountsSnapshot) => void;
+  onVaultReset?: (snapshot: AccountsSnapshot) => void;
   api: AccountsApi;
 }
 
@@ -45,7 +46,14 @@ const MIN_PASSPHRASE = 8;
  * stored in the encrypted vault, a passphrase is asked for first (created the first time,
  * entered after that); it is sent to the backend and never kept here.
  */
-export function SignInDialog({ open, onOpenChange, account, onSignedIn, api }: Props) {
+export function SignInDialog({
+  open,
+  onOpenChange,
+  account,
+  onSignedIn,
+  onVaultReset,
+  api,
+}: Props) {
   // While a sign-in runs, closing the modal (Escape, backdrop) cancels it.
   const cancelRef = useRef<(() => void) | null>(null);
   // "Start fresh?" is showing: Escape and the backdrop leave it alone.
@@ -69,6 +77,7 @@ export function SignInDialog({ open, onOpenChange, account, onSignedIn, api }: P
         onAsking={setAsking}
         onClose={() => onOpenChange(false)}
         onSignedIn={onSignedIn}
+        onVaultReset={onVaultReset}
       />
     </Modal>
   );
@@ -81,7 +90,8 @@ function Flow({
   onAsking,
   onClose,
   onSignedIn,
-}: Pick<Props, "account" | "api" | "onSignedIn"> & {
+  onVaultReset,
+}: Pick<Props, "account" | "api" | "onSignedIn" | "onVaultReset"> & {
   cancelRef: RefObject<(() => void) | null>;
   onAsking: (asking: boolean) => void;
   onClose: () => void;
@@ -203,7 +213,7 @@ function Flow({
             value={pass}
             onChange={(e) => setPass(e.target.value)}
             className={FIELD}
-            aria-describedby="vault-pass-note"
+            aria-describedby={creating ? "vault-pass-note" : undefined}
           />
           {creating && (
             <span id="vault-pass-note" className="text-ink-muted text-[0.8125rem]">
@@ -223,10 +233,14 @@ function Flow({
               spellCheck={false}
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
+              aria-invalid={mismatch || undefined}
+              aria-describedby={mismatch ? "vault-confirm-error" : undefined}
               className={FIELD}
             />
             {mismatch && (
-              <span className="text-clay-deep text-[0.8125rem]">{t("signin.mismatch")}</span>
+              <span id="vault-confirm-error" className="text-clay-deep text-[0.8125rem]">
+                {t("signin.mismatch")}
+              </span>
             )}
           </div>
         )}
@@ -267,11 +281,12 @@ function Flow({
         api={api}
         layout="modal"
         onAsking={onAsking}
-        onDone={() => {
+        onReset={(snap) => {
           // The old store is archived and the accounts must sign in again: the next step is a new passphrase.
           setPass("");
           setConfirm("");
           setFieldError(null);
+          onVaultReset?.(snap);
           setPhase({ kind: "create" });
         }}
       >

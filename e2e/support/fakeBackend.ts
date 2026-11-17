@@ -201,7 +201,7 @@ function install(cfg: BackendConfig): void {
         state.ui.reducedMotion = "system";
         state.ui.transparency = "system";
         state.ui.memoryMb = null;
-        state.ui.onLaunch = "keep_open";
+        state.ui.onLaunch = "hide";
         state.ui.onExit = "show";
         announce();
         announceGlass();

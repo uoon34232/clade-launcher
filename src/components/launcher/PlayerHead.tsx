@@ -12,11 +12,15 @@ export function PlayerHead({
   account,
   className,
 }: {
-  account?: Pick<Account, "skin" | "username">;
+  account?: Pick<Account, "skin" | "skinDimensions" | "username">;
   className?: string;
 }) {
   const skin = account?.skin ?? null;
-  const size = skin ? skinSize(skin) : null;
+  const size = skin
+    ? account?.skinDimensions !== undefined
+      ? account.skinDimensions
+      : skinSize(skin)
+    : null;
   // The texture a failed decode belongs to, so a later (different) skin gets its own chance.
   const [broken, setBroken] = useState<string | null>(null);
   if (!skin || !size || broken === skin) return <PixelAvatar className={className} />;

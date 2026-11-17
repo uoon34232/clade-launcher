@@ -39,16 +39,23 @@ describe("emitBurst", () => {
     expect(layerCount()).toBe(0);
   });
 
-  it("caps concurrent particles when clicks are mashed", () => {
+  it("caps concurrent particles at 24 when clicks are mashed and uses one batch timer per burst", () => {
     vi.useFakeTimers();
+    expect(MAX_ACTIVE_PARTICLES).toBe(24);
+    const timeoutSpy = vi.spyOn(window, "setTimeout");
+    emitBurst(50, 50, { count: 12 });
+    expect(timeoutSpy).toHaveBeenCalledTimes(1);
+
     for (let i = 0; i < 40; i++) emitBurst(50, 50, { count: 12 });
+    expect(particles().length).toBe(24);
     expect(particles().length).toBeLessThanOrEqual(MAX_ACTIVE_PARTICLES);
     expect(activeParticleCount()).toBe(particles().length);
     vi.advanceTimersByTime(1000);
     expect(activeParticleCount()).toBe(0);
+    timeoutSpy.mockRestore();
   });
 
-  it("keeps particles tiny and within the palette", () => {
+  it("keeps particles tiny, within the palette, and free of per-particle layer hints or shadows", () => {
     vi.useFakeTimers();
     emitBurst(0, 0, { count: 12 });
     const allowed = [
@@ -63,6 +70,8 @@ describe("emitBurst", () => {
       expect(parseFloat(s.width)).toBeLessThanOrEqual(8);
       expect(parseFloat(s.height)).toBeLessThanOrEqual(4);
       expect(allowed).toContain(s.background);
+      expect(s.willChange).toBe("");
+      expect(s.boxShadow).toBe("");
     }
     vi.advanceTimersByTime(1000);
   });

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readyAccountsClient } from "@/lib/accounts/testAccounts";
+import { readyAccountsClient } from "@/test/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { LaunchApi } from "@/lib/launch/api";

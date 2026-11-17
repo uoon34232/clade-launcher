@@ -2,7 +2,7 @@
 // active account is signed in and able to play, so tests of preparing, verifying and launching
 // are not blocked by the "Sign in to continue" gate. Obviously fake data only.
 import { vi } from "vitest";
-import type { AccountsApi, AccountsSnapshot, Appearance } from "./api";
+import type { AccountsApi, AccountsSnapshot, Appearance } from "@/lib/accounts/api";
 
 export const READY_ACCOUNTS: AccountsSnapshot = {
   accounts: [

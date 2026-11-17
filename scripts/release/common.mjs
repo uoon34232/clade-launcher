@@ -116,8 +116,8 @@ export function buildZip(entries, { epoch = 315532800 } = {}) {
   return Buffer.concat([...parts, ...central, end]);
 }
 
-/** Lists the entries of a ZIP held in memory: `[{ name, method, size, compressedSize, offset }]`. */
-export function readZipDirectory(buf) {
+function readZipMeta(buf) {
+  if (buf.length < 22) throw new Error("not a ZIP file (no end-of-directory record)");
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) {
@@ -127,31 +127,49 @@ export function readZipDirectory(buf) {
   }
   if (eocd < 0) throw new Error("not a ZIP file (no end-of-directory record)");
   const count = buf.readUInt16LE(eocd + 10);
-  let p = buf.readUInt32LE(eocd + 16);
-  if (count === 0xffff || p === 0xffffffff) throw new Error("ZIP64 archives are not accepted");
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdOffset === 0xffffffff || cdSize === 0xffffffff)
+    throw new Error("ZIP64 archives are not accepted");
+  if (cdOffset > eocd || cdOffset + cdSize > eocd) throw new Error("corrupt ZIP central directory");
+  let p = cdOffset;
   const entries = [];
   for (let i = 0; i < count; i++) {
-    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error("corrupt ZIP central directory");
+    if (p + 46 > eocd || buf.readUInt32LE(p) !== 0x02014b50)
+      throw new Error("corrupt ZIP central directory");
     const flags = buf.readUInt16LE(p + 8);
     const method = buf.readUInt16LE(p + 10);
+    const crc = buf.readUInt32LE(p + 16);
     const compressedSize = buf.readUInt32LE(p + 20);
     const size = buf.readUInt32LE(p + 24);
     const nameLen = buf.readUInt16LE(p + 28);
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
+    const externalAttr = buf.readUInt32LE(p + 38);
     const offset = buf.readUInt32LE(p + 42);
+    if (p + 46 + nameLen + extraLen + commentLen > eocd)
+      throw new Error("corrupt ZIP central directory");
     const name = buf.toString(flags & 0x0800 ? "utf8" : "latin1", p + 46, p + 46 + nameLen);
-    entries.push({ name, method, size, compressedSize, offset });
+    entries.push({ name, flags, method, crc, size, compressedSize, externalAttr, offset });
     p += 46 + nameLen + extraLen + commentLen;
   }
-  return entries;
+  if (p !== cdOffset + cdSize) throw new Error("corrupt ZIP central directory");
+  return { entries, cdOffset };
+}
+
+/** Lists the entries of a ZIP held in memory: `[{ name, flags, method, crc, size, compressedSize, externalAttr, offset }]`. */
+export function readZipDirectory(buf) {
+  return readZipMeta(buf).entries;
 }
 
 /** The content of one entry (stored or deflated). */
 export function readZipEntry(buf, entry) {
   const p = entry.offset;
-  if (buf.readUInt32LE(p) !== 0x04034b50) throw new Error(`corrupt local header for ${entry.name}`);
+  if (p + 30 > buf.length || buf.readUInt32LE(p) !== 0x04034b50)
+    throw new Error(`corrupt local header for ${entry.name}`);
   const start = p + 30 + buf.readUInt16LE(p + 26) + buf.readUInt16LE(p + 28);
+  if (start + entry.compressedSize > buf.length)
+    throw new Error(`truncated entry data for ${entry.name}`);
   const raw = buf.subarray(start, start + entry.compressedSize);
   if (entry.method === 0) return Buffer.from(raw);
   if (entry.method === 8) return inflateRawSync(raw);
@@ -160,7 +178,8 @@ export function readZipEntry(buf, entry) {
 
 export const readZipFile = (path) => {
   const buf = readFileSync(path);
-  return { buf, entries: readZipDirectory(buf) };
+  const { entries, cdOffset } = readZipMeta(buf);
+  return { buf, entries, cdOffset };
 };
 
 export function writeFileLf(path, text) {

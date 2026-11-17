@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Appearance } from "@/lib/accounts/api";
-import { readyAccountsClient, type appearanceStubs } from "@/lib/accounts/testAccounts";
+import type { AccountsSnapshot, Appearance } from "@/lib/accounts/api";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
+import { READY_ACCOUNTS, readyAccountsClient, type appearanceStubs } from "@/test/testAccounts";
 import { AccountAppearance } from "./AccountAppearance";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
@@ -34,10 +34,22 @@ function Harness(
   );
 }
 
-function setup(over: Partial<ReturnType<typeof appearanceStubs>> = {}, needsSignIn = false) {
+function setup(
+  over: Partial<ReturnType<typeof appearanceStubs>> = {},
+  needsSignIn = false,
+  onVaultReset?: (snapshot: AccountsSnapshot) => void,
+) {
   const api = { ...readyAccountsClient(), ...over };
   api.appearance = over.appearance ?? vi.fn(() => Promise.resolve(look));
-  const view = render(<Harness account={{ id: "acc", needsSignIn }} skin cape api={api} />);
+  const view = render(
+    <Harness
+      account={{ id: "acc", needsSignIn }}
+      skin
+      cape
+      api={api}
+      onVaultReset={onVaultReset}
+    />,
+  );
   return { api, ...view };
 }
 
@@ -105,6 +117,15 @@ describe("account appearance", () => {
     expect(await screen.findByRole("button", { name: "Надеть «Migrator»" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Выбрать PNG…" })).toBeTruthy();
   });
+
+  it("forwards the updated accounts snapshot when Start fresh resets a locked vault", async () => {
+    const onVaultReset = vi.fn();
+    const appearance = vi.fn(() => Promise.reject(new BackendError("locked", "vault_locked")));
+    setup({ appearance }, false, onVaultReset);
+    fireEvent.click(await screen.findByRole("button", { name: "Forgot passphrase?" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+    await waitFor(() => expect(onVaultReset).toHaveBeenCalledWith(READY_ACCOUNTS));
+  });
 });
 
 describe("restoring the default skin", () => {
@@ -123,12 +144,13 @@ describe("restoring the default skin", () => {
     expect(screen.getByRole("button", { name: "Equip Migrator" })).toHaveProperty("disabled", true);
   });
 
-  it("Keep current skin closes the question and changes nothing", async () => {
+  it("Keep current skin closes the question, restores focus and changes nothing", async () => {
     const { api } = setup();
     await screen.findByText("Migrator");
     fireEvent.click(restore());
     fireEvent.click(screen.getByRole("button", { name: "Keep current skin" }));
     expect(screen.queryByText(question)).toBeNull();
+    expect(document.activeElement).toBe(restore());
     expect(api.resetSkin).not.toHaveBeenCalled();
     expect(screen.getByRole("radio", { name: "Slim" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("button", { name: "Choose PNG…" })).toHaveProperty("disabled", false);

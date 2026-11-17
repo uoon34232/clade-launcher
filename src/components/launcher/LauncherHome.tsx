@@ -228,11 +228,13 @@ export function LauncherHome({
     surface.kind === "account"
       ? (accounts.accounts.find((a) => a.id === surface.id) ?? null)
       : null;
+  const bgPaused =
+    surface.kind !== "none" || introduction || problem !== null || Object.keys(runs).length > 0;
 
   return (
     <TooltipProvider delay={350}>
       <main className="relative h-full w-full overflow-hidden">
-        <AnimatedBackground />
+        <AnimatedBackground paused={bgPaused} />
         <WindowChrome />
         <section className="absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]">
           <Hero
@@ -302,14 +304,15 @@ export function LauncherHome({
             launch(id);
           }}
           onOpenLogs={(id) => void launchClient.openLogs(id).catch(() => undefined)}
-          onVaultReset={() =>
+          onVaultReset={(snapshot) => {
+            setAccounts(snapshot);
             // "Start fresh" archived the old vault: the account must sign in again before it can play.
             setProblem((cur) =>
               cur?.kind === "refused"
-                ? { ...cur, code: "needs_sign_in", accountId: accounts.active }
+                ? { ...cur, code: "needs_sign_in", accountId: snapshot.active }
                 : cur,
-            )
-          }
+            );
+          }}
           accountsClient={accountsClient}
         />
         <SettingsDialog open={surface.kind === "settings"} onOpenChange={(o) => !o && close()} />
@@ -321,6 +324,7 @@ export function LauncherHome({
             setAccounts(snapshot);
             close();
           }}
+          onVaultReset={setAccounts}
           api={accountsClient}
         />
         <AccountDialog
@@ -332,6 +336,7 @@ export function LauncherHome({
             setAccounts(snapshot);
             close();
           }}
+          onVaultReset={setAccounts}
           api={accountsClient}
         />
       </main>

@@ -135,6 +135,9 @@ test.describe("account management", () => {
     await expect(
       dialog.getByText(text("accountModal.confirmRemove", { name: BLAKE.username })),
     ).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: text("accountModal.signOutRemove") }),
+    ).toBeFocused();
     expect(await backend.calls("remove_account")).toHaveLength(0);
     expect((await backend.state()).accounts).toHaveLength(2);
   });

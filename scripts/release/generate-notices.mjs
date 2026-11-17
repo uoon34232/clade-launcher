@@ -24,7 +24,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sha256Hex } from "./common.mjs";
 
@@ -38,7 +38,10 @@ export const LICENSE_SOURCES_DIR = join(HERE, "license-texts");
  * time, and an entry applies only to the exact crate version it was verified for, so a new version of a
  * dependency without a licence file shows up as uncovered again instead of silently inheriting a text.
  */
-export function loadLicenseSources(manifestPath = join(HERE, "license-sources.json"), textsDir = LICENSE_SOURCES_DIR) {
+export function loadLicenseSources(
+  manifestPath = join(HERE, "license-sources.json"),
+  textsDir = LICENSE_SOURCES_DIR,
+) {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   return manifest.sources.map((src) => {
     // The hash is of the file with line endings normalised to LF (a Windows checkout may convert them).
@@ -106,10 +109,25 @@ export function rustRuntimePackages(metadata) {
 
 // ------------------------------------------------------------------------------------- npm
 
-const sourceImports = (text) => {
+const TYPE_ONLY_IMPORT_RE =
+  /(?:import|export)\s+type(?:\s+\*(?:\s+as\s+[A-Za-z0-9_$]+)?|\s+[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?|\s*\{[^}]*\})\s*from\s*["'][^"']+["']\s*;?/g;
+
+const stripTypeOnlyImports = (text) =>
+  text
+    .replace(TYPE_ONLY_IMPORT_RE, "")
+    .replace(/import\s*\{([^}]*)\}\s*from\s*["'][^"']+["']\s*;?/g, (full, clause) => {
+      const items = clause
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return items.length > 0 && items.every((s) => /^type\s+/.test(s)) ? "" : full;
+    });
+
+const sourceImports = (text, { isCss = false } = {}) => {
+  const cleaned = isCss ? text : stripTypeOnlyImports(text);
   const found = new Set();
   const specifier = /(?:from\s+|import\s*\(\s*|import\s+|@import\s+(?:url\()?\s*)["']([^"']+)["']/g;
-  for (const m of text.matchAll(specifier)) found.add(m[1]);
+  for (const m of cleaned.matchAll(specifier)) found.add(m[1]);
   return found;
 };
 
@@ -135,20 +153,51 @@ function* walk(dir) {
   }
 }
 
+const TEST_DIR_NAMES = new Set(["test", "tests", "__tests__", "__mocks__"]);
+const TEST_FILE_RE = /^test[A-Z_.-]|\.(test|spec)\.[a-z]+$/;
+const DEV_TOOL_PACKAGE_RE =
+  /^(?:vitest|@vitest\/|@testing-library\/|@playwright\/|playwright(?:-core)?$|jsdom$|happy-dom$|@biomejs\/|eslint|typescript$|@tauri-apps\/cli$)/;
+
 /** The npm packages the shipped interface source imports, split into script and style imports. */
 export function frontendRoots(srcDir) {
   const scripts = new Set();
   const styles = new Set();
   for (const file of walk(srcDir)) {
-    if (/\.test\.[a-z]+$/.test(file) || file.split(sep).includes("test")) continue;
+    const relParts = relative(srcDir, file).split(sep);
+    if (relParts.slice(0, -1).some((part) => TEST_DIR_NAMES.has(part))) continue;
+    if (TEST_FILE_RE.test(basename(file))) continue;
     if (!/\.(ts|tsx|js|jsx|mjs|css)$/.test(file)) continue;
+    const isCss = file.endsWith(".css");
     const text = readFileSync(file, "utf8");
-    for (const spec of sourceImports(text)) {
+    for (const spec of sourceImports(text, { isCss })) {
       const name = packageNameOf(spec);
-      if (name) (file.endsWith(".css") ? styles : scripts).add(name);
+      if (name) (isCss ? styles : scripts).add(name);
     }
   }
   return { scripts: [...scripts].sort(cmp), styles: [...styles].sort(cmp) };
+}
+
+/**
+ * Packages in `frontendRoots(srcDir)` that belong to test/dev tooling rather than the shipped app:
+ * any pure `devDependencies` entry imported by runtime scripts (other than `@fontsource*`), or any
+ * known test/lint/build runner in either scripts or styles.
+ */
+export function forbiddenFrontendRoots(roots, pkgJson = {}) {
+  const deps = new Set(Object.keys(pkgJson.dependencies ?? {}));
+  const devDeps = new Set(Object.keys(pkgJson.devDependencies ?? {}));
+  const bad = new Set();
+  for (const name of roots.scripts ?? []) {
+    if (
+      DEV_TOOL_PACKAGE_RE.test(name) ||
+      (devDeps.has(name) && !deps.has(name) && !name.startsWith("@fontsource"))
+    ) {
+      bad.add(name);
+    }
+  }
+  for (const name of roots.styles ?? []) {
+    if (DEV_TOOL_PACKAGE_RE.test(name)) bad.add(name);
+  }
+  return [...bad].sort(cmp);
 }
 
 /** Finds an installed package directory as Node would, starting from `fromDir` (pnpm and npm layouts). */
@@ -223,7 +272,9 @@ export function groupByLicenseText(packages, sources = []) {
     const files = readLicenseFiles(p.dir);
     if (files.length === 0) {
       // The package ships no file: use a verified upstream text for exactly this crate version, if any.
-      const known = sources.find((src) => (src.appliesTo ?? []).some((a) => a.crate === p.name && a.version === p.version));
+      const known = sources.find((src) =>
+        (src.appliesTo ?? []).some((a) => a.crate === p.name && a.version === p.version),
+      );
       if (known) add(known.text, p, known.origin);
       else uncovered.push(p);
       continue;
@@ -396,22 +447,34 @@ function readCargoMetadata(tauriDir) {
 
 const BUNDLED_HELPERS = ["vite"];
 
-export function generate(root) {
-  const metadata = readCargoMetadata(join(root, "src-tauri"));
-  const rust = rustRuntimePackages(metadata);
+export function generate(root, { cargoMetadata = null, licenseSources = null } = {}) {
+  const pkg = readPackage(root);
   const roots = frontendRoots(join(root, "src"));
+  const forbidden = forbiddenFrontendRoots(roots, pkg);
+  if (forbidden.length) {
+    throw new Error(
+      `refusing to include dev/test tooling in THIRD-PARTY-NOTICES.txt (imported in shipped src/): ${forbidden.join(", ")}`,
+    );
+  }
+  const metadata = cargoMetadata ?? readCargoMetadata(join(root, "src-tauri"));
+  const rust = rustRuntimePackages(metadata);
   // Small pieces of build tooling that are copied into the interface bundle (Vite's preload helper).
   const { packages: npm, missing } = npmRuntimePackages(root, {
     scripts: roots.scripts,
     styles: [...roots.styles, ...BUNDLED_HELPERS],
   });
-  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const fontPackages = npm.filter((p) => p.name.startsWith("@fontsource"));
-  const sources = loadLicenseSources();
+  const sources = licenseSources ?? loadLicenseSources();
   // Components that are linked into Clade.exe without being a Rust crate or an npm package of their own.
   const components = sources
     .filter((src) => src.component)
-    .map((src) => ({ name: src.component, version: "", license: src.license, repository: src.homepage ?? "", source: src }));
+    .map((src) => ({
+      name: src.component,
+      version: "",
+      license: src.license,
+      repository: src.homepage ?? "",
+      source: src,
+    }));
   return {
     text: renderNotices({
       rust,
@@ -428,7 +491,9 @@ export function generate(root) {
       components: components.length,
       uncovered: groupByLicenseText([...rust, ...npm, ...components], sources).uncovered.length,
     },
-    uncoveredNames: groupByLicenseText([...rust, ...npm, ...components], sources).uncovered.map((p) => `${p.name} ${p.version}`),
+    uncoveredNames: groupByLicenseText([...rust, ...npm, ...components], sources).uncovered.map(
+      (p) => `${p.name} ${p.version}`,
+    ),
     missing,
   };
 }
@@ -451,8 +516,7 @@ function main(argv) {
   if (argv.includes("--strict") && counts.uncovered > 0) {
     console.error(
       `notices: --strict and these redistributed packages have no licence text: ${uncoveredNames.join(", ")}.
-` +
-        "Add a verified upstream text to scripts/release/license-sources.json, or do not release.",
+` + "Add a verified upstream text to scripts/release/license-sources.json, or do not release.",
     );
     process.exit(1);
   }

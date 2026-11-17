@@ -275,8 +275,8 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
       </div>
 
       {/* Minecraft version */}
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-baseline justify-between gap-4">
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <span id="mc-version-label" className={LABEL}>
             {t("create.mcVersion")}
           </span>
@@ -307,7 +307,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
           >
             <SelectTrigger
               aria-labelledby="mc-version-label"
-              className={`${FIELD} justify-between border-0 py-0 pr-3`}
+              className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3`}
             >
               <SelectValue placeholder={t("create.choose")} />
             </SelectTrigger>
@@ -378,8 +378,8 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
       <div className="reveal" data-open={type === "modded"} inert={type !== "modded"}>
         <div className="reveal-inner">
           <div className="flex flex-col gap-4 pt-0.5 pb-1">
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-baseline justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                 <span className={LABEL}>{t("create.loader")}</span>
                 <span
                   className="text-ink-muted text-right text-[0.75rem] leading-4"
@@ -411,7 +411,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
               />
             </div>
 
-            <div className="flex flex-col gap-1.5">
+            <div className="flex min-w-0 flex-col gap-1.5">
               <span id="loader-version-label" className={LABEL}>
                 {t("create.loaderVersion")}
               </span>
@@ -434,7 +434,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
               >
                 <SelectTrigger
                   aria-labelledby="loader-version-label"
-                  className={`${FIELD} justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+                  className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
                 >
                   <SelectValue
                     placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}

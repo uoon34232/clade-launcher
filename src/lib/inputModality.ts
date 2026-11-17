@@ -33,11 +33,12 @@ export function installInputModality(doc: Document = document): () => void {
   const onPointer = () => set("pointer");
 
   set("pointer");
+  const pointerOpts: AddEventListenerOptions = { capture: true, passive: true };
   // Capture phase, so the mode is already correct when the browser moves focus or activates a control.
   doc.addEventListener("keydown", onKeyDown, true);
-  doc.addEventListener("pointerdown", onPointer, true);
-  doc.addEventListener("mousedown", onPointer, true);
-  doc.addEventListener("touchstart", onPointer, true);
+  doc.addEventListener("pointerdown", onPointer, pointerOpts);
+  doc.addEventListener("mousedown", onPointer, pointerOpts);
+  doc.addEventListener("touchstart", onPointer, pointerOpts);
   return () => {
     doc.removeEventListener("keydown", onKeyDown, true);
     doc.removeEventListener("pointerdown", onPointer, true);

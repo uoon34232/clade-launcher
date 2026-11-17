@@ -5,8 +5,8 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (c: string, a?: Record<string, unknown>) => invoke(c, a),
 }));
 
-import { accountsApi, parseAccounts, parseAppearance, skinSize } from "./api";
-import { testSkin } from "./testSkin";
+import { MAX_SKIN_BYTES, accountsApi, parseAccounts, parseAppearance, skinSize } from "./api";
+import { testSkin } from "@/test/testSkin";
 
 const tauri = (on: boolean) => {
   if (on) (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
@@ -41,7 +41,14 @@ describe("accounts api", () => {
       capabilities: { signIn: true },
     });
     expect(s.accounts.map((a) => a.id)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
-    expect(s.accounts[0]).toMatchObject({ needsSignIn: true, skin: testSkin() });
+    expect(s.accounts[0]).toMatchObject({
+      needsSignIn: true,
+      skin: testSkin(),
+      skinDimensions: { width: 64, height: 64 },
+    });
+    expect(s.accounts[5].skinDimensions).toEqual({ width: 64, height: 32 });
+    expect(s.accounts[6].skinDimensions).toEqual({ width: 256, height: 256 });
+    expect(s.accounts[1].skinDimensions).toBeNull();
     // Only an inline PNG of a skin shape is kept: never a URL, never another type, never odd sizes.
     expect(s.accounts.map((a) => a.skin !== null)).toEqual([
       true, //  64x64
@@ -108,6 +115,11 @@ describe("skinSize", () => {
     expect(
       skinSize(`data:image/png;base64,${btoa("not a png at all, just text of some length")}`),
     ).toBeNull();
+    // Rejects malformed trailing characters and oversized payloads without backtracking.
+    const valid = testSkin(64, 64);
+    expect(skinSize(`${valid.slice(0, -4)}$$$$`)).toBeNull();
+    const oversized = `${valid.replace(/=+$/, "")}${"A".repeat(Math.ceil((MAX_SKIN_BYTES * 4) / 3) + 128)}`;
+    expect(skinSize(oversized)).toBeNull();
   });
 });
 

@@ -1,11 +1,15 @@
+import { useEffect, useState, type CSSProperties } from "react";
+
 // Soft drifting colour fields plus a static grain layer. Only transforms animate,
 // so the GPU just moves a few pre-rasterised layers.
 const GRAIN =
-  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.17  0 0 0 0 0.15  0 0 0 0 0.13  0 0 0 0.9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")";
+  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n' x='0%' y='0%' width='100%' height='100%'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.17  0 0 0 0 0.15  0 0 0 0 0.13  0 0 0 0.9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")";
+
+const UNFOCUSED_IDLE_MS = 10_000;
 
 interface Field {
   size: string;
-  position: React.CSSProperties;
+  position: CSSProperties;
   color: string;
   /** Half-travel on each axis in vmax, and the one-way duration in seconds. */
   x: number;
@@ -64,9 +68,51 @@ const FIELDS: Field[] = [
   },
 ];
 
-export function AnimatedBackground() {
+export function AnimatedBackground({ paused = false }: { paused?: boolean }) {
+  const [hidden, setHidden] = useState(
+    () => typeof document !== "undefined" && document.visibilityState === "hidden",
+  );
+  const [unfocusedIdle, setUnfocusedIdle] = useState(false);
+
+  useEffect(() => {
+    let blurTimer: number | undefined;
+
+    const onVisibilityChange = () => {
+      setHidden(document.visibilityState === "hidden");
+    };
+    const onBlur = () => {
+      window.clearTimeout(blurTimer);
+      blurTimer = window.setTimeout(() => {
+        setUnfocusedIdle(true);
+      }, UNFOCUSED_IDLE_MS);
+    };
+    const onFocus = () => {
+      window.clearTimeout(blurTimer);
+      blurTimer = undefined;
+      setUnfocusedIdle(false);
+    };
+
+    onVisibilityChange();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearTimeout(blurTimer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
+  const isPaused = paused || unfocusedIdle;
+
   return (
-    <div aria-hidden className="page-base pointer-events-none absolute inset-0 overflow-hidden">
+    <div
+      aria-hidden
+      data-bg-paused={isPaused ? "true" : undefined}
+      data-bg-hidden={hidden ? "true" : undefined}
+      className="page-base pointer-events-none absolute inset-0 overflow-hidden"
+    >
       {FIELDS.map((f, i) => (
         <div
           key={i}
@@ -80,7 +126,7 @@ export function AnimatedBackground() {
               animationDuration: `${f.xDur}s`,
               // Negative delay starts each field mid-journey so the first frame is already composed.
               animationDelay: `${-f.xDur * (0.3 + i * 0.17)}s`,
-            } as React.CSSProperties
+            } as CSSProperties
           }
         >
           <div
@@ -94,7 +140,7 @@ export function AnimatedBackground() {
                 animationName: f.breathe ? "sway-y, breathe" : "sway-y",
                 animationDuration: f.breathe ? `${f.yDur}s, ${f.breathe}s` : `${f.yDur}s`,
                 animationDelay: `${-f.yDur * (0.6 - i * 0.11)}s`,
-              } as React.CSSProperties
+              } as CSSProperties
             }
           />
         </div>
@@ -107,7 +153,10 @@ export function AnimatedBackground() {
             "radial-gradient(70% 100% at 50% 100%, rgb(43 38 34 / 0.13), transparent 70%)",
         }}
       />
-      <div className="absolute inset-0 opacity-[0.07]" style={{ backgroundImage: GRAIN }} />
+      <div
+        className="absolute inset-0 opacity-[0.07]"
+        style={{ backgroundImage: GRAIN, backgroundSize: "220px 220px" }}
+      />
     </div>
   );
 }
