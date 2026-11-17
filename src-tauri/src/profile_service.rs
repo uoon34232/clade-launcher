@@ -27,9 +27,9 @@ use std::sync::Mutex;
 use serde_json::Value;
 use url::Url;
 
-use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+use crate::accounts::{AccountMeta, AccountStatus};
 use crate::accounts_api::AccountsState;
-use crate::auth::ensure_fresh;
+use crate::auth::{ensure_fresh, ensure_fresh_forced};
 use crate::coded_error::CodedError;
 use crate::ms_auth::{dashed_uuid, AuthError, Secret};
 use crate::net::{FetchError, HttpRequest, HttpResponse, Method, Transport};
@@ -132,19 +132,40 @@ pub enum SkinProblem {
 #[derive(Debug, PartialEq, Eq)]
 pub struct SkinPng(Vec<u8>);
 
+fn valid_ihdr_color(color_type: u8, bit_depth: u8) -> bool {
+    matches!(
+        (color_type, bit_depth),
+        (0, 1 | 2 | 4 | 8 | 16) | (2, 8 | 16) | (3, 1 | 2 | 4 | 8) | (4, 8 | 16) | (6, 8 | 16)
+    )
+}
+
 impl SkinPng {
     /// Accepts a PNG whose size is 64x64 or 64x32 (the Java skin formats) within
     /// [`MAX_SKIN_FILE_BYTES`]. The service validates again; this stops wrong files early.
     pub fn validate(bytes: Vec<u8>) -> Result<Self, ProfileServiceError> {
         const SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+        const IEND: &[u8; 12] = b"\0\0\0\0IEND\xae\x42\x60\x82";
         if bytes.len() > MAX_SKIN_FILE_BYTES {
             return Err(ProfileServiceError::InvalidSkin(SkinProblem::TooLarge));
         }
-        // 8 signature + 4 length (13) + 4 "IHDR" + 4 width + 4 height
-        if bytes.len() < 24
+        // 8 signature + 25 IHDR chunk (4 length=13 + 4 "IHDR" + 13 data + 4 CRC) + 12 IEND = 45
+        if bytes.len() < 45
             || &bytes[..8] != SIG
             || bytes[8..12] != [0, 0, 0, 13]
             || &bytes[12..16] != b"IHDR"
+            || &bytes[bytes.len() - 12..] != IEND
+        {
+            return Err(ProfileServiceError::InvalidSkin(SkinProblem::NotPng));
+        }
+        let bit_depth = bytes[24];
+        let color_type = bytes[25];
+        let compression = bytes[26];
+        let filter = bytes[27];
+        let interlace = bytes[28];
+        if !valid_ihdr_color(color_type, bit_depth)
+            || compression != 0
+            || filter != 0
+            || interlace > 1
         {
             return Err(ProfileServiceError::InvalidSkin(SkinProblem::NotPng));
         }
@@ -404,6 +425,8 @@ fn auth_error(e: &AuthError) -> ProfileServiceError {
     match e {
         AuthError::VaultLocked => ProfileServiceError::VaultLocked,
         AuthError::NeedsSignIn(_) => ProfileServiceError::NeedsSignIn,
+        AuthError::NoJavaProfile { .. } => ProfileServiceError::NoProfile,
+        AuthError::UnknownAccount => ProfileServiceError::UnknownAccount,
         AuthError::Offline => ProfileServiceError::Offline,
         AuthError::Storage(_) => ProfileServiceError::Storage,
         _ => ProfileServiceError::Unauthorized,
@@ -426,8 +449,10 @@ impl<T: Transport> MinecraftServices<'_, T> {
         &self,
         account_id: &str,
     ) -> Result<(AccountMeta, Secret), ProfileServiceError> {
-        let file =
-            AccountsFile::load(self.accounts.path()).map_err(|_| ProfileServiceError::Storage)?;
+        let file = self
+            .accounts
+            .load()
+            .map_err(|_| ProfileServiceError::Storage)?;
         let meta = file
             .accounts
             .iter()
@@ -452,42 +477,69 @@ impl<T: Transport> MinecraftServices<'_, T> {
     async fn request(
         &self,
         token: &Secret,
-        method: Method,
-        path: &str,
-        content_type: Option<String>,
-        body: Vec<u8>,
+        req: &Change<'_>,
     ) -> Result<HttpResponse, ProfileServiceError> {
         // The host is a constant: no caller can steer the credential anywhere else.
-        let url = Url::parse(&format!("https://{SERVICE_HOST}{path}"))
+        let url = Url::parse(&format!("https://{SERVICE_HOST}{}", req.path))
             .map_err(|_| ProfileServiceError::BadResponse("the address"))?;
         let mut headers = vec![
             ("Authorization", format!("Bearer {}", token.expose())),
             ("Accept", "application/json".to_owned()),
         ];
-        if let Some(ct) = content_type {
-            headers.push(("Content-Type", ct));
+        if let Some(ct) = &req.content_type {
+            headers.push(("Content-Type", ct.clone()));
         }
         self.transport
             .send(HttpRequest {
-                method,
+                method: req.method,
                 url,
                 headers,
-                body,
+                body: req.body.clone(),
                 max_response_bytes: MAX_RESPONSE_BYTES,
             })
             .await
             .map_err(|e| fetch_error(&e))
     }
 
+    async fn request_authed(
+        &self,
+        meta: &AccountMeta,
+        token: &mut Secret,
+        refreshed: &mut bool,
+        req: &Change<'_>,
+    ) -> Result<HttpResponse, ProfileServiceError> {
+        let r = self.request(token, req).await?;
+        if r.status != 401 || *refreshed {
+            return Ok(r);
+        }
+        *refreshed = true;
+        *token = ensure_fresh_forced(
+            self.transport,
+            self.vault,
+            self.accounts,
+            &meta.id,
+            self.now,
+        )
+        .await
+        .map_err(|e| auth_error(&e))?;
+        self.request(token, req).await
+    }
+
     /// `GET /minecraft/profile`, checked to be the profile of the account it was asked for.
     async fn read(
         &self,
         meta: &AccountMeta,
-        token: &Secret,
+        token: &mut Secret,
+        refreshed: &mut bool,
     ) -> Result<MinecraftProfile, ProfileServiceError> {
-        let r = self
-            .request(token, Method::Get, PROFILE_PATH, None, Vec::new())
-            .await?;
+        let req = Change {
+            op: Op::Read,
+            method: Method::Get,
+            path: PROFILE_PATH,
+            content_type: None,
+            body: Vec::new(),
+        };
+        let r = self.request_authed(meta, token, refreshed, &req).await?;
         if r.status != 200 {
             return Err(status_error(r.status, Op::Read));
         }
@@ -507,37 +559,32 @@ impl<T: Transport> MinecraftServices<'_, T> {
         }
     }
 
-    /// One change request, sent once. The answer is the new profile; when the service answers a
-    /// bare success the current profile is read (a read, never a second change).
+    /// One change request, sent once (with at most one forced refresh if the cached token gets
+    /// `401`). The answer is the new profile; when the service answers a bare success (`204` or
+    /// empty body) the current profile is read (a read, never a second change).
     async fn change(
         &self,
         meta: &AccountMeta,
-        token: &Secret,
+        token: &mut Secret,
+        refreshed: &mut bool,
         change: Change<'_>,
     ) -> Result<MinecraftProfile, ProfileServiceError> {
-        let r = self
-            .request(
-                token,
-                change.method,
-                change.path,
-                change.content_type,
-                change.body,
-            )
-            .await?;
+        let r = self.request_authed(meta, token, refreshed, &change).await?;
         if !matches!(r.status, 200 | 204) {
             return Err(status_error(r.status, change.op));
         }
-        match parse_profile(&r.body).and_then(|p| Self::for_account(meta, p)) {
-            Ok(profile) => Ok(profile),
-            Err(_) => self.read(meta, token).await,
+        if r.status == 204 || r.body.iter().all(u8::is_ascii_whitespace) {
+            return self.read(meta, token, refreshed).await;
         }
+        Self::for_account(meta, parse_profile(&r.body)?)
     }
 }
 
 impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
     async fn profile(&self, account_id: &str) -> Result<MinecraftProfile, ProfileServiceError> {
-        let (meta, token) = self.credentials(account_id).await?;
-        self.read(&meta, &token).await
+        let (meta, mut token) = self.credentials(account_id).await?;
+        let mut refreshed = false;
+        self.read(&meta, &mut token, &mut refreshed).await
     }
 
     async fn upload_skin(
@@ -547,10 +594,12 @@ impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
         skin: SkinPng,
     ) -> Result<MinecraftProfile, ProfileServiceError> {
         let (body, content_type) = skin_form(variant, &skin)?;
-        let (meta, token) = self.credentials(account_id).await?;
+        let (meta, mut token) = self.credentials(account_id).await?;
+        let mut refreshed = false;
         self.change(
             &meta,
-            &token,
+            &mut token,
+            &mut refreshed,
             Change {
                 op: Op::Skin,
                 method: Method::Post,
@@ -563,10 +612,12 @@ impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
     }
 
     async fn reset_skin(&self, account_id: &str) -> Result<MinecraftProfile, ProfileServiceError> {
-        let (meta, token) = self.credentials(account_id).await?;
+        let (meta, mut token) = self.credentials(account_id).await?;
+        let mut refreshed = false;
         self.change(
             &meta,
-            &token,
+            &mut token,
+            &mut refreshed,
             Change {
                 op: Op::Skin,
                 method: Method::Delete,
@@ -583,12 +634,14 @@ impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
         account_id: &str,
         cape: Option<CapeId>,
     ) -> Result<MinecraftProfile, ProfileServiceError> {
-        let (meta, token) = self.credentials(account_id).await?;
+        let (meta, mut token) = self.credentials(account_id).await?;
+        let mut refreshed = false;
         match cape {
             None => {
                 self.change(
                     &meta,
-                    &token,
+                    &mut token,
+                    &mut refreshed,
                     Change {
                         op: Op::Cape,
                         method: Method::Delete,
@@ -601,7 +654,7 @@ impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
             }
             Some(id) => {
                 // Only a cape from THIS account's own list is ever sent.
-                let current = self.read(&meta, &token).await?;
+                let current = self.read(&meta, &mut token, &mut refreshed).await?;
                 if !current.capes.iter().any(|c| c.id == id) {
                     return Err(ProfileServiceError::CapeNotOwned);
                 }
@@ -610,7 +663,8 @@ impl<T: Transport> ProfileService for MinecraftServices<'_, T> {
                     .into_bytes();
                 self.change(
                     &meta,
-                    &token,
+                    &mut token,
+                    &mut refreshed,
                     Change {
                         op: Op::Cape,
                         method: Method::Put,

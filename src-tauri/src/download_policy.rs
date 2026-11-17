@@ -73,6 +73,15 @@ impl DownloadPolicy {
             Some(_) => return Err(PolicyError::IpHost),
             None => return Err(PolicyError::HostNotAllowed(String::new())),
         };
+        if host.starts_with('.')
+            || host.ends_with('.')
+            || host.contains("..")
+            || host
+                .split('.')
+                .any(|l| l.is_empty() || l.starts_with('-') || l.ends_with('-'))
+        {
+            return Err(PolicyError::HostNotAllowed(host));
+        }
         let ok = self
             .allowed
             .iter()
@@ -130,6 +139,44 @@ mod tests {
                 "{host} must stay blocked"
             );
         }
+    }
+
+    #[test]
+    fn rejects_malformed_dns_labels_on_allowed_suffixes() {
+        for host in [
+            ".mojang.com",
+            "a..mojang.com",
+            "mojang.com.",
+            "piston-data.mojang.com.",
+            "-bad.mojang.com",
+            "bad-.mojang.com",
+            "a.-bad.mojang.com",
+        ] {
+            let url_text = format!("https://{host}/x");
+            if let Ok(parsed) = Url::parse(&url_text) {
+                assert_eq!(
+                    DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS).check(&parsed),
+                    Err(PolicyError::HostNotAllowed(host.to_owned())),
+                    "{host} must be rejected by DownloadPolicy::check"
+                );
+            }
+        }
+        assert_eq!(
+            check("https://.mojang.com/x"),
+            Err(PolicyError::HostNotAllowed(".mojang.com".to_owned()))
+        );
+        assert_eq!(
+            check("https://a..mojang.com/x"),
+            Err(PolicyError::HostNotAllowed("a..mojang.com".to_owned()))
+        );
+        assert_eq!(
+            check("https://mojang.com./x"),
+            Err(PolicyError::HostNotAllowed("mojang.com.".to_owned()))
+        );
+        assert_eq!(
+            check("https://-bad.mojang.com/x"),
+            Err(PolicyError::HostNotAllowed("-bad.mojang.com".to_owned()))
+        );
     }
 
     #[test]

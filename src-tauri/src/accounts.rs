@@ -4,15 +4,15 @@
 //! vault is locked (the UI can list accounts before the passphrase is entered). Everything
 //! sensitive lives in the encrypted vault, keyed by `AccountMeta::id`.
 
-use std::fs;
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, read_bounded};
 
 const SCHEMA: u32 = 1;
+const MAX_ACCOUNTS_BYTES: u64 = 1024 * 1024;
 
 /// Why an account must sign in again. Portability cannot promise Microsoft never asks:
 /// refresh tokens expire after inactivity, passwords change, sessions get revoked, and a new
@@ -65,10 +65,21 @@ impl Default for AccountsFile {
     }
 }
 
+fn parse_accounts(bytes: &[u8]) -> io::Result<AccountsFile> {
+    let parsed: AccountsFile = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+    if parsed.schema != SCHEMA {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported accounts.json schema: {}", parsed.schema),
+        ));
+    }
+    Ok(parsed)
+}
+
 impl AccountsFile {
     pub fn load(path: &Path) -> io::Result<Self> {
-        match fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b).map_err(io::Error::other),
+        match read_bounded(path, MAX_ACCOUNTS_BYTES) {
+            Ok(b) => parse_accounts(&b),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
         }
@@ -79,10 +90,8 @@ impl AccountsFile {
     /// to do something destructive on the strength of "these are the accounts" must use this: a
     /// missing file is *not* an empty list, and a damaged one is an error.
     pub fn load_authoritative(path: &Path) -> io::Result<Option<Self>> {
-        match fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b)
-                .map(Some)
-                .map_err(io::Error::other),
+        match read_bounded(path, MAX_ACCOUNTS_BYTES) {
+            Ok(b) => parse_accounts(&b).map(Some),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -274,5 +283,37 @@ mod tests {
             ReauthReason::ConsentRequired
         );
         assert_eq!(classify_oauth_error("server_error"), ReauthReason::Unknown);
+    }
+
+    #[test]
+    fn unsupported_schema_is_rejected_in_load_and_load_authoritative() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("accounts.json");
+        for bad_schema in [0u32, 2, 99] {
+            let payload = format!(r#"{{"schema":{bad_schema},"active":null,"accounts":[]}}"#);
+            std::fs::write(&p, payload).unwrap();
+            let err1 = AccountsFile::load(&p).unwrap_err();
+            assert_eq!(err1.kind(), io::ErrorKind::InvalidData);
+            let err2 = AccountsFile::load_authoritative(&p).unwrap_err();
+            assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn oversized_file_is_rejected_in_load_and_load_authoritative() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("accounts.json");
+        assert!(AccountsFile::load_authoritative(&p).unwrap().is_none());
+
+        let oversized = vec![b' '; (MAX_ACCOUNTS_BYTES + 1) as usize];
+        std::fs::write(&p, oversized).unwrap();
+        assert_eq!(
+            AccountsFile::load(&p).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            AccountsFile::load_authoritative(&p).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

@@ -11,19 +11,32 @@
 //! details), and writes nothing to disk: persistence is the callers' job, inside `cache/`.
 
 use std::future::Future;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use url::Url;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::download_policy::{DownloadPolicy, PolicyError};
+use crate::download_policy::{DownloadPolicy, PolicyError, DEFAULT_ALLOWED_HOSTS};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
+const DOCUMENT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const DOCUMENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const POOL_MAX_IDLE_PER_HOST: usize = 2;
 const MAX_REDIRECTS: usize = 5;
 /// Longest silence tolerated while streaming a large file.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+tokio::task_local! {
+    static ACTIVE_POLICY: DownloadPolicy;
+}
+
+static NO_REDIRECT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static REDIRECT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Documents,
     Credentials,
@@ -74,6 +87,21 @@ pub struct HttpRequest {
     pub max_response_bytes: usize,
 }
 
+impl HttpRequest {
+    fn zeroize_fields(&mut self) {
+        for (_, value) in &mut self.headers {
+            value.zeroize();
+        }
+        self.body.zeroize();
+    }
+}
+
+impl Drop for HttpRequest {
+    fn drop(&mut self) {
+        self.zeroize_fields();
+    }
+}
+
 impl std::fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -90,6 +118,24 @@ impl std::fmt::Debug for HttpRequest {
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    fn zeroize_fields(&mut self) {
+        self.body.zeroize();
+    }
+}
+
+impl Drop for HttpResponse {
+    fn drop(&mut self) {
+        self.zeroize_fields();
+    }
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HttpResponse({}, <body redacted>)", self.status)
+    }
 }
 
 /// Sends requests that may carry credentials (sign-in). Same policy as [`Fetcher`]; additionally
@@ -127,9 +173,81 @@ pub trait Streamer: Send + Sync {
     ) -> impl Future<Output = Result<(), FetchError>> + Send + 'a;
 }
 
+fn exceeds_cap(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    current_len.saturating_add(chunk_len) > limit
+}
+
+fn base_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .user_agent(concat!("Clade/", env!("CARGO_PKG_VERSION")))
+}
+
+fn get_or_build_client(
+    slot: &OnceLock<reqwest::Client>,
+    make: impl FnOnce() -> Result<reqwest::Client, FetchError>,
+) -> Result<reqwest::Client, FetchError> {
+    if let Some(c) = slot.get() {
+        return Ok(c.clone());
+    }
+    let built = make()?;
+    let _ = slot.set(built);
+    Ok(slot
+        .get()
+        .expect("OnceLock holds a client after set")
+        .clone())
+}
+
+fn check_redirect_hop(previous_count: usize, url: &Url) -> Result<(), &'static str> {
+    if previous_count >= MAX_REDIRECTS {
+        return Err("too many redirects");
+    }
+    let policy = ACTIVE_POLICY
+        .try_with(|p| *p)
+        .unwrap_or_else(|_| DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS));
+    if policy.check(url).is_ok() {
+        Ok(())
+    } else {
+        Err("redirect target is not on the allow-list")
+    }
+}
+
+fn no_redirect_client() -> Result<reqwest::Client, FetchError> {
+    get_or_build_client(&NO_REDIRECT_CLIENT, || {
+        base_client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .read_timeout(DOCUMENT_READ_TIMEOUT)
+            .timeout(TOTAL_TIMEOUT)
+            .build()
+            .map_err(|e| FetchError::Network(e.to_string()))
+    })
+}
+
+fn redirect_client() -> Result<reqwest::Client, FetchError> {
+    get_or_build_client(&REDIRECT_CLIENT, || {
+        let redirect = reqwest::redirect::Policy::custom(|attempt| {
+            match check_redirect_hop(attempt.previous().len(), attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(msg) => attempt.error(msg),
+            }
+        });
+        base_client_builder()
+            .redirect(redirect)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .map_err(|e| FetchError::Network(e.to_string()))
+    })
+}
+
 pub struct HttpFetcher {
     client: reqwest::Client,
     policy: DownloadPolicy,
+    mode: Mode,
 }
 
 impl HttpFetcher {
@@ -149,33 +267,15 @@ impl HttpFetcher {
     }
 
     fn build(policy: DownloadPolicy, mode: Mode) -> Result<Self, FetchError> {
-        let redirect = if mode == Mode::Credentials {
-            reqwest::redirect::Policy::none()
-        } else {
-            reqwest::redirect::Policy::custom(move |attempt| {
-                if attempt.previous().len() >= MAX_REDIRECTS {
-                    attempt.error("too many redirects")
-                } else if policy.check(attempt.url()).is_ok() {
-                    attempt.follow()
-                } else {
-                    attempt.error("redirect target is not on the allow-list")
-                }
-            })
+        let client = match mode {
+            Mode::Credentials => no_redirect_client()?,
+            Mode::Documents | Mode::Downloads => redirect_client()?,
         };
-        let builder = reqwest::Client::builder()
-            .https_only(true)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("Clade/", env!("CARGO_PKG_VERSION")))
-            .redirect(redirect);
-        let builder = if mode == Mode::Downloads {
-            builder.read_timeout(READ_TIMEOUT)
-        } else {
-            builder.timeout(TOTAL_TIMEOUT)
-        };
-        let client = builder
-            .build()
-            .map_err(|e| FetchError::Network(e.to_string()))?;
-        Ok(Self { client, policy })
+        Ok(Self {
+            client,
+            policy,
+            mode,
+        })
     }
 }
 
@@ -187,46 +287,70 @@ impl Streamer for HttpFetcher {
         from: u64,
         sink: &'a mut dyn StreamSink,
     ) -> impl Future<Output = Result<(), FetchError>> + Send + 'a {
+        let policy = self.policy;
+        let mode = self.mode;
         async move {
-            self.policy.check(url)?;
-            let mut request = self.client.get(url.clone());
-            if from > 0 {
-                request = request.header("Range", format!("bytes={from}-"));
-            }
-            let mut response = request
-                .send()
-                .await
-                .map_err(|e| FetchError::Network(e.without_url().to_string()))?;
-            let status = response.status().as_u16();
-            if status != 200 && status != 206 {
-                return Err(FetchError::Status(status));
-            }
-            if status == 206 {
-                // The body must start exactly where we asked, or appending would corrupt the file.
-                let starts_right = response
-                    .headers()
-                    .get("content-range")
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v.starts_with(&format!("bytes {from}-")));
-                if !starts_right {
-                    return Err(FetchError::Network("unexpected byte range".into()));
+            policy.check(url)?;
+            let work = async move {
+                let mut request = self.client.get(url.clone());
+                if mode == Mode::Documents {
+                    request = request.timeout(DOCUMENT_TOTAL_TIMEOUT);
                 }
-            }
-            let head = StreamHead {
-                status,
-                content_length: response.content_length(),
-            };
-            sink.begin(&head)
-                .map_err(|e| FetchError::Local(e.to_string()))?;
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| FetchError::Network(e.without_url().to_string()))?
-            {
-                sink.chunk(&chunk)
+                if from > 0 {
+                    request = request.header("Range", format!("bytes={from}-"));
+                }
+                let mut response = if mode == Mode::Documents {
+                    tokio::time::timeout(DOCUMENT_READ_TIMEOUT, request.send())
+                        .await
+                        .map_err(|_| FetchError::Network("request timed out".into()))?
+                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                } else {
+                    request
+                        .send()
+                        .await
+                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                };
+                policy.check(response.url())?;
+                let status = response.status().as_u16();
+                if status != 200 && status != 206 {
+                    return Err(FetchError::Status(status));
+                }
+                if status == 206 {
+                    // The body must start exactly where we asked, or appending would corrupt the file.
+                    let starts_right = response
+                        .headers()
+                        .get("content-range")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.starts_with(&format!("bytes {from}-")));
+                    if !starts_right {
+                        return Err(FetchError::Network("unexpected byte range".into()));
+                    }
+                }
+                let head = StreamHead {
+                    status,
+                    content_length: response.content_length(),
+                };
+                sink.begin(&head)
                     .map_err(|e| FetchError::Local(e.to_string()))?;
-            }
-            Ok(())
+                loop {
+                    let next = if mode == Mode::Documents {
+                        tokio::time::timeout(DOCUMENT_READ_TIMEOUT, response.chunk())
+                            .await
+                            .map_err(|_| FetchError::Network("read timed out".into()))?
+                            .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    } else {
+                        response
+                            .chunk()
+                            .await
+                            .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    };
+                    let Some(chunk) = next else { break };
+                    sink.chunk(&chunk)
+                        .map_err(|e| FetchError::Local(e.to_string()))?;
+                }
+                Ok(())
+            };
+            ACTIVE_POLICY.scope(policy, work).await
         }
     }
 }
@@ -234,38 +358,60 @@ impl Streamer for HttpFetcher {
 impl Transport for HttpFetcher {
     fn send(
         &self,
-        request: HttpRequest,
+        mut request: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, FetchError>> + Send {
         let client = self.client.clone();
         let policy = self.policy;
+        let mode = self.mode;
         async move {
             policy.check(&request.url)?;
+            let client = if mode == Mode::Credentials {
+                client
+            } else {
+                no_redirect_client()?
+            };
             let mut builder = match request.method {
                 Method::Get => client.get(request.url.clone()),
-                Method::Post => client.post(request.url.clone()).body(request.body),
-                Method::Put => client.put(request.url.clone()).body(request.body),
+                Method::Post => client
+                    .post(request.url.clone())
+                    .body(std::mem::take(&mut request.body)),
+                Method::Put => client
+                    .put(request.url.clone())
+                    .body(std::mem::take(&mut request.body)),
                 Method::Delete => client.delete(request.url.clone()),
             };
             for (name, value) in &request.headers {
                 builder = builder.header(*name, value);
             }
+            let max_response_bytes = request.max_response_bytes;
+            drop(request);
             let mut response = builder
                 .send()
                 .await
                 .map_err(|e| FetchError::Network(e.without_url().to_string()))?;
+            policy.check(response.url())?;
             let status = response.status().as_u16();
-            let mut body = Vec::new();
+            if response
+                .content_length()
+                .is_some_and(|n| n > max_response_bytes as u64)
+            {
+                return Err(FetchError::TooLarge(max_response_bytes));
+            }
+            let mut body = Zeroizing::new(Vec::new());
             while let Some(chunk) = response
                 .chunk()
                 .await
                 .map_err(|e| FetchError::Network(e.without_url().to_string()))?
             {
-                if body.len() + chunk.len() > request.max_response_bytes {
-                    return Err(FetchError::TooLarge(request.max_response_bytes));
+                if exceeds_cap(body.len(), chunk.len(), max_response_bytes) {
+                    return Err(FetchError::TooLarge(max_response_bytes));
                 }
                 body.extend_from_slice(&chunk);
             }
-            Ok(HttpResponse { status, body })
+            Ok(HttpResponse {
+                status,
+                body: std::mem::take::<Vec<u8>>(&mut body),
+            })
         }
     }
 }
@@ -278,35 +424,64 @@ impl Fetcher for HttpFetcher {
     ) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send {
         let client = self.client.clone();
         let policy = self.policy;
+        let mode = self.mode;
         let url = url.clone();
         async move {
             policy.check(&url)?;
-            let mut response = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|e| FetchError::Network(e.without_url().to_string()))?;
-            if !response.status().is_success() {
-                return Err(FetchError::Status(response.status().as_u16()));
-            }
-            if response
-                .content_length()
-                .is_some_and(|n| n > max_bytes as u64)
-            {
-                return Err(FetchError::TooLarge(max_bytes));
-            }
-            let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| FetchError::Network(e.without_url().to_string()))?
-            {
-                if body.len() + chunk.len() > max_bytes {
+            let work = async move {
+                let mut req = client.get(url);
+                if mode == Mode::Documents {
+                    req = req.timeout(DOCUMENT_TOTAL_TIMEOUT);
+                }
+                let mut response = if mode == Mode::Documents {
+                    tokio::time::timeout(DOCUMENT_READ_TIMEOUT, req.send())
+                        .await
+                        .map_err(|_| FetchError::Network("request timed out".into()))?
+                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                } else {
+                    req.send()
+                        .await
+                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                };
+                policy.check(response.url())?;
+                if !response.status().is_success() {
+                    return Err(FetchError::Status(response.status().as_u16()));
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|n| n > max_bytes as u64)
+                {
                     return Err(FetchError::TooLarge(max_bytes));
                 }
-                body.extend_from_slice(&chunk);
+                let mut body = Vec::new();
+                loop {
+                    let next = if mode == Mode::Documents {
+                        tokio::time::timeout(DOCUMENT_READ_TIMEOUT, response.chunk())
+                            .await
+                            .map_err(|_| FetchError::Network("read timed out".into()))?
+                            .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    } else {
+                        response
+                            .chunk()
+                            .await
+                            .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    };
+                    let Some(chunk) = next else { break };
+                    if exceeds_cap(body.len(), chunk.len(), max_bytes) {
+                        return Err(FetchError::TooLarge(max_bytes));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(body)
+            };
+            let fetch = ACTIVE_POLICY.scope(policy, work);
+            if mode == Mode::Documents {
+                tokio::time::timeout(DOCUMENT_TOTAL_TIMEOUT, fetch)
+                    .await
+                    .map_err(|_| FetchError::Network("request timed out".into()))?
+            } else {
+                fetch.await
             }
-            Ok(body)
         }
     }
 }
@@ -417,11 +592,13 @@ pub mod testing_transport {
     impl Transport for FakeTransport {
         fn send(
             &self,
-            request: HttpRequest,
+            mut request: HttpRequest,
         ) -> impl Future<Output = Result<HttpResponse, FetchError>> + Send {
             let mut key = request.url.clone();
             key.set_query(None);
             let key = key.to_string();
+            let body_bytes = std::mem::take(&mut request.body);
+            let max_bytes = request.max_response_bytes;
             self.calls.lock().unwrap().push((
                 request.method,
                 key.clone(),
@@ -430,7 +607,7 @@ pub mod testing_transport {
                     .iter()
                     .map(|(n, v)| ((*n).to_owned(), v.clone()))
                     .collect(),
-                String::from_utf8_lossy(&request.body).into_owned(),
+                String::from_utf8_lossy(&body_bytes).into_owned(),
             ));
             let next = self
                 .routes
@@ -439,6 +616,9 @@ pub mod testing_transport {
                 .get_mut(&key)
                 .and_then(VecDeque::pop_front);
             let result = match next {
+                Some(Ok((_, body))) if body.len() > max_bytes => {
+                    Err(FetchError::TooLarge(max_bytes))
+                }
                 Some(Ok((status, body))) => Ok(HttpResponse { status, body }),
                 Some(Err(e)) => Err(e),
                 None => Err(FetchError::Network("no route (test)".into())),
@@ -580,7 +760,7 @@ pub mod testing_stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::download_policy::DEFAULT_ALLOWED_HOSTS;
+    use crate::download_policy::{DEFAULT_ALLOWED_HOSTS, LOADER_HOSTS};
 
     #[tokio::test]
     async fn the_real_fetcher_refuses_disallowed_urls_before_touching_the_network() {
@@ -591,6 +771,9 @@ mod tests {
             "https://127.0.0.1/x",
             "https://user:pw@piston-meta.mojang.com/x",
             "https://piston-meta.mojang.com:8443/x",
+            "https://.mojang.com/x",
+            "https://a..mojang.com/x",
+            "https://-bad.mojang.com/x",
         ] {
             let r = f.get(&Url::parse(u).unwrap(), 1024).await;
             assert!(matches!(r, Err(FetchError::Policy(_))), "{u}: {r:?}");
@@ -629,5 +812,135 @@ mod tests {
             Err(FetchError::TooLarge(10))
         ));
         assert_eq!(f.calls().len(), 2);
+    }
+
+    #[test]
+    fn shared_clients_are_reused_across_fetchers_by_redirect_mode() {
+        let docs_global = HttpFetcher::new(DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS)).unwrap();
+        let docs_loaders = HttpFetcher::new(DownloadPolicy::new(LOADER_HOSTS)).unwrap();
+        let dl_global =
+            HttpFetcher::for_downloads(DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS)).unwrap();
+        let auth_a = HttpFetcher::for_auth(DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS)).unwrap();
+        let auth_b = HttpFetcher::for_auth(DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS)).unwrap();
+
+        assert_eq!(docs_global.mode, Mode::Documents);
+        assert_eq!(docs_loaders.mode, Mode::Documents);
+        assert_eq!(dl_global.mode, Mode::Downloads);
+        assert_eq!(auth_a.mode, Mode::Credentials);
+        assert_eq!(auth_b.mode, Mode::Credentials);
+
+        let redirect_ref = REDIRECT_CLIENT.get().expect("redirect client initialized");
+        let no_redirect_ref = NO_REDIRECT_CLIENT.get().expect("auth client initialized");
+        assert!(!std::ptr::eq(redirect_ref, no_redirect_ref));
+        assert!(
+            std::ptr::eq(REDIRECT_CLIENT.get().unwrap(), redirect_ref),
+            "redirect client is initialized once and shared"
+        );
+        assert!(
+            std::ptr::eq(NO_REDIRECT_CLIENT.get().unwrap(), no_redirect_ref),
+            "no-redirect client is initialized once and shared"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_local_redirect_policy_isolates_loader_hosts_from_global_hosts() {
+        let mojang = Url::parse("https://piston-data.mojang.com/v1/objects/a/b.jar").unwrap();
+        let fabric = Url::parse("https://maven.fabricmc.net/net/fabricmc/x.jar").unwrap();
+        let evil = Url::parse("https://example.org/x").unwrap();
+
+        // Fallback outside task-local scope uses DEFAULT_ALLOWED_HOSTS.
+        assert!(check_redirect_hop(0, &mojang).is_ok());
+        assert!(check_redirect_hop(0, &evil).is_err());
+        assert_eq!(
+            check_redirect_hop(MAX_REDIRECTS, &mojang),
+            Err("too many redirects")
+        );
+
+        let fabric_l = fabric.clone();
+        let mojang_l = mojang.clone();
+        let loader_work = async move {
+            tokio::task::yield_now().await;
+            assert!(check_redirect_hop(0, &fabric_l).is_ok());
+            assert_eq!(
+                check_redirect_hop(0, &mojang_l),
+                Err("redirect target is not on the allow-list"),
+                "loader policy must never follow redirects to Mojang"
+            );
+        };
+        let loader_policy = DownloadPolicy::new(LOADER_HOSTS);
+        let loader_task = tokio::spawn(ACTIVE_POLICY.scope(loader_policy, loader_work));
+
+        let global_work = async move {
+            tokio::task::yield_now().await;
+            assert!(check_redirect_hop(0, &mojang).is_ok());
+            assert!(check_redirect_hop(0, &fabric).is_ok());
+            assert_eq!(
+                check_redirect_hop(0, &evil),
+                Err("redirect target is not on the allow-list")
+            );
+        };
+        let global_policy = DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS);
+        let global_task = tokio::spawn(ACTIVE_POLICY.scope(global_policy, global_work));
+
+        loader_task.await.unwrap();
+        global_task.await.unwrap();
+    }
+
+    #[test]
+    fn requests_and_responses_redact_debug_and_zeroize_sensitive_buffers() {
+        let mut req = HttpRequest {
+            method: Method::Post,
+            url: Url::parse("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+                .unwrap(),
+            headers: vec![
+                ("Authorization", "Bearer SUPER-SECRET-BEARER".to_owned()),
+                ("X-Custom", "ANOTHER-SECRET-HEADER".to_owned()),
+            ],
+            body: b"refresh_token=SUPER-SECRET-REFRESH".to_vec(),
+            max_response_bytes: 4096,
+        };
+        let req_dbg = format!("{req:?}");
+        assert!(!req_dbg.contains("SUPER-SECRET"));
+        assert!(!req_dbg.contains("ANOTHER-SECRET"));
+
+        req.zeroize_fields();
+        assert!(req.headers.iter().all(|(_, v)| v.is_empty()));
+        assert!(req.body.is_empty());
+        drop(req);
+
+        let mut resp = HttpResponse {
+            status: 200,
+            body: b"{\"access_token\":\"SUPER-SECRET-RESPONSE\"}".to_vec(),
+        };
+        let resp_dbg = format!("{resp:?}");
+        assert!(!resp_dbg.contains("SUPER-SECRET-RESPONSE"));
+
+        resp.zeroize_fields();
+        assert!(resp.body.is_empty());
+        drop(resp);
+    }
+
+    #[tokio::test]
+    async fn size_cap_uses_saturating_addition_and_fake_transport_enforces_limit() {
+        assert!(!exceeds_cap(10, 5, 15));
+        assert!(exceeds_cap(10, 6, 15));
+        assert!(
+            exceeds_cap(usize::MAX - 4, 10, usize::MAX - 1),
+            "saturating_add must prevent wraparound past usize::MAX"
+        );
+
+        let t = testing_transport::FakeTransport::new();
+        let url = "https://api.minecraftservices.com/minecraft/profile";
+        t.reply(url, 200, vec![b'x'; 64]);
+        let r = t
+            .send(HttpRequest {
+                method: Method::Get,
+                url: Url::parse(url).unwrap(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                max_response_bytes: 32,
+            })
+            .await;
+        assert!(matches!(r, Err(FetchError::TooLarge(32))), "{r:?}");
     }
 }

@@ -136,6 +136,16 @@ impl AccountsState {
         &self.path
     }
 
+    pub fn load(&self) -> std::io::Result<AccountsFile> {
+        let _g = self.lock();
+        AccountsFile::load(&self.path)
+    }
+
+    pub fn load_authoritative(&self) -> std::io::Result<Option<AccountsFile>> {
+        let _g = self.lock();
+        AccountsFile::load_authoritative(&self.path)
+    }
+
     /// Whether nobody holds the gate right now (tests use it to prove the vault is never touched
     /// while the gate is held).
     #[cfg(test)]
@@ -489,5 +499,88 @@ mod tests {
         assert!(json.contains("\"needsSignIn\":false"));
         assert!(json.contains("\"capabilities\":{\"signIn\":true,\"skin\":true,\"cape\":true}"));
         assert!(!json.to_lowercase().contains("token"));
+    }
+
+    #[test]
+    fn state_load_and_load_authoritative_serialize_under_gate_and_enforce_limits() {
+        use std::sync::{Arc, Barrier};
+
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("accounts.json");
+        let state = Arc::new(AccountsState::new(p.clone()));
+
+        // Missing file behavior.
+        assert!(state.load().unwrap().accounts.is_empty());
+        assert!(state.load_authoritative().unwrap().is_none());
+
+        // Seeded file behavior and serialization under `gate`.
+        let mut initial = AccountsFile::default();
+        initial.accounts.push(meta("a", "Alex"));
+        initial.save(&p).unwrap();
+
+        let guard = state.lock();
+        let done_load = Arc::new(AtomicBool::new(false));
+        let done_auth = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(Barrier::new(3));
+
+        let t1 = {
+            let state = Arc::clone(&state);
+            let done = Arc::clone(&done_load);
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                ready.wait();
+                let res = state.load().unwrap();
+                done.store(true, Ordering::Release);
+                res
+            })
+        };
+        let t2 = {
+            let state = Arc::clone(&state);
+            let done = Arc::clone(&done_auth);
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                ready.wait();
+                let res = state.load_authoritative().unwrap().unwrap();
+                done.store(true, Ordering::Release);
+                res
+            })
+        };
+
+        ready.wait();
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!done_load.load(Ordering::Acquire));
+        assert!(!done_auth.load(Ordering::Acquire));
+
+        let mut updated = AccountsFile::default();
+        updated.accounts.push(meta("b", "Blake"));
+        updated.save(&p).unwrap();
+        drop(guard);
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert_eq!(r1.accounts[0].id, "b");
+        assert_eq!(r2.accounts[0].id, "b");
+
+        // Schema != 1 rejected.
+        std::fs::write(&p, r#"{"schema":2,"active":null,"accounts":[]}"#).unwrap();
+        assert_eq!(
+            state.load().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            state.load_authoritative().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        // > 1 MiB rejected.
+        std::fs::write(&p, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert_eq!(
+            state.load().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            state.load_authoritative().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 }
