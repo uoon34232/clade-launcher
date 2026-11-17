@@ -17,9 +17,10 @@
 //! The supervisor does not know about accounts, the UI or Tauri: it is driven in tests with
 //! ordinary controlled processes.
 
-use std::collections::VecDeque;
+use std::borrow::Cow;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
@@ -41,6 +42,7 @@ const MAX_LOG_BYTES: u64 = 24 * 1024 * 1024;
 const KEEP_LOGS: usize = 10;
 const TAIL_LINES: usize = 250;
 const MAX_LINE_CHARS: usize = 4000;
+const LINE_CHANNEL_CAPACITY: usize = 512;
 
 // ------------------------------------------------------------------------------ redaction
 
@@ -62,14 +64,17 @@ impl Redactor {
         }
     }
 
-    pub fn apply(&self, line: &str) -> String {
+    pub fn apply<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        if !self.secrets.iter().any(|s| line.contains(s.as_str())) {
+            return Cow::Borrowed(line);
+        }
         let mut out = line.to_owned();
         for s in &self.secrets {
             if out.contains(s.as_str()) {
                 out = out.replace(s.as_str(), "<redacted>");
             }
         }
-        out
+        Cow::Owned(out)
     }
 }
 
@@ -183,42 +188,45 @@ fn prune(dir: &Path) {
 }
 
 struct SessionLog {
-    file: File,
+    file: BufWriter<File>,
     written: u64,
-    redactor: Redactor,
     capped: bool,
 }
 
 impl SessionLog {
-    fn open(dir: &Path, name: &str, redactor: Redactor) -> std::io::Result<(Self, PathBuf)> {
+    fn open(dir: &Path, name: &str) -> std::io::Result<(Self, PathBuf)> {
         fs::create_dir_all(dir)?;
         prune(dir);
         let path = dir.join(name);
         Ok((
             Self {
-                file: File::create(&path)?,
+                file: BufWriter::with_capacity(64 * 1024, File::create(&path)?),
                 written: 0,
-                redactor,
                 capped: false,
             },
             path,
         ))
     }
 
-    /// The command line header: written whole (it can be long), with secrets replaced.
-    fn header(&mut self, text: &str) {
-        let clean = self.redactor.apply(text);
+    /// The command line header: written whole (it can be long), already redacted by caller.
+    fn header(&mut self, clean: &str) {
         if writeln!(self.file, "{clean}").is_ok() {
             self.written += clean.len() as u64 + 1;
         }
     }
 
-    fn line(&mut self, text: &str) {
+    fn line(&mut self, clean: &str) {
         if self.capped {
             return;
         }
-        let clean = self.redactor.apply(text);
-        let clipped: String = clean.chars().take(MAX_LINE_CHARS).collect();
+        let clipped = if clean.len() <= MAX_LINE_CHARS {
+            clean
+        } else {
+            match clean.char_indices().nth(MAX_LINE_CHARS) {
+                Some((idx, _)) => &clean[..idx],
+                None => clean,
+            }
+        };
         if self.written + clipped.len() as u64 > MAX_LOG_BYTES {
             let _ = writeln!(self.file, "[log truncated: size limit reached]");
             self.capped = true;
@@ -227,6 +235,10 @@ impl SessionLog {
         if writeln!(self.file, "{clipped}").is_ok() {
             self.written += clipped.len() as u64 + 1;
         }
+    }
+
+    fn flush(&mut self) {
+        let _ = self.file.flush();
     }
 }
 
@@ -239,10 +251,10 @@ pub struct Supervised {
     pub log_path: Option<PathBuf>,
 }
 
-async fn pump<R: AsyncRead + Unpin>(r: R, tx: mpsc::UnboundedSender<String>) {
+async fn pump<R: AsyncRead + Unpin>(r: R, tx: mpsc::Sender<String>) {
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(l)) = lines.next_line().await {
-        if tx.send(l).is_err() {
+        if tx.send(l).await.is_err() {
             break;
         }
     }
@@ -261,14 +273,9 @@ pub fn output_dir(root: &PortableRoot) -> PathBuf {
 }
 
 /// How much game output may pile up in the output file while Clade is watching: once this much has been
-/// read, the file is emptied again (see [`tail_file`]). Together with the small slack of one poll the
-/// file therefore stays within roughly this size however much a game or a mod prints. (The session log
-/// that people read has its own, larger cap.)
+/// read and the reader has caught up to EOF (or a runaway writer reaches twice this bound), the file is
+/// emptied again (see [`tail_file`]). (The session log that people read has its own, larger cap.)
 pub const OUTPUT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
-
-/// How far behind the end of the file the reader may be when it empties the file; at most this much
-/// unread output can be dropped by an emptying.
-const EMPTY_SLACK_BYTES: u64 = 64 * 1024;
 
 /// Empties a file in place. Safe while a game has it open for appending: its next write simply goes to
 /// the new end of the file.
@@ -296,13 +303,27 @@ pub fn open_output(root: &PortableRoot, id: &InstanceId) -> std::io::Result<(Fil
     Ok((file, path))
 }
 
-/// Empties output files left by games that ended while Clade was not watching. They are emptied, not
-/// deleted: a game that is still running keeps appending to its file, and a deleted name could never be
-/// emptied again. A game that has ended removes its own file (see the launch code).
+/// Empties output files left by games that ended while Clade was not watching, skipping any game
+/// whose process is still alive (see [`PlaytimeStore::live_sessions`]).
 pub fn sweep_output(root: &PortableRoot) {
-    if let Ok(entries) = fs::read_dir(output_dir(root)) {
-        for e in entries.flatten() {
-            let _ = empty_file(&e.path());
+    let live_ids: HashSet<String> = PlaytimeStore::new(root)
+        .live_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, s)| s.instance_id.to_string())
+        .collect();
+    let Ok(entries) = fs::read_dir(output_dir(root)) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let is_live = path.extension().and_then(|x| x.to_str()) == Some("out")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|id| live_ids.contains(id));
+        if !is_live {
+            let _ = empty_file(&path);
         }
     }
 }
@@ -312,20 +333,25 @@ const MAX_PENDING_BYTES: usize = 64 * 1024;
 
 /// Turns the bytes in `pending` into whole lines (lossy UTF-8, `\n` or `\r\n` ended); a partial last
 /// line stays in `pending` unless it has grown too long.
-fn drain_lines(pending: &mut Vec<u8>, tx: &mpsc::UnboundedSender<String>) {
+async fn drain_lines(pending: &mut Vec<u8>, tx: &mpsc::Sender<String>) {
     let mut start = 0;
     while let Some(pos) = pending[start..].iter().position(|b| *b == b'\n') {
         let mut line = &pending[start..start + pos];
         if line.last() == Some(&b'\r') {
             line = &line[..line.len() - 1];
         }
-        let _ = tx.send(String::from_utf8_lossy(line).into_owned());
+        let text = String::from_utf8_lossy(line).into_owned();
         start += pos + 1;
+        if tx.send(text).await.is_err() {
+            pending.clear();
+            return;
+        }
     }
     pending.drain(..start);
     if pending.len() > MAX_PENDING_BYTES {
-        let _ = tx.send(String::from_utf8_lossy(pending).into_owned());
+        let text = String::from_utf8_lossy(pending).into_owned();
         pending.clear();
+        let _ = tx.send(text).await;
     }
 }
 
@@ -333,7 +359,7 @@ fn drain_lines(pending: &mut Vec<u8>, tx: &mpsc::UnboundedSender<String>) {
 /// what is left (including a last line without a newline).
 async fn tail_file(
     path: PathBuf,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
     mut done: tokio::sync::watch::Receiver<bool>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -344,36 +370,60 @@ async fn tail_file(
     let mut buf = vec![0u8; 64 * 1024];
     // Bytes read since the file was last emptied.
     let mut read_total: u64 = 0;
+    let mut idle = Duration::from_millis(150);
     loop {
         let finished = *done.borrow();
         let n = file.read(&mut buf).await.unwrap_or(0);
         if n > 0 {
+            idle = Duration::from_millis(150);
             read_total += n as u64;
             pending.extend_from_slice(&buf[..n]);
-            drain_lines(&mut pending, &tx);
-            // Bound the file: once enough has been read and we are (nearly) caught up, empty it and read
-            // from the start again. The game keeps appending to the same open handle.
-            if read_total >= OUTPUT_LIMIT_BYTES {
-                let len = file.metadata().await.map_or(u64::MAX, |m| m.len());
-                if len.saturating_sub(read_total) <= EMPTY_SLACK_BYTES
-                    && empty_file(&path).is_ok()
-                    && file.seek(std::io::SeekFrom::Start(0)).await.is_ok()
-                {
+            drain_lines(&mut pending, &tx).await;
+            // Bound the file: once enough has been read and we are caught up to exact EOF (or a
+            // runaway writer hit twice the bound), empty it and read from the start again.
+            let maybe_len = if read_total >= OUTPUT_LIMIT_BYTES {
+                file.metadata().await.ok().map(|m| m.len())
+            } else {
+                None
+            };
+            if let Some(len) = maybe_len {
+                let reset = if len < read_total {
+                    file.seek(std::io::SeekFrom::Start(0)).await.is_ok()
+                } else if len == read_total || len >= OUTPUT_LIMIT_BYTES * 2 {
+                    empty_file(&path).is_ok()
+                        && file.seek(std::io::SeekFrom::Start(0)).await.is_ok()
+                } else {
+                    false
+                };
+                if reset {
                     read_total = 0;
                 }
             }
+            continue;
+        }
+        if read_total > 0
+            && file.metadata().await.is_ok_and(|m| m.len() < read_total)
+            && file.seek(std::io::SeekFrom::Start(0)).await.is_ok()
+        {
+            read_total = 0;
             continue;
         }
         if finished {
             break;
         }
         tokio::select! {
-            () = tokio::time::sleep(Duration::from_millis(150)) => {}
-            _ = done.changed() => {}
+            () = tokio::time::sleep(idle) => {
+                idle = (idle * 2).min(Duration::from_millis(1500));
+            }
+            _ = done.changed() => {
+                idle = Duration::from_millis(150);
+            }
         }
     }
     if !pending.is_empty() {
-        let _ = tx.send(String::from_utf8_lossy(&pending).into_owned());
+        let _ = tx
+            .send(String::from_utf8_lossy(&pending).into_owned())
+            .await;
     }
 }
 
@@ -396,8 +446,9 @@ pub struct Watch<'a> {
 
 /// Runs until the child exits. `on_playing` fires once if it is still alive after the grace period.
 pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()) -> Supervised {
-    let started = Instant::now();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let started_ms = crate::playtime::unbiased_ms();
+    let pid = child.id().unwrap_or(0);
+    let (tx, mut rx) = mpsc::channel::<String>(LINE_CHANNEL_CAPACITY);
     let mut readers = Vec::new();
     if let Some(o) = child.stdout.take() {
         readers.push(tokio::spawn(pump(o, tx.clone())));
@@ -416,10 +467,10 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
     drop(tx);
 
     let stamp = (watch.now_unix)();
+    let redactor = Redactor::new(watch.secrets);
     let (mut log, log_path) = match SessionLog::open(
         &logs_dir(watch.root, watch.instance),
-        &format!("{stamp}.log"),
-        Redactor::new(watch.secrets),
+        &format!("{stamp}-{pid}.log"),
     ) {
         Ok((l, p)) => (Some(l), Some(p)),
         Err(e) => {
@@ -432,26 +483,39 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
             "Clade game session, instance {}, started at unix time {stamp}",
             watch.instance
         ));
-        l.header(&format!("Command: {}", watch.header));
+        let clean_header = redactor.apply(watch.header);
+        l.header(&format!("Command: {clean_header}"));
         l.line("---");
+        l.flush();
     }
 
     let mut tracker = watch.tracker;
     let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL_LINES);
     let mut heartbeat = tokio::time::interval(watch.heartbeat);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await; // the first tick fires at once
     let grace = tokio::time::sleep(watch.grace);
     tokio::pin!(grace);
     let mut playing = false;
-    let redactor = Redactor::new(watch.secrets);
     let feed = |line: String, log: &mut Option<SessionLog>, tail: &mut VecDeque<String>| {
-        if let Some(l) = log.as_mut() {
-            l.line(&line);
-        }
+        let tail_line = match redactor.apply(&line) {
+            Cow::Borrowed(_) => {
+                if let Some(l) = log.as_mut() {
+                    l.line(&line);
+                }
+                line
+            }
+            Cow::Owned(redacted) => {
+                if let Some(l) = log.as_mut() {
+                    l.line(&redacted);
+                }
+                redacted
+            }
+        };
         if tail.len() == TAIL_LINES {
             tail.pop_front();
         }
-        tail.push_back(redactor.apply(&line));
+        tail.push_back(tail_line);
     };
 
     let status = loop {
@@ -459,6 +523,9 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
             status = child.wait() => break status.ok(),
             Some(line) = rx.recv() => feed(line, &mut log, &mut tail),
             _ = heartbeat.tick() => {
+                if let Some(l) = log.as_mut() {
+                    l.flush();
+                }
                 if let Some(t) = tracker.as_mut() {
                     if let Err(e) = t.tick((watch.now_unix)(), Instant::now()) {
                         tracing::warn!(error = %e, "playtime heartbeat failed");
@@ -472,16 +539,18 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
         }
     };
 
-    // The process is gone: collect what it printed last.
+    // The process is gone: drain what it printed last while readers finish, bounded by a timeout
+    // in case a grandchild process kept a pipe handle open.
     let _ = done_tx.send(true);
-    for r in readers {
-        let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
-    }
-    while let Ok(line) = rx.try_recv() {
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(Some(line)) = tokio::time::timeout_at(drain_deadline, rx.recv()).await {
         feed(line, &mut log, &mut tail);
     }
+    for r in readers {
+        r.abort();
+    }
 
-    let ran = started.elapsed();
+    let ran = Duration::from_millis(crate::playtime::unbiased_ms().saturating_sub(started_ms));
     let banked_seconds = tracker.take().and_then(|t| {
         match t.finish(
             &PlaytimeStore::new(watch.root),
@@ -507,6 +576,7 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
             exit.kind,
             exit.message
         ));
+        l.flush();
     }
     Supervised {
         exit,

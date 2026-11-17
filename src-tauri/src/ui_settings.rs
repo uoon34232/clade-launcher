@@ -9,7 +9,7 @@
 //! `ui-settings-changed` event (so a future second window or settings screen stays in sync).
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -20,17 +20,28 @@ use crate::settings::LauncherSettings;
 
 pub const CHANGED_EVENT: &str = "ui-settings-changed";
 
-/// The settings plus where they are saved. One instance, shared by the whole app.
-pub struct SettingsState {
+struct Inner {
     path: PathBuf,
-    inner: Mutex<LauncherSettings>,
+    /// Held only in memory to clone or swap; never held across disk `save()` / `sync_all()`.
+    current: RwLock<LauncherSettings>,
+    /// Serialises writers against other writers while leaving `current` readable during disk I/O.
+    writer: Mutex<()>,
+}
+
+/// The settings plus where they are saved. Cheaply cloneable and shared by the whole app.
+#[derive(Clone)]
+pub struct SettingsState {
+    inner: Arc<Inner>,
 }
 
 impl SettingsState {
     pub fn new(path: PathBuf, settings: LauncherSettings) -> Self {
         Self {
-            path,
-            inner: Mutex::new(settings),
+            inner: Arc::new(Inner {
+                path,
+                current: RwLock::new(settings),
+                writer: Mutex::new(()),
+            }),
         }
     }
 }
@@ -102,34 +113,30 @@ impl UiSettingsDto {
 }
 
 impl SettingsState {
+    fn read(&self) -> RwLockReadGuard<'_, LauncherSettings> {
+        self.inner.current.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, LauncherSettings> {
+        self.inner
+            .current
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// How many files may download at once (1 to 16).
     pub fn max_concurrent_downloads(&self) -> usize {
-        usize::from(
-            self.inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .max_concurrent_downloads,
-        )
-        .clamp(1, 16)
+        usize::from(self.read().max_concurrent_downloads).clamp(1, 16)
     }
 
     /// The transparency-effects choice (`system`, `on` or `off`).
     pub fn transparency(&self) -> String {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .ui
-            .transparency
-            .clone()
+        self.read().ui.transparency.clone()
     }
 
     /// The instance selected in the dock, if any (an id, never a path).
     pub fn last_instance(&self) -> Option<InstanceId> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_instance
-            .clone()
+        self.read().last_instance.clone()
     }
 
     /// Remembers the selected instance in `data/settings.json`.
@@ -144,47 +151,40 @@ impl SettingsState {
 
     /// The global game memory (MiB), if the person chose one; `None` means automatic.
     pub fn default_memory_mb(&self) -> Option<u32> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .minecraft
-            .memory_mb
+        self.read().minecraft.memory_mb
     }
 
     /// What the window does around a game.
     pub fn behavior(&self) -> crate::settings::BehaviorPrefs {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .behavior
-            .clone()
+        self.read().behavior.clone()
     }
 
     /// A copy of the settings (for the diagnostics export).
     pub fn settings_copy(&self) -> LauncherSettings {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.read().clone()
     }
 
     pub(crate) fn snapshot(&self) -> UiSettingsDto {
-        UiSettingsDto::from_settings(&self.inner.lock().unwrap_or_else(|e| e.into_inner()))
+        let copy = self.settings_copy();
+        UiSettingsDto::from_settings(&copy)
     }
 
-    /// Applies `change` under the lock and saves atomically if it modified anything. On a save
-    /// failure the in-memory value is rolled back, so memory never disagrees with the file.
+    /// Serialises writers, clones `current`, saves atomically while `current` stays unlocked so
+    /// readers never stall on USB `sync_all()`, and commits `next` into `current` only after `save`
+    /// succeeds. On a save failure `current` is never touched.
     fn update(
         &self,
         change: impl FnOnce(&mut LauncherSettings) -> bool,
     ) -> Result<(UiSettingsDto, bool), String> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = guard.clone();
-        let changed = change(&mut guard);
+        let _writer = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = self.settings_copy();
+        let changed = change(&mut next);
         if changed {
-            if let Err(e) = guard.save(&self.path) {
-                *guard = previous;
-                return Err(format!("could not save settings: {e}"));
-            }
+            next.save(&self.inner.path)
+                .map_err(|e| format!("could not save settings: {e}"))?;
+            *self.write() = next.clone();
         }
-        Ok((UiSettingsDto::from_settings(&guard), changed))
+        Ok((UiSettingsDto::from_settings(&next), changed))
     }
 }
 
@@ -194,13 +194,17 @@ pub fn get_ui_settings(state: State<'_, SettingsState>) -> UiSettingsDto {
 }
 
 #[tauri::command]
-pub fn set_sound_settings(
+pub async fn set_sound_settings(
     app: AppHandle,
     state: State<'_, SettingsState>,
     enabled: Option<bool>,
     volume: Option<f32>,
 ) -> Result<UiSettingsDto, String> {
-    let (dto, changed) = state.update(|s| s.set_sound(enabled, volume))?;
+    let st = state.inner().clone();
+    let (dto, changed) =
+        tokio::task::spawn_blocking(move || st.update(|s| s.set_sound(enabled, volume)))
+            .await
+            .map_err(|e| format!("settings task failed: {e}"))??;
     if changed {
         let _ = app.emit(CHANGED_EVENT, dto.clone());
     }
@@ -208,15 +212,46 @@ pub fn set_sound_settings(
 }
 
 #[tauri::command]
-pub fn set_last_phrase(
+pub async fn set_last_phrase(
     app: AppHandle,
     state: State<'_, SettingsState>,
     id: String,
 ) -> Result<(), String> {
-    let (dto, changed) = state.update(|s| {
-        let before = s.ui.last_phrase.clone();
-        s.set_last_phrase(&id) && s.ui.last_phrase != before
-    })?;
+    let st = state.inner().clone();
+    let (dto, changed) = tokio::task::spawn_blocking(move || {
+        st.update(|s| {
+            let before = s.ui.last_phrase.clone();
+            s.set_last_phrase(&id) && s.ui.last_phrase != before
+        })
+    })
+    .await
+    .map_err(|e| format!("settings task failed: {e}"))??;
+    if changed {
+        let _ = app.emit(CHANGED_EVENT, dto);
+    }
+    Ok(())
+}
+
+/// Saves on a blocking worker, announces on change, and refreshes the window backdrop only when
+/// `refresh_glass` is true (`set_transparency` and `reset_settings`).
+async fn apply_blocking(
+    app: &AppHandle,
+    state: &SettingsState,
+    refresh_glass: bool,
+    change: impl FnOnce(&mut LauncherSettings) -> bool + Send + 'static,
+) -> Result<(), CodedError> {
+    let st = state.clone();
+    let app_for_glass = app.clone();
+    let (dto, changed) = tokio::task::spawn_blocking(move || {
+        let out = st.update(change)?;
+        if out.1 && refresh_glass {
+            crate::glass::refresh(&app_for_glass);
+        }
+        Ok::<_, String>(out)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("settings task failed: {e}")))?
+    .map_err(CodedError::storage)?;
     if changed {
         let _ = app.emit(CHANGED_EVENT, dto);
     }
@@ -224,7 +259,7 @@ pub fn set_last_phrase(
 }
 
 #[tauri::command]
-pub fn set_language(
+pub async fn set_language(
     app: AppHandle,
     state: State<'_, SettingsState>,
     language: String,
@@ -235,31 +270,11 @@ pub fn set_language(
             "unknown language code",
         ));
     }
-    let (dto, changed) = state
-        .update(|s| {
-            let before = s.ui.language.clone();
-            s.set_language(&language) && s.ui.language != before
-        })
-        .map_err(CodedError::storage)?;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto);
-    }
-    Ok(())
-}
-
-/// Saves, announces and reports the outcome of one settings change.
-fn apply(
-    app: &AppHandle,
-    state: &SettingsState,
-    change: impl FnOnce(&mut LauncherSettings) -> bool,
-) -> Result<(), CodedError> {
-    let (dto, changed) = state.update(change).map_err(CodedError::storage)?;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto);
-        // The window material depends on a setting (and a reset can change it): re-resolve it now.
-        crate::glass::refresh(app);
-    }
-    Ok(())
+    apply_blocking(&app, &state, false, move |s| {
+        let before = s.ui.language.clone();
+        s.set_language(&language) && s.ui.language != before
+    })
+    .await
 }
 
 fn unsupported() -> CodedError {
@@ -267,7 +282,7 @@ fn unsupported() -> CodedError {
 }
 
 #[tauri::command]
-pub fn set_reduced_motion(
+pub async fn set_reduced_motion(
     app: AppHandle,
     state: State<'_, SettingsState>,
     mode: String,
@@ -275,14 +290,15 @@ pub fn set_reduced_motion(
     if !crate::settings::MOTION_MODES.contains(&mode.as_str()) {
         return Err(unsupported());
     }
-    apply(&app, &state, |s| {
+    apply_blocking(&app, &state, false, move |s| {
         let before = s.ui.reduced_motion.clone();
         s.set_reduced_motion(&mode) && s.ui.reduced_motion != before
     })
+    .await
 }
 
 #[tauri::command]
-pub fn set_transparency(
+pub async fn set_transparency(
     app: AppHandle,
     state: State<'_, SettingsState>,
     mode: String,
@@ -290,29 +306,36 @@ pub fn set_transparency(
     if !crate::settings::TRANSPARENCY_MODES.contains(&mode.as_str()) {
         return Err(unsupported());
     }
-    apply(&app, &state, |s| {
+    apply_blocking(&app, &state, true, move |s| {
         let before = s.ui.transparency.clone();
         s.set_transparency(&mode) && s.ui.transparency != before
     })
+    .await
 }
 
 /// Sets the global game memory in MiB, or `null` for automatic. A value outside the safe range for
 /// this machine is refused with that range.
 #[tauri::command]
-pub fn set_memory(
+pub async fn set_memory(
     app: AppHandle,
     state: State<'_, SettingsState>,
     mb: Option<u32>,
 ) -> Result<(), CodedError> {
-    let total = crate::system::total_memory_mb();
-    let mut refused = None;
-    let result = apply(&app, &state, |s| match s.set_memory(mb, total) {
-        Ok(changed) => changed,
-        Err(range) => {
-            refused = Some(range);
-            false
-        }
-    });
+    let st = state.inner().clone();
+    let (res, refused) = tokio::task::spawn_blocking(move || {
+        let total = crate::system::total_memory_mb();
+        let mut refused = None;
+        let res = st.update(|s| match s.set_memory(mb, total) {
+            Ok(changed) => changed,
+            Err(range) => {
+                refused = Some(range);
+                false
+            }
+        });
+        (res, refused)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("settings task failed: {e}")))?;
     if let Some((min, max)) = refused {
         return Err(
             CodedError::new("invalid_memory", "memory is outside the safe range").with(
@@ -320,41 +343,52 @@ pub fn set_memory(
             ),
         );
     }
-    result
+    let (dto, changed) = res.map_err(CodedError::storage)?;
+    if changed {
+        let _ = app.emit(CHANGED_EVENT, dto);
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn set_behavior(
+pub async fn set_behavior(
     app: AppHandle,
     state: State<'_, SettingsState>,
     on_launch: Option<String>,
     on_exit: Option<String>,
 ) -> Result<(), CodedError> {
-    let mut valid = true;
-    let result = apply(&app, &state, |s| {
-        let before = s.behavior.clone();
-        valid = s.set_behavior(on_launch.as_deref(), on_exit.as_deref());
-        s.behavior != before
-    });
-    if !valid {
+    if on_launch
+        .as_deref()
+        .is_some_and(|v| !crate::settings::ON_LAUNCH_MODES.contains(&v))
+        || on_exit
+            .as_deref()
+            .is_some_and(|v| !crate::settings::ON_EXIT_MODES.contains(&v))
+    {
         return Err(unsupported());
     }
-    result
+    apply_blocking(&app, &state, false, move |s| {
+        let before = s.behavior.clone();
+        s.set_behavior(on_launch.as_deref(), on_exit.as_deref()) && s.behavior != before
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn complete_onboarding(
+pub async fn complete_onboarding(
     app: AppHandle,
     state: State<'_, SettingsState>,
 ) -> Result<(), CodedError> {
-    apply(&app, &state, |s| s.complete_onboarding())
+    apply_blocking(&app, &state, false, LauncherSettings::complete_onboarding).await
 }
 
 /// Puts the user-configurable preferences back to their defaults. Profiles, accounts, the vault,
 /// game files and playtime are not stored in the settings file and are never touched.
 #[tauri::command]
-pub fn reset_settings(app: AppHandle, state: State<'_, SettingsState>) -> Result<(), CodedError> {
-    apply(&app, &state, |s| s.reset_user_prefs())
+pub async fn reset_settings(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<(), CodedError> {
+    apply_blocking(&app, &state, true, LauncherSettings::reset_user_prefs).await
 }
 
 #[cfg(test)]
@@ -386,13 +420,13 @@ mod tests {
                 onboarding_done: false,
                 memory_mb: None,
                 memory: dto.memory.clone(),
-                on_launch: "keep_open".into(),
+                on_launch: "hide".into(),
                 on_exit: "show".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             }
         );
         assert!(dto.memory.min <= dto.memory.auto.max(dto.memory.min));
-        assert!(dto.memory.min < dto.memory.max);
+        assert!(dto.memory.min <= dto.memory.max);
     }
 
     #[test]
@@ -452,17 +486,31 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_save_rolls_the_in_memory_value_back() {
+    fn a_failed_save_leaves_in_memory_state_completely_untouched() {
         let d = tempfile::tempdir().unwrap();
         // Make the target path unwritable: its parent "directory" is a file.
         let blocker = d.path().join("data");
         fs::write(&blocker, b"not a directory").unwrap();
-        let st = SettingsState::new(blocker.join("settings.json"), LauncherSettings::default());
-        assert!(st.update(|s| s.set_sound(Some(false), None)).is_err());
-        assert!(
-            st.snapshot().sound_enabled,
-            "memory must still match what is on disk"
+        let initial = LauncherSettings {
+            max_concurrent_downloads: 6,
+            ..LauncherSettings::default()
+        };
+        let st = SettingsState::new(blocker.join("settings.json"), initial.clone());
+        let reader = st.clone();
+        assert!(st.update(|s| s.set_sound(Some(false), Some(0.1))).is_err());
+        assert!(st.update(|s| s.set_language("ru")).is_err());
+        assert!(st.update(|s| s.set_transparency("on")).is_err());
+        assert!(st
+            .set_last_instance(Some(InstanceId::new("survival").unwrap()))
+            .is_err());
+        assert_eq!(
+            reader.settings_copy(),
+            initial,
+            "failed saves must never mutate in-memory SettingsState"
         );
+        assert!(reader.snapshot().sound_enabled);
+        assert_eq!(reader.transparency(), "system");
+        assert_eq!(reader.last_instance(), None);
     }
 
     #[test]

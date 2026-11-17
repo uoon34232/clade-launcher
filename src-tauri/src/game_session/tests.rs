@@ -315,9 +315,14 @@ fn only_the_newest_logs_are_kept_and_the_redactor_ignores_trivial_secrets() {
     );
 
     let r = Redactor::new(&["abc".to_owned(), "LONGER-SECRET-VALUE".to_owned()]);
+    assert!(
+        matches!(r.apply("x abc y plain line z"), Cow::Borrowed(_)),
+        "lines without secrets borrow in place with zero allocations"
+    );
+    let redacted = r.apply("x abc y LONGER-SECRET-VALUE z");
+    assert!(matches!(redacted, Cow::Owned(_)));
     assert_eq!(
-        r.apply("x abc y LONGER-SECRET-VALUE z"),
-        "x abc y <redacted> z",
+        redacted, "x abc y <redacted> z",
         "very short values are not worth (or safe) to replace"
     );
 }
@@ -450,9 +455,19 @@ async fn the_output_file_stays_bounded_however_much_the_game_prints() {
     use std::io::Write;
     let e = env();
     let (mut game, path) = open_output(&e.root, &e.id).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(LINE_CHANNEL_CAPACITY);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let reader = tokio::spawn(tail_file(path.clone(), tx, done_rx));
+    let consumer = tokio::spawn(async move {
+        let (mut lines, mut odd) = (0usize, 0usize);
+        while let Some(l) = rx.recv().await {
+            lines += 1;
+            if l.len() != 60 {
+                odd += 1;
+            }
+        }
+        (lines, odd)
+    });
 
     // a noisy mod: about four times the bound, in 1 MiB bursts of numbered lines
     let burst: String = (0..17_000)
@@ -491,6 +506,7 @@ async fn the_output_file_stays_bounded_however_much_the_game_prints() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     let _ = done_tx.send(true);
     reader.await.unwrap();
+    let (lines, odd) = consumer.await.unwrap();
 
     let written: u64 = 34 * 1_037_000;
     assert!(
@@ -501,15 +517,6 @@ async fn the_output_file_stays_bounded_however_much_the_game_prints() {
         biggest <= OUTPUT_LIMIT_BYTES * 3 / 2 + 1_100_000,
         "the file reached {biggest} bytes (bound {OUTPUT_LIMIT_BYTES})"
     );
-    // the output was still delivered while it was being bounded; only a line right at an emptying can be
-    // cut (the few bytes written between the last read and the emptying are dropped)
-    let (mut lines, mut odd) = (0usize, 0usize);
-    while let Ok(l) = rx.try_recv() {
-        lines += 1;
-        if l.len() != 60 {
-            odd += 1;
-        }
-    }
     assert!(lines > 100_000, "most of the output arrived: {lines} lines");
     assert!(
         odd <= 8,
@@ -517,21 +524,93 @@ async fn the_output_file_stays_bounded_however_much_the_game_prints() {
     );
 }
 
-#[test]
-fn lines_are_cut_on_newlines_and_a_partial_line_waits_for_the_rest() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+#[tokio::test]
+async fn lines_are_cut_on_newlines_and_a_partial_line_waits_for_the_rest() {
+    let (tx, mut rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
     let mut pending = b"one\r\ntwo\npart".to_vec();
-    drain_lines(&mut pending, &tx);
+    drain_lines(&mut pending, &tx).await;
     assert_eq!(rx.try_recv().unwrap(), "one");
     assert_eq!(rx.try_recv().unwrap(), "two");
     assert!(rx.try_recv().is_err());
     assert_eq!(pending, b"part");
     pending.extend_from_slice(b"ial\n");
-    drain_lines(&mut pending, &tx);
+    drain_lines(&mut pending, &tx).await;
     assert_eq!(rx.try_recv().unwrap(), "partial");
     // a runaway line without a newline is cut instead of growing without bound
     let mut huge = vec![b'x'; MAX_PENDING_BYTES + 1];
-    drain_lines(&mut huge, &tx);
+    drain_lines(&mut huge, &tx).await;
     assert_eq!(rx.try_recv().unwrap().len(), MAX_PENDING_BYTES + 1);
     assert!(huge.is_empty());
+}
+
+#[tokio::test]
+async fn rapid_restarts_within_the_same_second_write_distinct_pid_stamped_logs() {
+    let e = env();
+    let c1 = child("echo first session & exit /b 0");
+    let pid1 = c1.id().unwrap();
+    let out1 = supervise(c1, watch(&e, &[], None), || {}).await;
+
+    let c2 = child("echo second session & exit /b 0");
+    let pid2 = c2.id().unwrap();
+    let out2 = supervise(c2, watch(&e, &[], None), || {}).await;
+
+    let p1 = out1.log_path.unwrap();
+    let p2 = out2.log_path.unwrap();
+    assert_eq!(
+        p1.file_name().unwrap().to_str().unwrap(),
+        format!("{}-{pid1}.log", clock())
+    );
+    assert_eq!(
+        p2.file_name().unwrap().to_str().unwrap(),
+        format!("{}-{pid2}.log", clock())
+    );
+    assert_ne!(p1, p2);
+    assert!(fs::read_to_string(&p1).unwrap().contains("first session"));
+    assert!(fs::read_to_string(&p2).unwrap().contains("second session"));
+}
+
+#[test]
+fn sweep_output_preserves_live_game_output_while_emptying_stale_files() {
+    use std::io::Write;
+    let e = env();
+    let dead_id = InstanceStore::new(&e.root)
+        .create(NewInstance::vanilla("Dead", "1.21.4").unwrap(), 2)
+        .unwrap()
+        .id;
+    let (mut live_out, live_path) = open_output(&e.root, &e.id).unwrap();
+    let (mut dead_out, dead_path) = open_output(&e.root, &dead_id).unwrap();
+    live_out.write_all(b"still playing\n").unwrap();
+    dead_out.write_all(b"already exited\n").unwrap();
+
+    let mut proc = std::process::Command::new("cmd")
+        .args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = crate::profiles::now_unix();
+    let _tracker = PlaytimeStore::new(&e.root)
+        .begin_session(&e.id, proc.id(), started, Instant::now())
+        .unwrap();
+
+    sweep_output(&e.root);
+    assert_eq!(
+        fs::read(&live_path).unwrap(),
+        b"still playing\n",
+        "live game's .out must not be truncated by sweep_output"
+    );
+    assert_eq!(
+        fs::metadata(&dead_path).unwrap().len(),
+        0,
+        "dead game's .out is emptied"
+    );
+
+    let _ = proc.wait().unwrap();
+    sweep_output(&e.root);
+    assert_eq!(
+        fs::metadata(&live_path).unwrap().len(),
+        0,
+        "once the process exits, sweep_output empties its .out too"
+    );
 }

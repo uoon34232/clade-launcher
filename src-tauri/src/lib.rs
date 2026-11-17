@@ -22,6 +22,7 @@ pub mod ms_auth;
 pub mod natives;
 pub mod net;
 pub mod playtime;
+#[allow(clippy::needless_lifetimes, clippy::needless_return)]
 pub mod portable;
 pub mod prepare;
 pub mod prepare_cmd;
@@ -90,9 +91,35 @@ pub fn run() {
     });
     startup::preview_requested(root.path());
 
-    // Before any WebView exists: choose the bundled runtime if present.
+    // Before any WebView exists: choose the bundled runtime if present (unless on a UNC share).
     let webview_source = webview::select_runtime(&root);
 
+    root.ensure_data_dir().unwrap_or_else(|e| {
+        let id = match e {
+            portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
+            _ => StartupMessage::StartupFailed,
+        };
+        startup::fail(id, Some(root.path()), Some(&e.to_string()))
+    });
+    // Only one Clade may use the folder. Acquire the lock before touching shared layout files. If
+    // another Clade on this PC owns this folder (possibly with its window hidden while a game
+    // runs), wake that one and quietly stop; otherwise the folder is in use elsewhere.
+    let lock = match RootLock::acquire(&root) {
+        Ok(l) => l,
+        Err(portable::root::RootError::AlreadyRunning)
+            if startup::wake_running_instance(root.path()) =>
+        {
+            std::process::exit(0)
+        }
+        Err(e) => {
+            let id = match e {
+                portable::root::RootError::AlreadyRunning => StartupMessage::FolderInUse,
+                portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
+                _ => StartupMessage::StartupFailed,
+            };
+            startup::fail(id, Some(root.path()), Some(&e.to_string()))
+        }
+    };
     root.ensure_layout().unwrap_or_else(|e| {
         let id = match e {
             portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
@@ -100,25 +127,25 @@ pub fn run() {
         };
         startup::fail(id, Some(root.path()), Some(&e.to_string()))
     });
-    // Only one Clade may use the folder. If it is Clade on this PC (possibly with its window hidden
-    // because it was closed during a game), bring that one back and quietly stop; otherwise the
-    // folder is in use elsewhere and that is reported.
-    let lock = match RootLock::acquire(&root) {
-        Ok(l) => l,
-        Err(portable::root::RootError::AlreadyRunning)
-            if startup::wake_running_instance("Clade Launcher") =>
-        {
-            std::process::exit(0)
-        }
-        Err(e) => {
-            let id = match e {
-                portable::root::RootError::AlreadyRunning => StartupMessage::FolderInUse,
-                _ => StartupMessage::StartupFailed,
-            };
-            startup::fail(id, Some(root.path()), Some(&e.to_string()))
-        }
-    };
     startup::init_logging(&root);
+
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .clamp(2, 4);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(8)
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            startup::fail(
+                StartupMessage::StartupFailed,
+                Some(root.path()),
+                Some(&e.to_string()),
+            )
+        });
+    tauri::async_runtime::set(rt.handle().clone());
 
     let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
         .unwrap_or_else(|e| {
@@ -165,14 +192,14 @@ pub fn run() {
 
     // Networking lives in Rust only. Two clients: one for Mojang and the global allow-list, one
     // restricted to the loaders' own hosts. A failure to build one only disables discovery.
-    let profiles_state = profiles::ProfilesState {
-        root: root.clone(),
-        global: net::HttpFetcher::new(download_policy::DownloadPolicy::new(
+    let profiles_state = profiles::ProfilesState::new(
+        root.clone(),
+        net::HttpFetcher::new(download_policy::DownloadPolicy::new(
             download_policy::DEFAULT_ALLOWED_HOSTS,
         ))
         .map_err(|e| e.to_string()),
-        loaders: net::HttpFetcher::new(loaders::official_policy()).map_err(|e| e.to_string()),
-    };
+        net::HttpFetcher::new(loaders::official_policy()).map_err(|e| e.to_string()),
+    );
     let accounts_state = accounts_api::AccountsState::new(root.accounts_file()).with_skins(
         skin::SkinCache::new(root.cache_dir().join("skins")),
         net::HttpFetcher::new(download_policy::DownloadPolicy::new(
@@ -214,47 +241,50 @@ pub fn run() {
     };
 
     let root_for_errors = state.root.path().to_path_buf();
+    let wake_root = root_for_errors.clone();
     let result = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Starting Clade again brings it back (also when its window was closed while a game ran).
-            if let Some(w) = app.get_webview_window("main") {
-                app.state::<launch_cmd::LaunchState>()
-                    .set_exit_when_idle(false);
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }))
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // Closing the window while Minecraft runs must not end the game or lose its playtime:
             // hide the window and keep Clade alive (no tray, no service) until the game exits.
             // A window that is on screen again (someone started Clade once more) is not "closed".
-            if let tauri::WindowEvent::Focused(true) = event {
+            tauri::WindowEvent::Focused(true) => {
                 window
                     .app_handle()
                     .state::<launch_cmd::LaunchState>()
                     .set_exit_when_idle(false);
-                // The Windows transparency or High Contrast preference may have changed meanwhile.
-                glass::refresh(window.app_handle());
+                webview::resume_window(window.app_handle());
+                glass::resume(window.app_handle());
+            }
+            tauri::WindowEvent::Focused(false) => {
+                if window
+                    .app_handle()
+                    .state::<launch_cmd::LaunchState>()
+                    .has_live_game()
+                    && window.is_visible().unwrap_or(false)
+                {
+                    webview::throttle_unfocused_window(window.app_handle());
+                }
             }
             // Clade is a windowed launcher: if the window ever ends up maximized or fullscreen
-            // (a shortcut, a snap gesture), put it back to a normal window.
-            if let tauri::WindowEvent::Resized(_) = event {
-                if window.is_fullscreen().unwrap_or(false) {
-                    let _ = window.set_fullscreen(false);
-                }
-                if window.is_maximized().unwrap_or(false) {
-                    let _ = window.unmaximize();
-                }
+            // (a shortcut, a snap gesture), put it back to a normal window without querying on
+            // minimized (0x0) or small sizes.
+            tauri::WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                keep_windowed(window, size.width, size.height);
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 let launch = window.app_handle().state::<launch_cmd::LaunchState>();
-                if launch.has_live_game() {
+                if launch.close_requested() {
                     api.prevent_close();
-                    launch.set_exit_when_idle(true);
                     let _ = window.hide();
+                    glass::suspend(window.app_handle());
+                    webview::suspend_hidden_window(window.app_handle());
+                } else {
+                    prepare_cmd::cancel_prepare(
+                        window.app_handle().state::<prepare_cmd::PrepareState>(),
+                    );
                 }
             }
+            _ => {}
         })
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -312,44 +342,93 @@ pub fn run() {
             // The window is created here, not from tauri.conf.json, because only the builder
             // accepts an absolute WebView2 profile directory (the config option is always
             // resolved under %LOCALAPPDATA%).
-            let cfg = app
+            let placement = active_monitor(app.handle()).map(|m| {
+                let wa = m.work_area();
+                let scale = m.scale_factor();
+                window_fit::fit(window_fit::WorkArea {
+                    x: wa.position.x,
+                    y: wa.position.y,
+                    width: wa.size.width,
+                    height: wa.size.height,
+                    scale,
+                })
+            });
+            let mut cfg = app
                 .config()
                 .app
                 .windows
                 .first()
                 .cloned()
                 .ok_or("tauri.conf.json defines no window")?;
+            if placement.is_some() {
+                cfg.center = false;
+            }
             let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
                 .maximizable(false)
                 .fullscreen(false);
-            // Size and place the window inside the usable area (taskbar excluded) of the monitor
-            // in use; the compact default stays whenever it fits.
-            if let Some(m) = active_monitor(app.handle()) {
-                let wa = m.work_area();
-                let scale = m.scale_factor();
-                let p = window_fit::fit(window_fit::WorkArea {
-                    x: wa.position.x,
-                    y: wa.position.y,
-                    width: wa.size.width,
-                    height: wa.size.height,
-                    scale,
-                });
+            if let Some(p) = placement {
                 builder = builder
                     .inner_size(p.width, p.height)
-                    .min_inner_size(p.min_width, p.min_height)
-                    .position(p.x / scale, p.y / scale);
+                    .min_inner_size(p.min_width, p.min_height);
             }
-            builder.build()?;
+            let window = builder.build()?;
+            if let Some(p) = placement {
+                let _ = window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(p.x as i32, p.y as i32),
+                ));
+            }
+
+            let app_handle = app.handle().clone();
+            startup::spawn_wake_listener(&wake_root, move || {
+                app_handle
+                    .state::<launch_cmd::LaunchState>()
+                    .set_exit_when_idle(false);
+                webview::resume_window(&app_handle);
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+                glass::resume(&app_handle);
+            });
+
+            launch_cmd::reattach_live_sessions(app.handle());
             // Cosmetic only: a failure here is logged and Clade simply stays opaque.
-            glass::refresh(app.handle());
             glass::watch_system_preference(app.handle().clone());
+            glass::refresh(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!());
     if let Err(e) = result {
         tracing::error!(error = %e, "the application failed to run");
         startup::fail(StartupMessage::WindowFailed, Some(&root_for_errors), None);
+    }
+}
+
+fn keep_windowed(window: &tauri::Window, width: u32, height: u32) {
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            // SAFETY: `hwnd` is the live window handle owned by Tauri; `IsZoomed` is a lightweight
+            // read-only check on the window style bits.
+            if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd.0.cast()) } != 0
+            {
+                let _ = window.unmaximize();
+            }
+        }
+        if width >= 800 && height >= 500 && window.is_fullscreen().unwrap_or(false) {
+            let _ = window.set_fullscreen(false);
+        }
+    }
+    #[cfg(not(windows))]
+    if width >= 800 && height >= 500 {
+        if window.is_fullscreen().unwrap_or(false) {
+            let _ = window.set_fullscreen(false);
+        }
+        if window.is_maximized().unwrap_or(false) {
+            let _ = window.unmaximize();
+        }
     }
 }
 

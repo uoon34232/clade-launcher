@@ -83,11 +83,12 @@ pub struct MinecraftPrefs {
 }
 
 impl MinecraftPrefs {
-    /// A damaged or hand-edited value is repaired to a safe one; it never stops the launcher.
-    pub fn sanitize(&mut self, total_mb: Option<u64>) {
+    /// A damaged or hand-edited value is repaired to a safe portable range (`1024..=32_768` MiB
+    /// in 256 MiB steps) without consulting the current machine's RAM, so moving a portable folder
+    /// onto a weaker PC never overwrites its saved setting (launch-time clamping caps it per PC).
+    pub fn sanitize(&mut self) {
         if let Some(mb) = self.memory_mb {
-            let (min, max) = crate::system::memory_limits_mb(total_mb);
-            self.memory_mb = Some(mb.clamp(min, max) / 256 * 256);
+            self.memory_mb = Some(mb.clamp(1024, 32_768) / 256 * 256);
         }
     }
 }
@@ -105,7 +106,7 @@ pub struct BehaviorPrefs {
 impl Default for BehaviorPrefs {
     fn default() -> Self {
         Self {
-            on_launch: "keep_open".to_owned(),
+            on_launch: "hide".to_owned(),
             on_exit: "show".to_owned(),
         }
     }
@@ -385,9 +386,10 @@ impl LauncherSettings {
     }
 
     fn sanitized(mut self) -> Self {
+        self.max_concurrent_downloads = self.max_concurrent_downloads.clamp(1, 16);
         self.ui.sanitize();
         self.behavior.sanitize();
-        self.minecraft.sanitize(crate::system::total_memory_mb());
+        self.minecraft.sanitize();
         self
     }
 
@@ -724,7 +726,7 @@ mod tests {
             "an old folder shows the introduction once"
         );
         assert_eq!(s.minecraft, MinecraftPrefs { memory_mb: None });
-        assert_eq!(s.behavior.on_launch, "keep_open");
+        assert_eq!(s.behavior.on_launch, "hide");
         assert_eq!(s.behavior.on_exit, "show");
         // what was there is untouched
         assert!(!s.ui.sound.enabled && s.ui.language.as_deref() == Some("ru"));
@@ -804,14 +806,41 @@ mod tests {
         let mut m = MinecraftPrefs {
             memory_mb: Some(900_000),
         };
-        m.sanitize(Some(16_384));
-        assert_eq!(m.memory_mb, Some(12_288));
+        m.sanitize();
+        assert_eq!(m.memory_mb, Some(32_768));
         let mut m = MinecraftPrefs { memory_mb: Some(5) };
-        m.sanitize(Some(16_384));
+        m.sanitize();
         assert_eq!(m.memory_mb, Some(1024));
         let mut m = MinecraftPrefs::default();
-        m.sanitize(Some(16_384));
+        m.sanitize();
         assert_eq!(m.memory_mb, None, "automatic stays automatic");
+    }
+
+    #[test]
+    fn portable_memory_survives_across_machines_and_download_concurrency_is_clamped() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+
+        for preserved in [8192u32, 16_384u32] {
+            fs::write(
+                &p,
+                format!(
+                    r#"{{"layout_version":1,"max_concurrent_downloads":0,"minecraft":{{"memory_mb":{preserved}}}}}"#
+                ),
+            )
+            .unwrap();
+            let loaded = LauncherSettings::load_or_default(&p).unwrap();
+            assert_eq!(loaded.minecraft.memory_mb, Some(preserved));
+            assert_eq!(loaded.max_concurrent_downloads, 1);
+            loaded.save(&p).unwrap();
+            let round = LauncherSettings::load_or_default(&p).unwrap();
+            assert_eq!(round.minecraft.memory_mb, Some(preserved));
+            assert_eq!(round.max_concurrent_downloads, 1);
+        }
+
+        fs::write(&p, r#"{"layout_version":1,"max_concurrent_downloads":100}"#).unwrap();
+        let clamped_high = LauncherSettings::load_or_default(&p).unwrap();
+        assert_eq!(clamped_high.max_concurrent_downloads, 16);
     }
 
     #[test]
@@ -845,7 +874,7 @@ mod tests {
         fs::write(&p, r#"{"behavior":{"on_launch":"explode","on_exit":"stay_hidden"},"ui":{"reduced_motion":"maybe"}}"#).unwrap();
         let s = LauncherSettings::load_or_default(&p).unwrap();
         assert_eq!(
-            s.behavior.on_launch, "keep_open",
+            s.behavior.on_launch, "hide",
             "only the bad value is repaired"
         );
         assert_eq!(s.behavior.on_exit, "stay_hidden");
@@ -893,7 +922,7 @@ mod tests {
         s.set_reduced_motion("on");
         s.set_transparency("off");
         s.set_memory(Some(6144), Some(16_384)).unwrap();
-        s.set_behavior(Some("hide"), Some("stay_hidden"));
+        s.set_behavior(Some("keep_open"), Some("stay_hidden"));
         s.complete_onboarding();
         s.set_last_phrase("take-your-time");
         s.last_instance = Some(InstanceId::new("p").unwrap());
@@ -1036,7 +1065,7 @@ mod tests {
                 "onboarding_done": true
             },
             "minecraft": { "memory_mb": 4096 },
-            "behavior": { "on_launch": "hide", "on_exit": "stay_hidden" }
+            "behavior": { "on_launch": "keep_open", "on_exit": "stay_hidden" }
         })
     }
 
@@ -1075,7 +1104,7 @@ mod tests {
         assert_eq!(s.ui.transparency, "off");
         assert!(s.ui.onboarding_done);
         assert_eq!(s.minecraft.memory_mb, Some(4096));
-        assert_eq!(s.behavior.on_launch, "hide");
+        assert_eq!(s.behavior.on_launch, "keep_open");
         assert_eq!(s.behavior.on_exit, "stay_hidden");
     }
 
@@ -1116,7 +1145,7 @@ mod tests {
             assert_eq!(s.minecraft.memory_mb, Some(4096));
         }
         if keep("behavior.on_launch") {
-            assert_eq!(s.behavior.on_launch, "hide");
+            assert_eq!(s.behavior.on_launch, "keep_open");
         }
         if keep("behavior.on_exit") {
             assert_eq!(s.behavior.on_exit, "stay_hidden");
@@ -1167,7 +1196,7 @@ mod tests {
             match name {
                 "ui.reduced_motion" => assert_eq!(s.ui.reduced_motion, "system", "{bad}"),
                 "ui.transparency" => assert_eq!(s.ui.transparency, "system", "{bad}"),
-                "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "keep_open", "{bad}"),
+                "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "hide", "{bad}"),
                 "behavior.on_exit" => assert_eq!(s.behavior.on_exit, "show", "{bad}"),
                 "minecraft.memory_mb" => {
                     let m = s.minecraft.memory_mb;
@@ -1195,7 +1224,7 @@ mod tests {
                 "ui" => {
                     assert_eq!(s.ui, UiPrefs::default());
                     assert_eq!(s.minecraft.memory_mb, Some(4096));
-                    assert_eq!(s.behavior.on_launch, "hide");
+                    assert_eq!(s.behavior.on_launch, "keep_open");
                 }
                 "minecraft" => {
                     assert_eq!(s.minecraft, MinecraftPrefs::default());
@@ -1229,7 +1258,7 @@ mod tests {
         assert_eq!(s.last_instance, None);
         // untouched
         assert_eq!(s.ui.language.as_deref(), Some("ru"));
-        assert_eq!(s.behavior.on_launch, "hide");
+        assert_eq!(s.behavior.on_launch, "keep_open");
         assert!(s.ui.onboarding_done);
         assert!(!s.ui.sound.enabled);
     }

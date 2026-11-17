@@ -32,12 +32,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use crate::loaders::LoaderKind;
 pub use crate::versions::{LoaderVersion, McVersion, VersionId};
 
-use crate::portable::fsutil::{atomic_write, is_link};
+use crate::portable::fsutil::{
+    atomic_write, is_link, move_new_no_replace, read_bounded, reject_links_between,
+    remove_dir_all_with_retry,
+};
 use crate::portable::{PortableRoot, RelPath};
 use crate::versions::InvalidToken;
 
 const SCHEMA: u32 = 2;
 const MANIFEST: &str = "instance.json";
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_JVM_ARGS: usize = 64;
 const MAX_JVM_ARG_LEN: usize = 512;
 
@@ -250,7 +254,7 @@ pub struct NewInstance {
     pub java: JavaChoice,
     #[serde(default)]
     pub memory_mb: Option<u32>,
-    #[serde(default)]
+    #[serde(skip)]
     pub extra_jvm_args: Vec<String>,
 }
 
@@ -317,6 +321,95 @@ fn validate_name(name: &str) -> Result<String, InstanceError> {
     Ok(n.to_owned())
 }
 
+const FORBIDDEN_JVM_PREFIXES: &[&str] = &[
+    "-javaagent",
+    "-agentlib",
+    "-agentpath",
+    "-xrun",
+    "-jar",
+    "-cp",
+    "-classpath",
+    "--class-path",
+    "-p",
+    "--module-path",
+    "--upgrade-module-path",
+    "--patch-module",
+    "-xbootclasspath",
+    "-xx:onerror",
+    "-xx:onoutofmemoryerror",
+    "-xx:errorfile",
+    "-xx:heapdumppath",
+    "-xx:logfile",
+    "-xx:sharedarchivefile",
+    "-xx:archiveclassesatexit",
+    "-duser.home",
+    "-duser.dir",
+    "-djava.io.tmpdir",
+    "-djava.library.path",
+    "-djava.class.path",
+    "-djdk.module.path",
+    "-dlog4j.configurationfile",
+    "-dlog4j2.formatmsgnolookups",
+    "-xmx",
+    "-xms",
+    "-xx:maxram",
+    "-xx:initialram",
+];
+
+const FORBIDDEN_XX_OPTS: &[&str] = &[
+    "onerror",
+    "onoutofmemoryerror",
+    "errorfile",
+    "heapdumppath",
+    "logfile",
+    "sharedarchivefile",
+    "archiveclassesatexit",
+];
+
+fn is_allowed_jvm_arg(a: &str) -> bool {
+    if let Some(rest) = a
+        .strip_prefix("-XX:+")
+        .or_else(|| a.strip_prefix("-XX:-"))
+        .or_else(|| a.strip_prefix("-XX:"))
+    {
+        let (opt, val) = match rest.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (rest, None),
+        };
+        if opt.is_empty()
+            || !opt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || val.is_some_and(str::is_empty)
+        {
+            return false;
+        }
+        let opt_lower = opt.to_ascii_lowercase();
+        return !FORBIDDEN_XX_OPTS.contains(&opt_lower.as_str())
+            && !opt_lower.starts_with("maxram")
+            && !opt_lower.starts_with("initialram");
+    }
+    if let Some(rest) = a.strip_prefix("-Xss").or_else(|| a.strip_prefix("-Xmn")) {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric());
+    }
+    if let Some(rest) = a.strip_prefix("-D") {
+        let key = rest.split_once('=').map_or(rest, |(k, _)| k);
+        return !key.is_empty()
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    }
+    if matches!(a, "-ea" | "-da" | "-esa" | "-dsa") {
+        return true;
+    }
+    if let Some(rest) = a
+        .strip_prefix("--add-opens=")
+        .or_else(|| a.strip_prefix("--add-exports="))
+        .or_else(|| a.strip_prefix("--enable-native-access="))
+    {
+        return !rest.is_empty();
+    }
+    false
+}
+
 fn validate_jvm_args(args: &[String]) -> Result<(), InstanceError> {
     if args.len() > MAX_JVM_ARGS {
         return Err(InstanceError::BadJvmArg("too many arguments"));
@@ -324,14 +417,31 @@ fn validate_jvm_args(args: &[String]) -> Result<(), InstanceError> {
     for a in args {
         if a.is_empty()
             || a.len() > MAX_JVM_ARG_LEN
-            || a.chars().any(|c| c == '\0' || c == '\n' || c == '\r')
+            || a.chars().any(|c| c.is_control() || c.is_whitespace())
         {
             return Err(InstanceError::BadJvmArg(
-                "empty, too long, or contains a line break",
+                "empty, too long, or contains whitespace or control characters",
+            ));
+        }
+        if !a.starts_with('-') {
+            return Err(InstanceError::BadJvmArg("must start with '-'"));
+        }
+        let lower = a.to_ascii_lowercase();
+        if FORBIDDEN_JVM_PREFIXES.iter().any(|p| lower.starts_with(p)) || !is_allowed_jvm_arg(a) {
+            return Err(InstanceError::BadJvmArg(
+                "flag is not in the safe JVM allowlist",
             ));
         }
     }
     Ok(())
+}
+
+fn map_link_err(e: io::Error) -> InstanceError {
+    if e.to_string().contains("link") {
+        InstanceError::Link(e.to_string())
+    } else {
+        InstanceError::Io(e)
+    }
 }
 
 /// A profile and its setup state must agree: Vanilla never has a loader, Modded always does
@@ -434,7 +544,17 @@ impl<'a> InstanceStore<'a> {
             let dirs = self.dirs(&candidate);
             match fs::create_dir(dirs.root()) {
                 Ok(()) => break (candidate, dirs),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if self.get(&candidate).is_err() {
+                        return Err(InstanceError::Io(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "profile folder '{candidate}' already exists and could not be read"
+                            ),
+                        )));
+                    }
+                    n += 1;
+                }
                 Err(e) => return Err(e.into()),
             }
         };
@@ -477,7 +597,7 @@ impl<'a> InstanceStore<'a> {
             Ok::<_, InstanceError>(instance)
         })();
         if result.is_err() {
-            let _ = fs::remove_dir_all(dirs.root()); // never leave a half-made instance behind
+            let _ = remove_dir_all_with_retry(dirs.root()); // never leave a half-made instance behind
         }
         result
     }
@@ -505,7 +625,8 @@ impl<'a> InstanceStore<'a> {
 
     pub fn get(&self, id: &InstanceId) -> Result<Instance, InstanceError> {
         let dirs = self.dirs(id);
-        let bytes = match fs::read(dirs.manifest_file()) {
+        reject_links_between(self.root.path(), &dirs.manifest_file()).map_err(map_link_err)?;
+        let bytes = match read_bounded(&dirs.manifest_file(), MAX_MANIFEST_BYTES) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(InstanceError::NotFound(id.to_string()))
@@ -568,23 +689,27 @@ impl<'a> InstanceStore<'a> {
         Ok(inst)
     }
 
-    /// Takes one profile out of Clade without deleting anything: its whole folder is renamed
-    /// (moved, atomically, on the same volume) to `instances/.removed/<id>-<time>-<random>/`, where
-    /// nothing lists or launches it and every file stays as it was (worlds, mods, config,
-    /// screenshots, logs, `home/`, `playtime.json`, unknown files). Returns the new location.
+    /// Takes one profile out of Clade without deleting any user content: its whole folder is
+    /// moved atomically on the same volume to `instances/.removed/<id>-<time>-<random>/`, where
+    /// nothing lists or launches it and every user file stays as it was (worlds, mods, config,
+    /// screenshots, logs, `home/`, `playtime.json`, `instance.json`, unknown files); only
+    /// disposable launcher-extracted `natives/` DLLs are cleaned up afterwards. Returns the new
+    /// location.
     ///
-    /// Nothing is read, copied or deleted inside the profile. If the folder is not a real, readable
-    /// Clade instance, is a link, or cannot be renamed (for example a file inside is open), the
-    /// profile stays exactly where it was and an error is returned; there is deliberately no
-    /// copy-and-delete fallback. Callers must ensure the profile is not running or being prepared.
+    /// If the folder is not a real, readable Clade instance, is a link, or cannot be renamed (for
+    /// example a file inside is open), the profile stays exactly where it was and an error is
+    /// returned; there is deliberately no copy-and-delete fallback. Callers must ensure the profile
+    /// is not running or being prepared.
     pub fn retire(&self, id: &InstanceId) -> Result<PathBuf, InstanceError> {
-        self.get(id)?; // proves it is a real instance of ours, not an arbitrary folder
         let dirs = self.dirs(id);
+        reject_links_between(self.root.path(), dirs.root()).map_err(map_link_err)?;
+        self.get(id)?; // proves it is a real instance of ours, not an arbitrary folder
         if is_link(dirs.root())? {
             return Err(InstanceError::Link(dirs.root().display().to_string()));
         }
         let retained = self.root.instances_dir().join(RETAINED_DIR);
         fs::create_dir_all(&retained)?;
+        reject_links_between(self.root.path(), &retained).map_err(map_link_err)?;
         if is_link(&retained)? || !retained.is_dir() {
             return Err(InstanceError::Link(retained.display().to_string()));
         }
@@ -595,11 +720,14 @@ impl<'a> InstanceStore<'a> {
             let mut nonce = [0u8; 4];
             getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
             let dest = retained.join(format!("{}-{stamp}-{}", id.as_str(), hex::encode(nonce)));
-            if dest.exists() {
-                continue; // a name collision: try another suffix, never overwrite
+            match move_new_no_replace(dirs.root(), &dest) {
+                Ok(()) => {
+                    let _ = remove_dir_all_with_retry(&dest.join("natives"));
+                    return Ok(dest);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
             }
-            fs::rename(dirs.root(), &dest)?;
-            return Ok(dest);
         }
         Err(io::Error::other("no free name in the retained folder").into())
     }
@@ -1043,6 +1171,169 @@ mod tests {
         assert!(LoaderVersion::new("../x").is_err());
         assert_eq!(store.list().unwrap().instances.len(), 0);
         assert_eq!(fs::read_dir(root.instances_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn new_instance_deserialization_skips_extra_jvm_args() {
+        let parsed: NewInstance = serde_json::from_str(
+            r#"{
+                "name": "Clean",
+                "minecraft": "1.21.4",
+                "profile": { "type": "vanilla" },
+                "extra_jvm_args": ["-javaagent:evil.jar", "-Xmx99G", "-Dmy.flag=1"]
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            parsed.extra_jvm_args.is_empty(),
+            "frontend IPC JSON must never inject extra_jvm_args"
+        );
+    }
+
+    #[test]
+    fn jvm_arg_allowlist_accepts_safe_flags_and_rejects_every_dangerous_flag() {
+        let allowed = vec![
+            "-XX:+UseG1GC".to_owned(),
+            "-XX:-DisableExplicitGC".to_owned(),
+            "-XX:MaxGCPauseMillis=50".to_owned(),
+            "-XX:G1NewSizePercent=20".to_owned(),
+            "-Xss1M".to_owned(),
+            "-Xmn512M".to_owned(),
+            "-Dfml.readTimeout=90".to_owned(),
+            "-Dmy_prop-1.ok=true".to_owned(),
+            "-ea".to_owned(),
+            "-da".to_owned(),
+            "-esa".to_owned(),
+            "-dsa".to_owned(),
+            "--add-opens=java.base/java.lang=ALL-UNNAMED".to_owned(),
+            "--add-exports=java.base/sun.security.util=ALL-UNNAMED".to_owned(),
+            "--enable-native-access=ALL-UNNAMED".to_owned(),
+        ];
+        assert!(validate_jvm_args(&allowed).is_ok());
+
+        for forbidden in [
+            "",
+            "MainClass",
+            "@argfile.txt",
+            "-Dfoo=bar baz",
+            "-Dfoo=1\t2",
+            "-Dfoo=1\0",
+            "-Dfoo=1\n-Dbar=2",
+            "-JavaAgent:agent.jar",
+            "-agentlib:jdwp=transport=dt_socket",
+            "-agentpath:evil.dll",
+            "-Xrunjdwp:transport=dt_socket",
+            "-jar",
+            "-cp",
+            "-classpath",
+            "--class-path=evil.jar",
+            "-p",
+            "--module-path=mods",
+            "--upgrade-module-path=mods",
+            "--patch-module=java.base=evil.jar",
+            "-Xbootclasspath/a:evil.jar",
+            "-XX:OnError=calc",
+            "-XX:+OnError",
+            "-XX:OnOutOfMemoryError=calc",
+            "-XX:ErrorFile=hs_err.log",
+            "-XX:HeapDumpPath=dump.hprof",
+            "-XX:LogFile=jvm.log",
+            "-XX:SharedArchiveFile=app.jsa",
+            "-XX:ArchiveClassesAtExit=app.jsa",
+            "-Duser.home=elsewhere",
+            "-DUSER.DIR=elsewhere",
+            "-Djava.io.tmpdir=elsewhere",
+            "-Djava.library.path=elsewhere",
+            "-Djava.class.path=elsewhere",
+            "-Djdk.module.path=elsewhere",
+            "-Dlog4j.configurationFile=http://evil/x.xml",
+            "-Dlog4j2.formatMsgNoLookups=false",
+            "-Xmx8G",
+            "-Xms2G",
+            "-XX:MaxRAM=16G",
+            "-XX:MaxRAMPercentage=90",
+            "-XX:InitialRAMPercentage=50",
+            "-XX:Bad-Flag=1",
+            "-XX:EmptyVal=",
+            "-Xss",
+            "-D=1",
+            "-Dbad/key=1",
+            "--add-opens=",
+            "--unknown-flag=1",
+        ] {
+            assert!(
+                matches!(
+                    validate_jvm_args(&[forbidden.to_owned()]),
+                    Err(InstanceError::BadJvmArg(_))
+                ),
+                "{forbidden:?} should be rejected"
+            );
+        }
+
+        let too_long = format!("-Dlong={}", "a".repeat(MAX_JVM_ARG_LEN));
+        assert!(matches!(
+            validate_jvm_args(&[too_long]),
+            Err(InstanceError::BadJvmArg(_))
+        ));
+        let too_many: Vec<String> = (0..=MAX_JVM_ARGS).map(|i| format!("-Darg{i}=1")).collect();
+        assert!(matches!(
+            validate_jvm_args(&too_many),
+            Err(InstanceError::BadJvmArg(_))
+        ));
+    }
+
+    #[test]
+    fn get_rejects_oversized_manifests_and_links() {
+        let (d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let inst = store
+            .create(NewInstance::vanilla("Big", "1.21.4").unwrap(), 1)
+            .unwrap();
+        let manifest = store.dirs(&inst.id).manifest_file();
+        fs::write(&manifest, vec![b' '; (MAX_MANIFEST_BYTES + 1) as usize]).unwrap();
+        assert!(matches!(store.get(&inst.id), Err(InstanceError::Io(_))));
+        assert_eq!(store.list().unwrap().problems.len(), 1);
+
+        #[cfg(windows)]
+        {
+            let target = d.path().join("outside-target");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("instance.json"), b"{}").unwrap();
+            let linked = root.instances_dir().join("linked");
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&linked)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "mklink /J failed: {out:?}");
+            let linked_id = InstanceId::new("linked").unwrap();
+            assert!(matches!(store.get(&linked_id), Err(InstanceError::Link(_))));
+            fs::remove_dir(&linked).unwrap();
+        }
+        let _ = &d;
+    }
+
+    #[test]
+    fn create_refuses_to_allocate_dash_2_when_slug_collides_with_damaged_folder() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let damaged = root.instances_dir().join("survival");
+        fs::create_dir_all(damaged.join("game/saves/World")).unwrap();
+        fs::write(damaged.join("game/saves/World/level.dat"), b"precious").unwrap();
+        fs::write(damaged.join("instance.json"), b"{corrupt json").unwrap();
+
+        let err = store
+            .create(NewInstance::vanilla("Survival", "1.21.4").unwrap(), 1)
+            .unwrap_err();
+        assert!(
+            matches!(err, InstanceError::Io(ref e) if e.kind() == io::ErrorKind::AlreadyExists)
+        );
+        assert!(!root.instances_dir().join("survival-2").exists());
+        assert_eq!(
+            fs::read(damaged.join("game/saves/World/level.dat")).unwrap(),
+            b"precious"
+        );
     }
 
     #[test]

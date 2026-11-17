@@ -49,6 +49,7 @@ fn the_capability_denies_maximize_and_fullscreen_commands() {
 #[test]
 fn the_webview_has_a_strict_content_security_policy() {
     let conf = read("tauri.conf.json");
+    assert_eq!(conf["app"]["security"]["freezePrototype"], true);
     let csp = conf["app"]["security"]["csp"]
         .as_str()
         .expect("a CSP string is configured");
@@ -65,6 +66,10 @@ fn the_webview_has_a_strict_content_security_policy() {
     assert_eq!(directive("img-src"), ["'self'", "data:"]);
     assert_eq!(directive("font-src"), ["'self'"]);
     assert_eq!(directive("connect-src"), ["ipc:", "http://ipc.localhost"]);
+    assert_eq!(directive("object-src"), ["'none'"]);
+    assert_eq!(directive("base-uri"), ["'none'"]);
+    assert_eq!(directive("form-action"), ["'none'"]);
+    assert_eq!(directive("frame-ancestors"), ["'none'"]);
     // inline styles are needed by the interface; inline or eval-ed *scripts* never are
     assert!(directive("style-src").contains(&"'unsafe-inline'"));
     for forbidden in [
@@ -83,6 +88,40 @@ fn the_webview_has_a_strict_content_security_policy() {
         );
     }
     assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+}
+
+#[test]
+fn the_webview_caps_caches_and_v8_heap_while_retaining_wry_default_disabled_features() {
+    let conf = read("tauri.conf.json");
+    let window = &conf["app"]["windows"][0];
+    let args = window["additionalBrowserArgs"]
+        .as_str()
+        .expect("additionalBrowserArgs is configured");
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+
+    let disabled = tokens
+        .iter()
+        .find_map(|t| t.strip_prefix("--disable-features="))
+        .expect("retains --disable-features");
+    let features: Vec<&str> = disabled.split(',').collect();
+    for required in ["msWebOOUI", "msPdfOOUI", "msSmartScreenProtection"] {
+        assert!(
+            features.contains(&required),
+            "missing wry default disabled feature {required} in {args}"
+        );
+    }
+
+    for flag in [
+        "--disk-cache-size=16777216",
+        "--media-cache-size=4194304",
+        "--js-flags=--max-old-space-size=128",
+        "--disable-background-networking",
+    ] {
+        assert!(
+            tokens.contains(&flag),
+            "missing browser memory/background cap {flag} in {args}"
+        );
+    }
 }
 
 #[test]
