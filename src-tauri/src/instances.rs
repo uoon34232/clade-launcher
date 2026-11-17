@@ -689,6 +689,22 @@ impl<'a> InstanceStore<'a> {
         Ok(inst)
     }
 
+    /// Sets or clears (`None` = follow global/automatic policy) the profile's own memory override
+    /// in MiB, persisted atomically to `instance.json`.
+    pub fn set_memory(
+        &self,
+        id: &InstanceId,
+        memory_mb: Option<u32>,
+    ) -> Result<Instance, InstanceError> {
+        let mut inst = self.get(id)?;
+        inst.memory_mb = memory_mb;
+        atomic_write(
+            &self.dirs(id).manifest_file(),
+            &serde_json::to_vec_pretty(&inst)?,
+        )?;
+        Ok(inst)
+    }
+
     /// Takes one profile out of Clade without deleting any user content: its whole folder is
     /// moved atomically on the same volume to `instances/.removed/<id>-<time>-<random>/`, where
     /// nothing lists or launches it and every user file stays as it was (worlds, mods, config,
@@ -1353,6 +1369,57 @@ mod tests {
             .join("not-ours")
             .join("precious.txt")
             .exists());
+    }
+
+    #[test]
+    fn set_memory_sets_and_clears_override_atomically() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let created = store.create(fabric("Modded Profile"), 42).unwrap();
+        let initial = store
+            .mark_ready(
+                &created.id,
+                vid("fabric-loader-0.19.5-1.21.4"),
+                Some(lv("0.19.5")),
+            )
+            .unwrap();
+        assert_eq!(initial.memory_mb, None);
+
+        let updated = store.set_memory(&initial.id, Some(4096)).unwrap();
+        assert_eq!(updated.memory_mb, Some(4096));
+
+        let reloaded = store.get(&initial.id).unwrap();
+        assert_eq!(reloaded, updated);
+        assert_eq!(reloaded.memory_mb, Some(4096));
+        assert_eq!(reloaded.name, initial.name);
+        assert_eq!(reloaded.minecraft, initial.minecraft);
+        assert_eq!(reloaded.profile, initial.profile);
+        assert_eq!(reloaded.setup, initial.setup);
+
+        let mut entries: Vec<String> = fs::read_dir(store.dirs(&initial.id).root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert!(!entries.iter().any(|name| name.contains(".tmp")));
+        assert_eq!(entries, ["game", "instance.json"]);
+
+        let cleared = store.set_memory(&initial.id, None).unwrap();
+        assert_eq!(cleared.memory_mb, None);
+        let reloaded_cleared = store.get(&initial.id).unwrap();
+        assert_eq!(reloaded_cleared.memory_mb, None);
+        assert_eq!(reloaded_cleared, initial);
+    }
+
+    #[test]
+    fn set_memory_returns_not_found_for_missing_instance() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let missing = InstanceId::new("missing").unwrap();
+
+        let err = store.set_memory(&missing, Some(4096)).unwrap_err();
+        assert!(matches!(err, InstanceError::NotFound(ref id) if id == "missing"));
+        assert!(!root.instances_dir().join("missing").exists());
     }
 }
 
