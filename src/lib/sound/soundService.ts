@@ -207,6 +207,7 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
   let master: GainNode | null = null;
   let noise: AudioBuffer | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let resumeInFlight = false;
 
   function clearIdleSuspend() {
     if (idleTimer !== null) {
@@ -217,7 +218,7 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
 
   function suspendContext() {
     clearIdleSuspend();
-    if (ctx && ctx.state !== "closed" && typeof ctx.suspend === "function") {
+    if (ctx && ctx.state === "running" && typeof ctx.suspend === "function") {
       void ctx.suspend().catch(() => undefined);
     }
   }
@@ -227,7 +228,7 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
     idleTimer = setTimeout(
       () => {
         idleTimer = null;
-        if (ctx && ctx.state !== "closed" && typeof ctx.suspend === "function") {
+        if (ctx && ctx.state === "running" && typeof ctx.suspend === "function") {
           void ctx.suspend().catch(() => undefined);
         }
       },
@@ -285,14 +286,26 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
       try {
         if (ctx.state === "suspended") {
           clearIdleSuspend();
-          const resuming = ctx.resume();
-          if ((ctx.state as AudioContextState) === "running") {
-            void Promise.resolve(resuming).catch(() => undefined);
-            applyVolume();
-            VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
-            scheduleIdleSuspend(DURATION[kind]);
-          } else {
-            void Promise.resolve(resuming).then(scheduleVoice, () => undefined);
+          if (!resumeInFlight) {
+            resumeInFlight = true;
+            const resuming = ctx.resume();
+            if ((ctx.state as AudioContextState) === "running") {
+              resumeInFlight = false;
+              void Promise.resolve(resuming).catch(() => undefined);
+              applyVolume();
+              VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+              scheduleIdleSuspend(DURATION[kind]);
+            } else {
+              void Promise.resolve(resuming).then(
+                () => {
+                  resumeInFlight = false;
+                  scheduleVoice();
+                },
+                () => {
+                  resumeInFlight = false;
+                },
+              );
+            }
           }
         } else {
           applyVolume();

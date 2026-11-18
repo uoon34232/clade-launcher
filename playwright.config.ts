@@ -20,7 +20,17 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:1420",
     viewport: { width: 1280, height: 720 },
     screenshot: "only-on-failure",
-    trace: "retain-on-failure",
+    trace: CI ? "on-first-retry" : "retain-on-failure",
+    launchOptions: CI
+      ? {
+          args: [
+            "--mute-audio",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-background-timer-throttling",
+          ],
+        }
+      : undefined,
     // Deterministic rendering: no OS-level motion preference leaks into a run.
     reducedMotion: "no-preference",
     locale: "en-US",
@@ -28,9 +38,11 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { browserName: "chromium" } }],
   webServer: {
-    command: "pnpm dev",
+    command: CI
+      ? "pnpm build && pnpm preview --host 127.0.0.1 --port 1420 --strictPort"
+      : "pnpm dev",
     url: "http://127.0.0.1:1420",
     reuseExistingServer: !CI,
-    timeout: 60_000,
+    timeout: 120_000,
   },
 });

@@ -38,12 +38,15 @@ jobs:
       # tagged commit is not part of main.
       - name: Tag, versions and changelog agree
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/release/check-versions.mjs --tag "$env:GITHUB_REF_NAME"
           if ($LASTEXITCODE) { exit 1 }
-          git fetch --no-tags origin main
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_TOKEN"))
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if ($LASTEXITCODE) { exit 1 }
-          git merge-base --is-ancestor HEAD origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
           if ($LASTEXITCODE) { throw "The tagged commit is not on main; a release is only built from main." }
 
       - name: The pinned WebView2 runtime is configured

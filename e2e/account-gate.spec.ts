@@ -15,15 +15,18 @@ test.describe("without an account", () => {
     await expect(playButton(page)).toHaveText(text("play.signIn"));
     await profileTrigger(page).click();
     await page.getByRole("menuitemradio", { name: /^Fresh/ }).click();
+    await expect(page.getByRole("menu")).toHaveCount(0);
     await expect(playButton(page)).toHaveText(text("play.signIn"));
 
     // Verify files is unavailable too.
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(page.getByRole("menuitem", { name: text("profile.verify") })).toHaveAttribute(
       "data-disabled",
       /.*/,
     );
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     // The primary action starts the normal sign-in (it asks for the passphrase first).
     await playButton(page).click();
@@ -80,12 +83,14 @@ test.describe("an account that must sign in again", () => {
       text("profile.trigger", { label: SURVIVAL.name }),
     );
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(page.getByRole("menuitemradio")).toHaveCount(3); // nothing was removed
     await expect(page.getByRole("menuitem", { name: text("profile.verify") })).toHaveAttribute(
       "data-disabled",
       /.*/,
     );
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     await playButton(page).click();
     // The normal sign-in opens (the vault is created or unlocked first); nothing is downloaded.

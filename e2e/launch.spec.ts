@@ -196,22 +196,29 @@ test.describe("a profile's files and its game exclude each other", () => {
     const verify = () => page.getByRole("menuitem", { name: text("profile.verify") });
     await openApp();
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(verify()).toBeEnabled();
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     await playButton(page).click();
     await expect(playButton(page)).toHaveText(text("play.launching"));
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(verify()).toBeDisabled();
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     await backend.playing("survival");
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(verify()).toBeDisabled();
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     await backend.stopped("survival", { kind: "normal", reason: "normal", code: 0 });
     await profileTrigger(page).click();
+    await expect(page.getByRole("menu")).toBeVisible();
     await expect(verify()).toBeEnabled();
     expect(await backend.calls("prepare_profile")).toHaveLength(0);
   });
