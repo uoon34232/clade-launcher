@@ -17,6 +17,7 @@ interface Props<T extends string> {
   variant?: "track" | "plain";
   /** Slightly smaller segments, for dense groups such as Settings. */
   compact?: boolean;
+  disabled?: boolean;
   className?: string;
 }
 
@@ -31,10 +32,11 @@ export function Segmented<T extends string>({
   label,
   variant = "track",
   compact = false,
+  disabled = false,
   className,
 }: Props<T>) {
   const refs = useRef(new Map<T, HTMLButtonElement>());
-  const enabled = options.filter((o) => !o.disabled);
+  const enabled = disabled ? [] : options.filter((o) => !o.disabled);
   // The single tab stop: the selected option, or the first enabled one if nothing is selected.
   const tabStop = enabled.find((o) => o.value === value)?.value ?? enabled[0]?.value;
 
@@ -84,10 +86,14 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={selected}
-            disabled={o.disabled}
+            disabled={Boolean(disabled || o.disabled)}
             tabIndex={o.value === tabStop ? 0 : -1}
-            onClick={() => onChange(o.value)}
-            onKeyDown={(e) => onKeyDown(e, o.value)}
+            onClick={() => {
+              if (!disabled && !o.disabled) onChange(o.value);
+            }}
+            onKeyDown={(e) => {
+              if (!disabled && !o.disabled) onKeyDown(e, o.value);
+            }}
             className={cn(
               "ease-out-soft focus-visible:ring-clay/45 min-w-0 cursor-default transition-[background-color,color,box-shadow,opacity] duration-200 outline-none focus-visible:ring-2 disabled:opacity-40",
               variant === "track"

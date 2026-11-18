@@ -11,6 +11,7 @@ export interface FixtureProfile {
   loaderVersion: string | null;
   ready: boolean;
   playtimeSeconds: number;
+  memoryMb?: number | null;
 }
 
 export interface FixtureAccount {
@@ -70,6 +71,8 @@ export interface FixtureCatalog {
 export interface BackendConfig {
   profiles: FixtureProfile[];
   selected: string | null;
+  /** Folder names in `instances/` that could not be read and were left untouched. */
+  unreadable: string[];
   accounts: FixtureAccount[];
   active: string | null;
   /** The encrypted sign-in store: does the file exist, and is it open this session. */
@@ -112,6 +115,7 @@ export const SURVIVAL: FixtureProfile = {
   loaderVersion: null,
   ready: true,
   playtimeSeconds: 5400,
+  memoryMb: null,
 };
 export const CREATIVE: FixtureProfile = {
   id: "creative",
@@ -122,6 +126,7 @@ export const CREATIVE: FixtureProfile = {
   loaderVersion: "0.16.9",
   ready: true,
   playtimeSeconds: 1200,
+  memoryMb: null,
 };
 /** A profile that is not prepared yet: the dock offers "Set up". */
 export const FRESH: FixtureProfile = {
@@ -133,6 +138,7 @@ export const FRESH: FixtureProfile = {
   loaderVersion: null,
   ready: false,
   playtimeSeconds: 0,
+  memoryMb: null,
 };
 
 const offer = (
@@ -200,6 +206,7 @@ export const LOADERS: Record<string, FixtureLoaderOption[]> = {
 export const DEFAULT_CONFIG: BackendConfig = {
   profiles: [SURVIVAL, CREATIVE, FRESH],
   selected: "survival",
+  unreadable: [],
   accounts: [ALEX, BLAKE],
   active: ALEX.id,
   vault: { exists: false, unlocked: false },

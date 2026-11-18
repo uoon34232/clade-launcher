@@ -39,7 +39,7 @@ function templateParams(domain: ErrorDomain, raw: Record<string, unknown>): Para
     if (typeof raw.requiredBytes === "number") out.required = formatBytes(raw.requiredBytes);
     if (typeof raw.availableBytes === "number") out.available = formatBytes(raw.availableBytes);
   }
-  if (domain === "settings") {
+  if (domain === "settings" || domain === "profile") {
     // memory limits arrive in MiB
     if (typeof raw.min === "number") out.min = formatGigabytes(raw.min);
     if (typeof raw.max === "number") out.max = formatGigabytes(raw.max);

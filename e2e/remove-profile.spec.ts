@@ -13,6 +13,8 @@ test.describe("Remove from Clade", () => {
     // pinned and visually separated, with no buttons on the profile rows
     await expect(page.getByRole("menuitem")).toHaveText([
       text("profile.create"),
+      text("profile.settings"),
+      text("profile.openFolder"),
       text("profile.verify"),
       text("profile.remove"),
     ]);

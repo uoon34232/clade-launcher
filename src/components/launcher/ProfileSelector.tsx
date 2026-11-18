@@ -18,6 +18,8 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onOpenSettings: () => void;
+  onOpenFolder: () => void;
   /** Re-checks every file of the selected profile (a full hash verification) and repairs what differs. */
   onVerify: () => void;
   /** The selected profile's game is starting or running: its files must not be touched now. */
@@ -32,8 +34,8 @@ const TRIGGER =
   "dock-item group flex h-12 min-w-[clamp(11rem,17vw,14.5rem)] max-w-[min(21rem,36vw)] cursor-default items-center justify-between gap-5 rounded-[1.25rem] bg-cream/[0.065] pr-3 pl-4 text-left outline-none hover:bg-cream/[0.11] focus-visible:ring-2 focus-visible:ring-clay-soft data-popup-open:bg-cream/[0.13]";
 
 /**
- * The dock's profile control: shows the selected profile ("Survival · Vanilla 1.21.4"), lists the
- * existing profiles, and ends with "+ Create profile". With no profiles at all it is simply a
+ * The dock's profile control: shows the selected profile ("Survival"), lists the existing profiles,
+ * and keeps profile actions pinned below the scrolling list. With no profiles at all it is simply a
  * button that starts creating the first one.
  */
 export function ProfileSelector({
@@ -41,6 +43,8 @@ export function ProfileSelector({
   selectedId,
   onSelect,
   onCreate,
+  onOpenSettings,
+  onOpenFolder,
   onVerify,
   verifyDisabled = false,
   onRemove,
@@ -91,7 +95,7 @@ export function ProfileSelector({
         sideOffset={14}
         className="glass-menu flex max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
       >
-        {/* Only the list of profiles scrolls; "Create profile" and "Verify files" stay in view below it. */}
+        {/* Only the list of profiles scrolls; profile actions stay in view below it. */}
         <div className="menu-scroll min-h-0 flex-1 overflow-y-auto">
           <DropdownMenuRadioGroup
             value={current.id}
@@ -115,9 +119,9 @@ export function ProfileSelector({
             ))}
           </DropdownMenuRadioGroup>
         </div>
-        <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5 shrink-0" />
+        <DropdownMenuSeparator className="bg-cream/[0.08] my-1 shrink-0" />
         <DropdownMenuItem
-          className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] font-medium transition-colors duration-150"
+          className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] font-medium transition-colors duration-150"
           onClick={() => {
             playSound("click");
             // Let the menu finish closing (and return focus to its trigger) before the dialog takes focus.
@@ -127,8 +131,26 @@ export function ProfileSelector({
           {t("profile.create")}
         </DropdownMenuItem>
         <DropdownMenuItem
+          className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
+          onClick={() => {
+            playSound("click");
+            window.setTimeout(onOpenSettings, 0);
+          }}
+        >
+          {t("profile.settings")}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          onClick={() => {
+            playSound("click");
+            onOpenFolder();
+          }}
+        >
+          {t("profile.openFolder")}
+        </DropdownMenuItem>
+        <DropdownMenuItem
           disabled={verifyDisabled}
-          className="text-cream/55 focus:bg-cream/[0.1] focus:text-cream min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
             window.setTimeout(onVerify, 0);
@@ -136,10 +158,10 @@ export function ProfileSelector({
         >
           {t("profile.verify")}
         </DropdownMenuItem>
-        <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5 shrink-0" />
+        <DropdownMenuSeparator className="bg-cream/[0.08] my-1 shrink-0" />
         <DropdownMenuItem
           disabled={removeDisabled}
-          className="text-clay-soft focus:bg-clay/20 focus:text-clay-soft min-h-11 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          className="text-clay-soft focus:bg-clay/20 focus:text-clay-soft min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
             window.setTimeout(onRemove, 0);

@@ -69,6 +69,16 @@ export const ru: Record<MessageKey, Message> = {
   "profile.createFirst": "Создать профиль",
   "profile.trigger": "Профиль: {label}. Сменить профиль",
   "profile.create": "+ Создать профиль",
+  "profile.settings": "Настройки профиля…",
+  "profile.openFolder": "Открыть папку профиля",
+  "profile.openInstancesFolder": "Открыть папку профилей",
+  "profile.unreadableNotice": {
+    by: "count",
+    one: "Не удалось прочитать {count} папку профиля ({folders}). Файлы не затронуты.",
+    few: "Не удалось прочитать {count} папки профилей ({folders}). Файлы не затронуты.",
+    many: "Не удалось прочитать {count} папок профилей ({folders}). Файлы не затронуты.",
+    other: "Не удалось прочитать {count} папки профилей ({folders}). Файлы не затронуты.",
+  },
   "profile.verify": "Проверить файлы",
   "profile.remove": "Убрать из Clade…",
   "removeProfile.title": "Убрать «{profile}» из Clade?",
@@ -78,6 +88,21 @@ export const ru: Record<MessageKey, Message> = {
   "removeProfile.working": "Убираем…",
   "profile.vanilla": "Ванильный",
   "profile.modded": "С модами",
+
+  // ---- profile settings
+  "profileModal.details": "Профиль",
+  "profileModal.saveName": "Сохранить",
+  "profileModal.saving": "Сохранение…",
+  "profileModal.status": "Статус",
+  "profileModal.statusReady": "Готов",
+  "profileModal.statusPending": "Нужна подготовка",
+  "profileModal.playtime": "Время в игре",
+  "profileModal.memoryDefault": "По умолчанию",
+  "profileModal.memoryDefaultNote": "Как в настройках лаунчера ({value} на этом компьютере).",
+  "profileModal.files": "Файлы",
+  "profileModal.filesNoteVanilla":
+    "Миры, ресурспаки, скриншоты и настройки хранятся в папке профиля.",
+  "profileModal.filesNoteModded": "Положи совместимые моды в папку mods внутри папки профиля.",
 
   // ---- create profile
   "create.title": "Новый профиль",
@@ -447,6 +472,9 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.remove_refused": "Этот профиль нельзя убрать отсюда. Ничего не изменилось.",
   "error.profile.already_running": "Этот профиль запускается или уже запущен. Сначала закрой игру.",
   "error.profile.busy": "Этот профиль сейчас готовится. Дождись завершения.",
+  "error.profile.invalid_memory":
+    "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
+  "error.profile.open_failed": "Windows не смог открыть эту папку.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",
   "error.catalog.catalog_unavailable":

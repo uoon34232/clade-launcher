@@ -34,12 +34,16 @@ export interface ProfileSummary {
   /** False until Minecraft (and the loader) are installed, which happens later. */
   ready: boolean;
   playtimeSeconds: number;
+  /** Per-profile memory override in MiB, or null to follow Launcher Settings. */
+  memoryMb?: number | null;
 }
 
 export interface ProfilesSnapshot {
   profiles: ProfileSummary[];
   selected: string | null;
   totalPlaytimeSeconds: number;
+  /** Folder names inside instances/ whose profile metadata could not be read (files are kept untouched). */
+  unreadable?: readonly string[];
 }
 
 export interface CatalogEntry {
@@ -116,7 +120,15 @@ export function parseProfiles(raw: unknown): ProfilesSnapshot {
       loaderVersion: str(p.loaderVersion),
       ready: p.ready === true,
       playtimeSeconds: Math.max(0, num(p.playtimeSeconds)),
+      memoryMb:
+        typeof p.memoryMb === "number" && Number.isFinite(p.memoryMb) && p.memoryMb > 0
+          ? p.memoryMb
+          : null,
     });
+  }
+  const unreadable: string[] = [];
+  for (const u of Array.isArray(o.unreadable) ? o.unreadable : []) {
+    if (typeof u === "string" && u.length > 0) unreadable.push(u);
   }
   const selected = str(o.selected);
   return {
@@ -124,6 +136,7 @@ export function parseProfiles(raw: unknown): ProfilesSnapshot {
     selected:
       selected && profiles.some((p) => p.id === selected) ? selected : (profiles[0]?.id ?? null),
     totalPlaytimeSeconds: Math.max(0, num(o.totalPlaytimeSeconds)),
+    unreadable,
   };
 }
 
@@ -253,6 +266,16 @@ export const profilesApi = {
     parseLoaderOptions(await call("get_loader_options", { minecraft })),
   create: async (request: NewProfileRequest) =>
     parseProfiles(await call("create_profile", { request })),
+  rename: async (id: string, name: string) =>
+    parseProfiles(await call("rename_profile", { id, name })),
+  setMemory: async (id: string, mb: number | null) =>
+    parseProfiles(await call("set_profile_memory", { id, mb })),
+  openFolder: async (id: string): Promise<void> => {
+    await call("open_profile_folder", { id });
+  },
+  openInstancesFolder: async (): Promise<void> => {
+    await call("open_instances_folder");
+  },
   /**
    * Installs everything the profile needs (Minecraft, Java, the loader) and marks it Ready, then
    * resolves with the updated profile list. Rejects with a `BackendError`; its `code` is
