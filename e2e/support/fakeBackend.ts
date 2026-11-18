@@ -271,6 +271,84 @@ function install(cfg: BackendConfig): void {
         target.memoryMb = mb === null ? null : Math.round(mb);
         return profilesSnapshot();
       }
+      case "set_profile_version": {
+        const id = args.id as string;
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const minecraft = typeof args.minecraft === "string" ? args.minecraft : "";
+        if (!cfg.catalog.entries.some((e) => e.id === minecraft))
+          return fail("unknown_minecraft", "Unknown Minecraft version.", {
+            params: { minecraft },
+          });
+        const lv = args.loaderVersion as
+          { mode: "auto" } | { mode: "pinned"; version: string } | null | undefined;
+        if (target.kind === "vanilla") {
+          if (lv !== null && lv !== undefined) return fail("storage", "Vanilla has no loader.");
+          if (target.minecraft !== minecraft) {
+            target.minecraft = minecraft;
+            target.ready = false;
+          }
+          return profilesSnapshot();
+        }
+        const loader = target.loader!;
+        const listed = cfg.loaders[minecraft];
+        const loaderEntry = listed ? listed.find((o) => o.loader === loader) : undefined;
+        const resolvedEntry = loaderEntry ?? {
+          loader,
+          status: "ok" as const,
+          versions: [{ version: "1.0.0", channel: "recommended" as const }],
+          recommended: "1.0.0",
+        };
+        if (resolvedEntry.status === "unavailable")
+          return fail("cannot_verify_loader", "Loader check unavailable.", {
+            params: { loader, minecraft },
+          });
+        if (resolvedEntry.status === "none")
+          return fail("no_compatible_loader", "No compatible loader.", {
+            params: { loader, minecraft },
+          });
+        const nextVersion =
+          lv?.mode === "pinned" ? lv.version : (resolvedEntry.recommended ?? null);
+        if (
+          lv?.mode === "pinned" &&
+          !resolvedEntry.versions.some((v) => v.version === lv.version)
+        ) {
+          return fail("loader_version_not_offered", "Loader version not offered.", {
+            params: { loader, version: lv.version, minecraft },
+          });
+        }
+        if (target.minecraft !== minecraft || target.loaderVersion !== nextVersion) {
+          target.minecraft = minecraft;
+          target.loaderVersion = nextVersion;
+          target.ready = false;
+        }
+        return profilesSnapshot();
+      }
+      case "duplicate_profile": {
+        const id = args.id as string;
+        const source = state.profiles.find((p) => p.id === id);
+        if (!source) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const stem = source.name.trim().replace(/\s+\(([2-9]\d*|\d{2,})\)$/, "");
+        let n = 2;
+        let copyName = `${stem} (${n})`;
+        while (state.profiles.some((p) => p.name.trim().toLowerCase() === copyName.toLowerCase())) {
+          n += 1;
+          copyName = `${stem} (${n})`;
+        }
+        const newId = `${slug(copyName)}-${state.profiles.length + 1}`;
+        state.profiles.push({
+          ...clone(source),
+          id: newId,
+          name: copyName,
+          playtimeSeconds: 0,
+        });
+        state.selected = newId;
+        return profilesSnapshot();
+      }
       case "open_profile_folder": {
         const id = args.id as string;
         if (!state.profiles.some((p) => p.id === id)) return fail("not_found", "No such profile.");

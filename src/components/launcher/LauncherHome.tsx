@@ -371,6 +371,10 @@ export function LauncherHome({
               removeDisabled={editingRun !== undefined}
               onClose={close}
               onUpdated={setSnapshot}
+              onDuplicated={(next) => {
+                setSnapshot(next);
+                if (next.selected) setSurface({ kind: "profile", id: next.selected });
+              }}
               onVerify={() =>
                 editingProfile &&
                 setSurface({ kind: "prepare", id: editingProfile.id, verify: true })

@@ -444,6 +444,30 @@ fn map_link_err(e: io::Error) -> InstanceError {
     }
 }
 
+/// Recursively copies regular files and directories from `src` into `dst`, refusing to follow any
+/// symbolic link or NTFS junction so a profile duplication never escapes its sandbox.
+fn copy_dir_no_links(src: &Path, dst: &Path) -> Result<(), InstanceError> {
+    if is_link(src)? {
+        return Err(InstanceError::Link(src.display().to_string()));
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_link(&path)? {
+            return Err(InstanceError::Link(path.display().to_string()));
+        }
+        let target = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_dir_no_links(&path, &target)?;
+        } else if ft.is_file() {
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// A profile and its setup state must agree: Vanilla never has a loader, Modded always does
 /// once ready, and a pinned loader version is the one that was installed.
 fn validate_consistency(inst: &Instance) -> Result<(), InstanceError> {
@@ -703,6 +727,145 @@ impl<'a> InstanceStore<'a> {
             &serde_json::to_vec_pretty(&inst)?,
         )?;
         Ok(inst)
+    }
+
+    /// Updates a profile's Minecraft version (and, for Modded profiles, its loader version spec)
+    /// while keeping the profile's type (`Vanilla` vs `Modded` and its `LoaderKind`) and all user
+    /// files inside `game/` untouched. When the effective version changes, `setup` resets to
+    /// [`SetupState::Pending`] and disposable `natives/` are removed so the next setup prepares
+    /// the new version cleanly.
+    pub fn set_version(
+        &self,
+        id: &InstanceId,
+        minecraft: McVersion,
+        loader_version: Option<LoaderVersionSpec>,
+    ) -> Result<Instance, InstanceError> {
+        let mut inst = self.get(id)?;
+        let dirs = self.dirs(id);
+        match inst.profile.clone() {
+            Profile::Vanilla => {
+                if loader_version.is_some() {
+                    return Err(InstanceError::InconsistentSetup(
+                        "a Vanilla instance cannot have a loader",
+                    ));
+                }
+                if inst.minecraft == minecraft {
+                    return Ok(inst);
+                }
+                inst.minecraft = minecraft;
+                inst.setup = SetupState::Pending;
+            }
+            Profile::Modded {
+                loader,
+                loader_version: current_spec,
+            } => {
+                let next_spec = loader_version.unwrap_or(LoaderVersionSpec::Auto);
+                let unchanged = inst.minecraft == minecraft
+                    && match (&current_spec, &next_spec, &inst.setup) {
+                        (
+                            _,
+                            LoaderVersionSpec::Pinned { version },
+                            SetupState::Ready {
+                                loader_version: Some(installed),
+                                ..
+                            },
+                        ) => version == installed,
+                        (a, b, _) => a == b,
+                    };
+                if unchanged {
+                    return Ok(inst);
+                }
+                inst.minecraft = minecraft;
+                inst.profile = Profile::Modded {
+                    loader,
+                    loader_version: next_spec,
+                };
+                inst.setup = SetupState::Pending;
+            }
+        }
+        validate_consistency(&inst)?;
+        let _ = remove_dir_all_with_retry(&dirs.natives_dir());
+        atomic_write(&dirs.manifest_file(), &serde_json::to_vec_pretty(&inst)?)?;
+        Ok(inst)
+    }
+
+    /// Creates a new isolated profile cloned from `source_id` under `new_name`: copies `game/`
+    /// (worlds, options, mods, configs, resource packs, shaders) while rejecting any link, keeps
+    /// `setup` (`Ready` stays `Ready` because game binaries, libraries, assets and Java live in
+    /// shared immutable stores), starts playtime fresh at zero, and cleans up completely on error.
+    pub fn duplicate(
+        &self,
+        source_id: &InstanceId,
+        new_name: &str,
+        now: i64,
+    ) -> Result<Instance, InstanceError> {
+        let name = validate_name(new_name)?;
+        let source_dirs = self.dirs(source_id);
+        reject_links_between(self.root.path(), source_dirs.root()).map_err(map_link_err)?;
+        if is_link(source_dirs.root())? {
+            return Err(InstanceError::Link(
+                source_dirs.root().display().to_string(),
+            ));
+        }
+        let source = self.get(source_id)?;
+        fs::create_dir_all(self.root.instances_dir())?;
+
+        let base = slugify(&name);
+        let mut n = 1u32;
+        let (id, dirs) = loop {
+            let candidate = if n == 1 {
+                base.clone()
+            } else {
+                InstanceId::new(&format!("{}-{n}", base.as_str()))?
+            };
+            let dirs = self.dirs(&candidate);
+            match fs::create_dir(dirs.root()) {
+                Ok(()) => break (candidate, dirs),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if self.get(&candidate).is_err() {
+                        return Err(InstanceError::Io(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "profile folder '{candidate}' already exists and could not be read"
+                            ),
+                        )));
+                    }
+                    n += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        let result = (|| {
+            let src_game = source_dirs.game_dir();
+            if src_game.exists() {
+                copy_dir_no_links(&src_game, &dirs.game_dir())?;
+            } else {
+                fs::create_dir_all(dirs.game_dir())?;
+            }
+            let instance = Instance {
+                schema: SCHEMA,
+                id,
+                name,
+                minecraft: source.minecraft,
+                profile: source.profile,
+                setup: source.setup,
+                java: source.java,
+                memory_mb: source.memory_mb,
+                extra_jvm_args: source.extra_jvm_args,
+                created_at: now,
+            };
+            validate_consistency(&instance)?;
+            atomic_write(
+                &dirs.manifest_file(),
+                &serde_json::to_vec_pretty(&instance)?,
+            )?;
+            Ok::<_, InstanceError>(instance)
+        })();
+        if result.is_err() {
+            let _ = remove_dir_all_with_retry(dirs.root());
+        }
+        result
     }
 
     /// Takes one profile out of Clade without deleting any user content: its whole folder is
@@ -1420,6 +1583,137 @@ mod tests {
         let err = store.set_memory(&missing, Some(4096)).unwrap_err();
         assert!(matches!(err, InstanceError::NotFound(ref id) if id == "missing"));
         assert!(!root.instances_dir().join("missing").exists());
+    }
+
+    #[test]
+    fn set_version_updates_in_place_preserves_game_files_resets_ready_and_cleans_natives() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+
+        let vanilla = store
+            .create(NewInstance::vanilla("Survival", "1.20.1").unwrap(), 100)
+            .unwrap();
+        let v_dirs = store.dirs(&vanilla.id);
+        fs::create_dir_all(v_dirs.saves_dir().join("MyWorld")).unwrap();
+        fs::write(
+            v_dirs.saves_dir().join("MyWorld").join("level.dat"),
+            b"world-bytes",
+        )
+        .unwrap();
+        fs::create_dir_all(v_dirs.natives_dir()).unwrap();
+        fs::write(v_dirs.natives_dir().join("lwjgl.dll"), b"dll").unwrap();
+        store
+            .mark_ready(&vanilla.id, VersionId::new("1.20.1").unwrap(), None)
+            .unwrap();
+
+        // A Vanilla profile cannot be given a loader version.
+        assert!(matches!(
+            store.set_version(
+                &vanilla.id,
+                McVersion::new("1.21.4").unwrap(),
+                Some(LoaderVersionSpec::Auto),
+            ),
+            Err(InstanceError::InconsistentSetup(_))
+        ));
+
+        // Same version is a no-op and keeps Ready + natives intact.
+        let same = store
+            .set_version(&vanilla.id, McVersion::new("1.20.1").unwrap(), None)
+            .unwrap();
+        assert!(same.is_ready());
+        assert!(v_dirs.natives_dir().exists());
+
+        // New version updates minecraft, resets setup to Pending, removes natives, keeps saves.
+        let moved = store
+            .set_version(&vanilla.id, McVersion::new("1.21.4").unwrap(), None)
+            .unwrap();
+        assert_eq!(moved.minecraft.as_str(), "1.21.4");
+        assert_eq!(moved.setup, SetupState::Pending);
+        assert!(!v_dirs.natives_dir().exists());
+        assert_eq!(
+            fs::read(v_dirs.saves_dir().join("MyWorld").join("level.dat")).unwrap(),
+            b"world-bytes"
+        );
+
+        // Modded profile keeps its loader kind, updates MC + loader spec, and resets Ready.
+        let modded = store
+            .create(
+                NewInstance::modded(
+                    "Modded",
+                    "1.20.1",
+                    LoaderKind::Fabric,
+                    LoaderVersionSpec::Pinned {
+                        version: LoaderVersion::new("0.15.0").unwrap(),
+                    },
+                )
+                .unwrap(),
+                110,
+            )
+            .unwrap();
+        store
+            .mark_ready(
+                &modded.id,
+                VersionId::new("fabric-loader-0.15.0-1.20.1").unwrap(),
+                Some(LoaderVersion::new("0.15.0").unwrap()),
+            )
+            .unwrap();
+        let modded_updated = store
+            .set_version(
+                &modded.id,
+                McVersion::new("1.21.4").unwrap(),
+                Some(LoaderVersionSpec::Pinned {
+                    version: LoaderVersion::new("0.16.9").unwrap(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(modded_updated.minecraft.as_str(), "1.21.4");
+        assert_eq!(modded_updated.loader(), Some(LoaderKind::Fabric));
+        assert_eq!(modded_updated.setup, SetupState::Pending);
+    }
+
+    #[test]
+    fn duplicate_clones_game_tree_preserves_ready_and_skips_natives_and_playtime() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+
+        let src = store
+            .create(NewInstance::vanilla("Survival", "1.21.4").unwrap(), 200)
+            .unwrap();
+        store.set_memory(&src.id, Some(4096)).unwrap();
+        store
+            .mark_ready(&src.id, VersionId::new("1.21.4").unwrap(), None)
+            .unwrap();
+
+        let src_dirs = store.dirs(&src.id);
+        fs::create_dir_all(src_dirs.saves_dir().join("Home")).unwrap();
+        fs::write(
+            src_dirs.saves_dir().join("Home").join("level.dat"),
+            b"seed-42",
+        )
+        .unwrap();
+        fs::write(src_dirs.game_dir().join("options.txt"), b"fov:1.0").unwrap();
+        fs::create_dir_all(src_dirs.natives_dir()).unwrap();
+        fs::write(src_dirs.natives_dir().join("lwjgl.dll"), b"dll").unwrap();
+        fs::write(src_dirs.playtime_file(), b"{\"total_seconds\":900}").unwrap();
+
+        let copy = store.duplicate(&src.id, "Survival (2)", 210).unwrap();
+        assert_eq!(copy.id.as_str(), "survival-2");
+        assert_eq!(copy.name, "Survival (2)");
+        assert_eq!(copy.minecraft.as_str(), "1.21.4");
+        assert!(copy.is_ready());
+        assert_eq!(copy.memory_mb, Some(4096));
+
+        let copy_dirs = store.dirs(&copy.id);
+        assert_eq!(
+            fs::read(copy_dirs.saves_dir().join("Home").join("level.dat")).unwrap(),
+            b"seed-42"
+        );
+        assert_eq!(
+            fs::read(copy_dirs.game_dir().join("options.txt")).unwrap(),
+            b"fov:1.0"
+        );
+        assert!(!copy_dirs.natives_dir().exists());
+        assert!(!copy_dirs.playtime_file().exists());
     }
 }
 

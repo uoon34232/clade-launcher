@@ -54,9 +54,35 @@ function setup(
       return Promise.resolve();
     }),
     versionCatalog: vi.fn<ProfilesApi["versionCatalog"]>(() =>
-      Promise.reject(new Error("offline")),
+      Promise.resolve({
+        entries: [
+          { id: "1.21.5", kind: "release", releaseTime: "2025-03-25T10:00:00+00:00" },
+          { id: "1.21.4", kind: "release", releaseTime: "2024-12-03T10:12:57+00:00" },
+          { id: "25w10a", kind: "snapshot", releaseTime: "2025-03-05T10:00:00+00:00" },
+        ],
+        latestRelease: "1.21.5",
+        latestSnapshot: "25w10a",
+        fetchedAt: 1_700_000_000,
+        origin: "network",
+        stale: false,
+        networkError: null,
+      }),
     ),
-    loaderOptions: vi.fn<ProfilesApi["loaderOptions"]>(() => Promise.resolve([])),
+    loaderOptions: vi.fn<ProfilesApi["loaderOptions"]>(() =>
+      Promise.resolve([
+        {
+          loader: "fabric",
+          status: "ok",
+          versions: [
+            { version: "0.16.10", channel: "recommended" },
+            { version: "0.16.9", channel: "stable" },
+          ],
+          recommended: "0.16.10",
+          stale: false,
+          error: null,
+        },
+      ]),
+    ),
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("not used in this test"))),
     rename: vi.fn<ProfilesApi["rename"]>((id, name) => {
       const trimmed = name.trim();
@@ -70,6 +96,40 @@ function setup(
       current = {
         ...current,
         profiles: current.profiles.map((p) => (p.id === id ? { ...p, memoryMb: mb } : p)),
+      };
+      return Promise.resolve(current);
+    }),
+    setVersion: vi.fn<ProfilesApi["setVersion"]>((id, minecraft, loaderVersion) => {
+      current = {
+        ...current,
+        profiles: current.profiles.map((p) =>
+          p.id === id
+            ? {
+                ...p,
+                minecraft,
+                loaderVersion:
+                  p.kind === "modded"
+                    ? loaderVersion?.mode === "pinned"
+                      ? loaderVersion.version
+                      : "0.16.10"
+                    : null,
+                ready: false,
+              }
+            : p,
+        ),
+      };
+      return Promise.resolve(current);
+    }),
+    duplicate: vi.fn<ProfilesApi["duplicate"]>((id) => {
+      const src = current.profiles.find((p) => p.id === id);
+      if (!src) return Promise.reject(new BackendError("missing", "not_found"));
+      const copyName = `${src.name} (2)`;
+      const copyId = `${src.id}-2`;
+      const copy = { ...src, id: copyId, name: copyName, playtimeSeconds: 0 };
+      current = {
+        ...current,
+        profiles: [...current.profiles, copy],
+        selected: copyId,
       };
       return Promise.resolve(current);
     }),
@@ -523,6 +583,40 @@ describe("Profile settings and unreadable notice in Russian", () => {
       expect(
         d.getAllByRole("alert").some((a) => a.textContent === "Windows не смог открыть эту папку."),
       ).toBe(true),
+    );
+  });
+
+  it("changes a profile's Minecraft version in place and duplicates a profile onto the new copy", async () => {
+    setLocale("en");
+    const { api } = setup(snap([profile()]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+
+    fireEvent.click(d.getByRole("button", { name: "Change version…" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "1.21.4",
+      ),
+    );
+    fireEvent.click(d.getByRole("radio", { name: "Snapshots" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "25w10a",
+      ),
+    );
+    fireEvent.click(d.getByRole("button", { name: "Save version" }));
+
+    await waitFor(() => expect(api.setVersion).toHaveBeenCalledWith("survival", "25w10a", null));
+    expect(await d.findByText("Needs setup")).toBeTruthy();
+
+    // Duplicate creates "Survival (2)", selects it, and switches the open dialog onto the copy
+    fireEvent.click(d.getByRole("button", { name: "Duplicate" }));
+    await waitFor(() => expect(api.duplicate).toHaveBeenCalledWith("survival"));
+    expect(await screen.findByLabelText<HTMLInputElement>("Name")).toHaveProperty(
+      "value",
+      "Survival (2)",
     );
   });
 });

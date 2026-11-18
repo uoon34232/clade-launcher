@@ -389,11 +389,12 @@ describe("structured backend errors are worded in the current language", () => {
         "unsupported_value",
         "invalid_memory",
         "diagnostics_failed",
-        // removing a profile from Clade
+        // removing or duplicating a profile
         "already_running",
         "busy",
         "remove_failed",
         "remove_refused",
+        "duplicate_failed",
       ],
       ...[
         "passphrase_mismatch",
@@ -419,6 +420,8 @@ describe("structured backend errors are worded in the current language", () => {
       "busy",
       "remove_failed",
       "remove_refused",
+      "not_found",
+      "duplicate_failed",
     ];
     expect(wanted("profile", profileCodes)).toEqual([]);
     // "Start fresh" (vault_recovery.rs) and the unlock errors

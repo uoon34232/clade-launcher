@@ -97,6 +97,15 @@ export const ru: Record<MessageKey, Message> = {
   "profileModal.statusReady": "Готов",
   "profileModal.statusPending": "Нужна подготовка",
   "profileModal.playtime": "Время в игре",
+  "profileModal.changeVersion": "Сменить версию…",
+  "profileModal.saveVersion": "Сохранить версию",
+  "profileModal.loaderVersionFor": "Версия {loader}",
+  "profileModal.versionKeepNote":
+    "Миры и настройки останутся на месте. Clade подготовит новую версию перед игрой.",
+  "profileModal.versionModdedNote":
+    "Миры и настройки останутся на месте. Проверь, чтобы моды в папке mods подходили к новой версии.",
+  "profileModal.duplicate": "Дублировать",
+  "profileModal.duplicating": "Дублирование…",
   "profileModal.memoryDefault": "По умолчанию",
   "profileModal.memoryDefaultNote": "Как в настройках лаунчера ({value} на этом компьютере).",
   "profileModal.files": "Файлы",
@@ -474,6 +483,9 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.busy": "Этот профиль сейчас готовится. Дождись завершения.",
   "error.profile.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
+  "error.profile.not_found": "Этого профиля больше нет.",
+  "error.profile.duplicate_failed":
+    "Не удалось дублировать профиль. Проверь свободное место на диске и закрой всё, что использует его папку.",
   "error.profile.open_failed": "Windows не смог открыть эту папку.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",

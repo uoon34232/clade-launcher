@@ -160,6 +160,8 @@ describe("calls", () => {
     await expect(profilesApi.versionCatalog()).rejects.toThrow();
     await expect(profilesApi.rename("survival", "Hardcore")).rejects.toThrow(/not available/);
     await expect(profilesApi.setMemory("survival", 6144)).rejects.toThrow(/not available/);
+    await expect(profilesApi.setVersion("survival", "1.21.4")).rejects.toThrow(/not available/);
+    await expect(profilesApi.duplicate("survival")).rejects.toThrow(/not available/);
     await expect(profilesApi.openFolder("survival")).rejects.toThrow(/not available/);
     await expect(profilesApi.openInstancesFolder()).rejects.toThrow(/not available/);
     expect(invoke).not.toHaveBeenCalled();
@@ -184,6 +186,9 @@ describe("calls", () => {
     await profilesApi.rename("survival", "Hardcore");
     await profilesApi.setMemory("survival", 6144);
     await profilesApi.setMemory("survival", null);
+    await profilesApi.setVersion("survival", "1.21.4");
+    await profilesApi.setVersion("survival", "1.21.4", { mode: "pinned", version: "0.19.5" });
+    await profilesApi.duplicate("survival");
     await profilesApi.openFolder("survival");
     await profilesApi.openInstancesFolder();
     expect(invoke.mock.calls).toEqual([
@@ -195,6 +200,16 @@ describe("calls", () => {
       ["rename_profile", { id: "survival", name: "Hardcore" }],
       ["set_profile_memory", { id: "survival", mb: 6144 }],
       ["set_profile_memory", { id: "survival", mb: null }],
+      ["set_profile_version", { id: "survival", minecraft: "1.21.4", loaderVersion: null }],
+      [
+        "set_profile_version",
+        {
+          id: "survival",
+          minecraft: "1.21.4",
+          loaderVersion: { mode: "pinned", version: "0.19.5" },
+        },
+      ],
+      ["duplicate_profile", { id: "survival" }],
       ["open_profile_folder", { id: "survival" }],
       ["open_instances_folder", undefined],
     ]);

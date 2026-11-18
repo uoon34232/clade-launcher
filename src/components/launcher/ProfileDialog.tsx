@@ -1,23 +1,47 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  defaultVersion,
+  FILTER_KEYS,
+  filterVersions,
   formatGigabytes,
   formatPlaytime,
   MAX_NAME_CHARS,
   profileDetail,
+  releaseDay,
+  staleNote,
   validateName,
+  type VersionFilter,
 } from "@/features/launcher/profileUi";
-import { useT } from "@/lib/i18n";
+import { useT, type MessageKey } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
 import {
+  LOADER_NAMES,
   profilesApi,
+  type LoaderOption,
   type ProfileSummary,
   type ProfilesApi,
   type ProfilesSnapshot,
+  type VersionCatalog,
 } from "@/lib/profiles/api";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
 import { Modal, ModalFooter, ModalHeader, ModalSection } from "./Modal";
-import { BUTTON_DANGER, BUTTON_SMALL_SOFT, BUTTON_SOFT, FIELD, LABEL } from "./modalStyles";
+import {
+  BUTTON_DANGER,
+  BUTTON_PRIMARY,
+  BUTTON_QUIET,
+  BUTTON_SMALL_SOFT,
+  BUTTON_SOFT,
+  FIELD,
+  LABEL,
+} from "./modalStyles";
 import { Segmented } from "./Segmented";
 
 interface Props {
@@ -31,9 +55,28 @@ interface Props {
   removeDisabled?: boolean;
   onClose: () => void;
   onUpdated: (snapshot: ProfilesSnapshot) => void;
+  onDuplicated?: (snapshot: ProfilesSnapshot) => void;
   onVerify: () => void;
   onRemove: () => void;
   api?: ProfilesApi;
+}
+
+type CatalogState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; data: VersionCatalog };
+
+const CHANNEL_NOTE: Record<string, MessageKey> = {
+  recommended: "create.channel.recommended",
+  stable: "create.channel.stable",
+  latest: "create.channel.latest",
+  prerelease: "create.channel.prerelease",
+};
+
+function filterForKind(kind: VersionCatalog["entries"][number]["kind"] | undefined): VersionFilter {
+  if (kind === "snapshot") return "snapshots";
+  if (kind === "old_beta" || kind === "old_alpha") return "historical";
+  return "releases";
 }
 
 /**
@@ -48,6 +91,7 @@ export function ProfileDialog({
   removeDisabled = false,
   onClose,
   onUpdated,
+  onDuplicated,
   onVerify,
   onRemove,
   api = profilesApi,
@@ -97,6 +141,7 @@ export function ProfileDialog({
           setDirty={setDirty}
           onClose={onClose}
           onUpdated={onUpdated}
+          onDuplicated={onDuplicated ?? onUpdated}
           onVerify={onVerify}
           onRemove={onRemove}
           api={api}
@@ -117,6 +162,7 @@ interface BodyProps {
   setDirty: (dirty: boolean) => void;
   onClose: () => void;
   onUpdated: (snapshot: ProfilesSnapshot) => void;
+  onDuplicated: (snapshot: ProfilesSnapshot) => void;
   onVerify: () => void;
   onRemove: () => void;
   api: ProfilesApi;
@@ -133,6 +179,7 @@ function Body({
   setDirty,
   onClose,
   onUpdated,
+  onDuplicated,
   onVerify,
   onRemove,
   api,
@@ -214,7 +261,30 @@ function Body({
     );
   };
 
+  const [changingVersion, setChangingVersion] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+
+  const duplicateProfile = () => {
+    if (running || saving) return;
+    playSound("click");
+    setSaving(true);
+    setDuplicating(true);
+    setFilesError(null);
+    api.duplicate(profile.id).then(
+      (snapshot) => {
+        playSound("primary");
+        setSaving(false);
+        setDuplicating(false);
+        onDuplicated(snapshot);
+      },
+      (err: unknown) => {
+        setSaving(false);
+        setDuplicating(false);
+        setFilesError(describeError("profile", err));
+      },
+    );
+  };
 
   return (
     <>
@@ -239,7 +309,7 @@ function Body({
               onChange={(e) => {
                 const next = e.target.value;
                 setName(next);
-                setDirty(next !== profile.name);
+                setDirty(next !== profile.name || changingVersion);
                 setRenameError(null);
               }}
               onBlur={() => setNameTouched(true)}
@@ -273,20 +343,55 @@ function Body({
             </p>
           )}
         </form>
-        <dl className="flex flex-wrap gap-x-6 gap-y-1 text-[0.8125rem]">
-          <div className="flex gap-2">
-            <dt className="text-ink-muted">{t("profileModal.status")}</dt>
-            <dd className="text-graphite font-medium">
-              {profile.ready ? t("profileModal.statusReady") : t("profileModal.statusPending")}
-            </dd>
-          </div>
-          <div className="flex gap-2">
-            <dt className="text-ink-muted">{t("profileModal.playtime")}</dt>
-            <dd className="text-graphite font-medium tabular-nums">
-              {formatPlaytime(profile.playtimeSeconds)}
-            </dd>
-          </div>
-        </dl>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[0.8125rem]">
+            <div className="flex gap-2">
+              <dt className="text-ink-muted">{t("profileModal.status")}</dt>
+              <dd className="text-graphite font-medium">
+                {profile.ready ? t("profileModal.statusReady") : t("profileModal.statusPending")}
+              </dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="text-ink-muted">{t("profileModal.playtime")}</dt>
+              <dd className="text-graphite font-medium tabular-nums">
+                {formatPlaytime(profile.playtimeSeconds)}
+              </dd>
+            </div>
+          </dl>
+          {!changingVersion && (
+            <button
+              type="button"
+              disabled={running || saving}
+              className={BUTTON_SMALL_SOFT}
+              onClick={() => {
+                playSound("click");
+                setChangingVersion(true);
+                setDirty(true);
+              }}
+            >
+              {t("profileModal.changeVersion")}
+            </button>
+          )}
+        </div>
+        {changingVersion && (
+          <VersionEditor
+            profile={profile}
+            running={running}
+            saving={saving}
+            setSaving={setSaving}
+            api={api}
+            onCancel={() => {
+              playSound("click");
+              setChangingVersion(false);
+              setDirty(name !== profile.name);
+            }}
+            onSaved={(snapshot) => {
+              setChangingVersion(false);
+              setDirty(name !== profile.name);
+              onUpdated(snapshot);
+            }}
+          />
+        )}
       </ModalSection>
 
       <ModalSection compact className="gap-1.5 py-2" title={t("settings.memory")}>
@@ -405,6 +510,14 @@ function Body({
         </button>
         <button
           type="button"
+          disabled={running || saving}
+          className={BUTTON_SOFT}
+          onClick={duplicateProfile}
+        >
+          {duplicating ? t("profileModal.duplicating") : t("profileModal.duplicate")}
+        </button>
+        <button
+          type="button"
           disabled={saving}
           className={BUTTON_SOFT}
           onClick={() => {
@@ -416,5 +529,330 @@ function Body({
         </button>
       </ModalFooter>
     </>
+  );
+}
+
+interface VersionEditorProps {
+  profile: ProfileSummary;
+  running: boolean;
+  saving: boolean;
+  setSaving: (saving: boolean) => void;
+  api: ProfilesApi;
+  onCancel: () => void;
+  onSaved: (snapshot: ProfilesSnapshot) => void;
+}
+
+function VersionEditor({
+  profile,
+  running,
+  saving,
+  setSaving,
+  api,
+  onCancel,
+  onSaved,
+}: VersionEditorProps) {
+  const t = useT();
+  const [reload, setReload] = useState(0);
+  const [filter, setFilter] = useState<VersionFilter>("releases");
+  const [catalogResult, setCatalogResult] = useState<{
+    key: number;
+    state: Exclude<CatalogState, { status: "loading" }>;
+  } | null>(null);
+  const [mc, setMc] = useState<string>(profile.minecraft);
+  const [loaderVersion, setLoaderVersion] = useState<string | null>(profile.loaderVersion);
+  const [loaderResult, setLoaderResult] = useState<{
+    mc: string;
+    options: LoaderOption[] | null;
+  } | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const catalog = useMemo<CatalogState>(
+    () => (catalogResult?.key === reload ? catalogResult.state : { status: "loading" }),
+    [catalogResult, reload],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    api.versionCatalog().then(
+      (data) => {
+        if (cancelled) return;
+        const match = data.entries.find((e) => e.id === profile.minecraft);
+        const initialFilter = filterForKind(match?.kind);
+        setFilter(initialFilter);
+        setCatalogResult({ key: reload, state: { status: "ready", data } });
+        const list = filterVersions(data.entries, initialFilter);
+        setMc(
+          list.some((e) => e.id === profile.minecraft)
+            ? profile.minecraft
+            : (defaultVersion(data, list, initialFilter) ?? profile.minecraft),
+        );
+      },
+      (e: unknown) => {
+        if (!cancelled) {
+          setCatalogResult({
+            key: reload,
+            state: { status: "error", message: describeError("catalog", e) },
+          });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [reload, api, profile.minecraft]);
+
+  const moddedLoader = profile.kind === "modded" ? profile.loader : null;
+
+  useEffect(() => {
+    if (!moddedLoader || !mc) return;
+    let cancelled = false;
+    api.loaderOptions(mc).then(
+      (options) => {
+        if (!cancelled) setLoaderResult({ mc, options });
+      },
+      () => {
+        if (!cancelled) setLoaderResult({ mc, options: null });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [moddedLoader, mc, api]);
+
+  const entries = useMemo(
+    () => (catalog.status === "ready" ? catalog.data.entries : []),
+    [catalog],
+  );
+  const shown = useMemo(() => filterVersions(entries, filter), [entries, filter]);
+  const loaderForMc = loaderResult?.mc === mc ? loaderResult : null;
+  const loaderFailed = loaderForMc !== null && loaderForMc.options === null;
+  const loadingLoaders = moddedLoader !== null && !!mc && loaderForMc === null;
+  const currentLoader = moddedLoader
+    ? loaderForMc?.options?.find((o) => o.loader === moddedLoader)
+    : undefined;
+  const chosenLoaderVersion = currentLoader
+    ? loaderVersion && currentLoader.versions.some((v) => v.version === loaderVersion)
+      ? loaderVersion
+      : currentLoader.recommended
+    : null;
+
+  const isUnchanged =
+    mc === profile.minecraft &&
+    (moddedLoader === null ||
+      (chosenLoaderVersion !== null && chosenLoaderVersion === profile.loaderVersion));
+
+  const canSave =
+    !running &&
+    !saving &&
+    catalog.status === "ready" &&
+    !!mc &&
+    !isUnchanged &&
+    (moddedLoader === null ||
+      (!loadingLoaders && currentLoader?.status === "ok" && !!chosenLoaderVersion));
+
+  const changeFilter = (nextFilter: VersionFilter) => {
+    setFilter(nextFilter);
+    setSubmitError(null);
+    if (catalog.status !== "ready") return;
+    const next = filterVersions(catalog.data.entries, nextFilter);
+    if (!next.some((e) => e.id === mc)) {
+      const fallback = defaultVersion(catalog.data, next, nextFilter);
+      if (fallback) {
+        setMc(fallback);
+        setLoaderVersion(fallback === profile.minecraft ? profile.loaderVersion : null);
+      }
+    }
+  };
+
+  const saveVersion = () => {
+    if (!canSave) return;
+    setSaving(true);
+    setSubmitError(null);
+    const choice =
+      moddedLoader && chosenLoaderVersion
+        ? ({ mode: "pinned", version: chosenLoaderVersion } as const)
+        : null;
+    api.setVersion(profile.id, mc, choice).then(
+      (snapshot) => {
+        playSound("primary");
+        setSaving(false);
+        onSaved(snapshot);
+      },
+      (err: unknown) => {
+        setSaving(false);
+        setSubmitError(describeError("profile", err));
+      },
+    );
+  };
+
+  return (
+    <div className="bg-sand/35 ring-graphite/10 mt-1 flex flex-col gap-2.5 rounded-2xl p-3 ring-1">
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <span id="profile-edit-mc-label" className={LABEL}>
+            {t("create.mcVersion")}
+          </span>
+          <Segmented
+            variant="plain"
+            label={t("create.filterLabel")}
+            value={filter}
+            onChange={(f) => {
+              playSound("click");
+              changeFilter(f);
+            }}
+            options={(Object.keys(FILTER_KEYS) as VersionFilter[]).map((f) => ({
+              value: f,
+              label: t(FILTER_KEYS[f]),
+            }))}
+          />
+        </div>
+        {catalog.status === "ready" ? (
+          <Select
+            value={mc}
+            onValueChange={(v) => {
+              if (typeof v === "string") {
+                playSound("select");
+                setMc(v);
+                setLoaderVersion(v === profile.minecraft ? profile.loaderVersion : null);
+                setSubmitError(null);
+              }
+            }}
+            items={shown.map((e) => ({ value: e.id, label: e.id }))}
+          >
+            <SelectTrigger
+              aria-labelledby="profile-edit-mc-label"
+              className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3`}
+            >
+              <SelectValue placeholder={t("create.choose")} />
+            </SelectTrigger>
+            <SelectContent
+              alignItemWithTrigger={false}
+              sideOffset={6}
+              className="max-h-60 rounded-xl p-1"
+            >
+              {shown.map((e) => (
+                <SelectItem key={e.id} value={e.id} className="rounded-lg py-1.5">
+                  <span className="flex-1">{e.id}</span>
+                  <span className="text-cream/45 pr-4 text-[0.75rem] tabular-nums">
+                    {releaseDay(e.releaseTime)}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <div className={`${FIELD} text-ink-muted flex h-9 items-center`} aria-live="polite">
+            {catalog.status === "loading" ? t("create.loading") : t("create.unavailable")}
+          </div>
+        )}
+        {catalog.status === "error" && (
+          <p role="alert" className="text-clay-deep text-[0.8125rem]">
+            {catalog.message}{" "}
+            <button
+              type="button"
+              className="focus-visible:ring-clay/45 underline underline-offset-2 outline-none focus-visible:ring-2"
+              onClick={() => setReload((n) => n + 1)}
+            >
+              {t("common.tryAgain")}
+            </button>
+          </p>
+        )}
+        {catalog.status === "ready" && catalog.data.stale && (
+          <p className="text-ink-muted text-[0.8125rem]">{staleNote(catalog.data.fetchedAt)}</p>
+        )}
+        {catalog.status === "ready" && shown.length === 0 && (
+          <p className="text-ink-muted text-[0.8125rem]">{t("create.noVersions")}</p>
+        )}
+      </div>
+
+      {moddedLoader && (
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+            <span id="profile-edit-loader-label" className={LABEL}>
+              {t("profileModal.loaderVersionFor", { loader: LOADER_NAMES[moddedLoader] })}
+            </span>
+            {loaderFailed ? (
+              <span className="text-clay-deep text-[0.75rem]">{t("create.loaderCheckFailed")}</span>
+            ) : currentLoader && currentLoader.status !== "ok" ? (
+              <span className="text-clay-deep text-[0.75rem]">
+                {currentLoader.status === "none"
+                  ? t("create.loaderNone", {
+                      loader: LOADER_NAMES[moddedLoader],
+                      minecraft: mc,
+                    })
+                  : t("create.loaderUnchecked", { loader: LOADER_NAMES[moddedLoader] })}
+              </span>
+            ) : null}
+          </div>
+          <Select
+            value={chosenLoaderVersion}
+            disabled={!currentLoader || currentLoader.status !== "ok"}
+            onValueChange={(v) => {
+              if (typeof v === "string") {
+                playSound("select");
+                setLoaderVersion(v);
+                setSubmitError(null);
+              }
+            }}
+            items={(currentLoader?.versions ?? []).map((v) => ({
+              value: v.version,
+              label:
+                v.version === currentLoader?.recommended
+                  ? t("create.versionRecommended", { version: v.version })
+                  : v.version,
+            }))}
+          >
+            <SelectTrigger
+              aria-labelledby="profile-edit-loader-label"
+              className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+            >
+              <SelectValue
+                placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
+              />
+            </SelectTrigger>
+            <SelectContent
+              alignItemWithTrigger={false}
+              sideOffset={6}
+              className="max-h-56 rounded-xl p-1"
+            >
+              {(currentLoader?.versions ?? []).map((v) => (
+                <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
+                  <span className="flex-1">{v.version}</span>
+                  <span className="text-cream/45 pr-4 text-[0.75rem]">
+                    {v.version === currentLoader?.recommended
+                      ? t("create.channel.recommended")
+                      : t(CHANNEL_NOTE[v.channel])}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      <p className="text-ink-muted text-[0.8125rem]">
+        {moddedLoader ? t("profileModal.versionModdedNote") : t("profileModal.versionKeepNote")}
+      </p>
+
+      {submitError && (
+        <p role="alert" className="text-clay-deep text-[0.8125rem]">
+          {submitError}
+        </p>
+      )}
+
+      <div className="flex items-center justify-end gap-2">
+        <button type="button" disabled={saving} onClick={onCancel} className={BUTTON_QUIET}>
+          {t("common.cancel")}
+        </button>
+        <button
+          type="button"
+          disabled={!canSave}
+          onClick={saveVersion}
+          className={`${BUTTON_PRIMARY} h-9 px-4 text-[0.8125rem]`}
+        >
+          {saving ? t("profileModal.saving") : t("profileModal.saveVersion")}
+        </button>
+      </div>
+    </div>
   );
 }
