@@ -21,6 +21,7 @@ interface Control {
   state: {
     profiles: BackendConfig["profiles"];
     selected: string | null;
+    unreadable: string[];
     accounts: BackendConfig["accounts"];
     active: string | null;
     appearance: BackendConfig["appearance"];
@@ -52,6 +53,7 @@ function install(cfg: BackendConfig): void {
   const state: Control["state"] = {
     profiles: clone(cfg.profiles),
     selected: cfg.selected,
+    unreadable: clone(cfg.unreadable ?? []),
     accounts: clone(cfg.accounts),
     active: cfg.active,
     appearance: clone(cfg.appearance),
@@ -103,9 +105,10 @@ function install(cfg: BackendConfig): void {
   const knownAccount = (id: unknown) => state.accounts.some((a) => a.id === id);
 
   const profilesSnapshot = () => ({
-    profiles: clone(state.profiles),
+    profiles: clone(state.profiles).map((p) => ({ ...p, memoryMb: p.memoryMb ?? null })),
     selected: state.selected,
     totalPlaytimeSeconds: state.profiles.reduce((s, p) => s + p.playtimeSeconds, 0),
+    unreadable: clone(state.unreadable),
   });
   const accountsSnapshot = () => ({
     accounts: clone(state.accounts),
@@ -230,6 +233,51 @@ function install(cfg: BackendConfig): void {
         state.selected = state.profiles[0]?.id ?? null;
         return profilesSnapshot();
       }
+      case "rename_profile": {
+        const id = args.id as string;
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const rawName = typeof args.name === "string" ? args.name : "";
+        const trimmed = rawName.trim();
+        // eslint-disable-next-line no-control-regex
+        const hasControl = /[\u0000-\u001f\u007f]/.test(trimmed);
+        if (trimmed.length === 0 || [...trimmed].length > 64 || hasControl)
+          return fail("invalid_name", "That name cannot be used.");
+        if (
+          state.profiles.some(
+            (p) => p.id !== id && p.name.trim().toLowerCase() === trimmed.toLowerCase(),
+          )
+        )
+          return fail("duplicate_name", "A profile with this name already exists.", {
+            params: { name: trimmed },
+          });
+        target.name = trimmed;
+        return profilesSnapshot();
+      }
+      case "set_profile_memory": {
+        const id = args.id as string;
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const mb = args.mb;
+        const { min, max } = state.ui.memory;
+        if (mb !== null && (typeof mb !== "number" || !Number.isFinite(mb) || mb < min || mb > max))
+          return fail("invalid_memory", "Memory is outside the safe range.", {
+            params: { min, max },
+          });
+        target.memoryMb = mb === null ? null : Math.round(mb);
+        return profilesSnapshot();
+      }
+      case "open_profile_folder": {
+        const id = args.id as string;
+        if (!state.profiles.some((p) => p.id === id)) return fail("not_found", "No such profile.");
+        return null;
+      }
+      case "open_instances_folder":
+        return null;
       case "get_version_catalog":
         return clone(cfg.catalog);
       case "get_loader_options": {
@@ -274,6 +322,7 @@ function install(cfg: BackendConfig): void {
               : null,
           ready: false,
           playtimeSeconds: 0,
+          memoryMb: null,
         });
         state.selected = id;
         return profilesSnapshot();

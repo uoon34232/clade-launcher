@@ -114,6 +114,12 @@ function makeApi(initial: ProfilesSnapshot) {
     versionCatalog,
     loaderOptions,
     create,
+    rename: vi.fn<ProfilesApi["rename"]>(() => Promise.reject(new Error("not used in this test"))),
+    setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    openFolder: vi.fn<ProfilesApi["openFolder"]>(() => Promise.resolve()),
+    openInstancesFolder: vi.fn<ProfilesApi["openInstancesFolder"]>(() => Promise.resolve()),
     prepare,
     cancelPrepare,
     remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),

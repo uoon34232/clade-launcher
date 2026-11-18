@@ -134,6 +134,12 @@ function makeProfiles() {
     ),
     loaderOptions: vi.fn<ProfilesApi["loaderOptions"]>(() => Promise.resolve([])),
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("no"))),
+    rename: vi.fn<ProfilesApi["rename"]>(() => Promise.reject(new Error("not used in this test"))),
+    setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    openFolder: vi.fn<ProfilesApi["openFolder"]>(() => Promise.resolve()),
+    openInstancesFolder: vi.fn<ProfilesApi["openInstancesFolder"]>(() => Promise.resolve()),
     prepare: vi.fn<ProfilesApi["prepare"]>(() => Promise.reject(new Error("no"))),
     cancelPrepare: vi.fn<ProfilesApi["cancelPrepare"]>(() => Promise.resolve()),
     remove: vi.fn<ProfilesApi["remove"]>(() => Promise.reject(new Error("not used in this test"))),

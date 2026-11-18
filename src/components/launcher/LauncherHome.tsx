@@ -7,6 +7,8 @@ import {
   type AccountsApi,
   type AccountsSnapshot,
 } from "@/lib/accounts/api";
+import { useT } from "@/lib/i18n";
+import { describeError } from "@/lib/i18n/errors";
 import { launchApi, LaunchRefused, type LaunchApi, type RunState } from "@/lib/launch/api";
 import { profilesApi, type ProfilesApi, type ProfilesSnapshot } from "@/lib/profiles/api";
 import { completeOnboarding, type UiSettings } from "@/lib/settings/uiSettings";
@@ -20,6 +22,7 @@ import { LauncherDock } from "./LauncherDock";
 import { OnboardingDialog, type OnboardingExit } from "./OnboardingDialog";
 import type { PlayState } from "./PlayButton";
 import { PrepareDialog } from "./PrepareDialog";
+import { ProfileDialog } from "./ProfileDialog";
 import { RemoveProfileDialog } from "./RemoveProfileDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { SignInDialog } from "./SignInDialog";
@@ -38,6 +41,7 @@ interface Props {
 type Surface =
   | { kind: "none" }
   | { kind: "create-profile" }
+  | { kind: "profile"; id: string }
   | { kind: "settings" }
   | { kind: "prepare"; id: string; verify?: boolean }
   | { kind: "remove-profile"; id: string }
@@ -52,7 +56,9 @@ export function LauncherHome({
   accountsClient = accountsApi,
   launchClient = launchApi,
 }: Props) {
+  const t = useT();
   const [snapshot, setSnapshot] = useState<ProfilesSnapshot>(EMPTY);
+  const [instancesError, setInstancesError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<AccountsSnapshot>(NO_ACCOUNTS);
   // Until the first answer the dock must not claim "sign in" for accounts that simply have not loaded.
   const [accountsLoaded, setAccountsLoaded] = useState(false);
@@ -201,10 +207,17 @@ export function LauncherHome({
   const preparing = prepareSurface
     ? (snapshot.profiles.find((p) => p.id === prepareSurface.id) ?? null)
     : null;
+  const editingProfile =
+    surface.kind === "profile"
+      ? (snapshot.profiles.find((p) => p.id === surface.id) ?? null)
+      : null;
+  const editingRun = editingProfile ? runs[editingProfile.id] : undefined;
   const removing =
     surface.kind === "remove-profile"
       ? (snapshot.profiles.find((p) => p.id === surface.id) ?? null)
       : null;
+  const unreadable = snapshot.unreadable ?? [];
+  if (unreadable.length === 0 && instancesError !== null) setInstancesError(null);
   const run = selectedProfile ? runs[selectedProfile.id] : undefined;
   const playState: PlayState =
     run ??
@@ -242,6 +255,39 @@ export function LauncherHome({
             playtimeSeconds={snapshot.totalPlaytimeSeconds}
           />
         </section>
+        {unreadable.length > 0 && (
+          <div
+            role="status"
+            className="dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
+          >
+            <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
+              <span className="text-ink-muted">
+                {t("profile.unreadableNotice", {
+                  count: unreadable.length,
+                  folders: unreadable.join(", "),
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  playSound("click");
+                  setInstancesError(null);
+                  void api
+                    .openInstancesFolder()
+                    .catch((e: unknown) => setInstancesError(describeError("profile", e)));
+                }}
+                className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-clay/45 cursor-default rounded-md font-medium underline underline-offset-3 transition-colors outline-none focus-visible:ring-2"
+              >
+                {t("profile.openInstancesFolder")}
+              </button>
+              {instancesError && (
+                <span role="alert" className="text-clay-deep">
+                  {instancesError}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <LauncherDock
           accounts={accounts.accounts}
           activeAccountId={accounts.active}
@@ -252,6 +298,12 @@ export function LauncherHome({
           selectedProfileId={snapshot.selected}
           onSelectProfile={select}
           onCreateProfile={openCreate}
+          onOpenProfileSettings={() =>
+            selectedProfile && setSurface({ kind: "profile", id: selectedProfile.id })
+          }
+          onOpenProfileFolder={() =>
+            selectedProfile && void api.openFolder(selectedProfile.id).catch(() => undefined)
+          }
           onVerifyProfile={() =>
             selectedProfile && setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
           }
@@ -270,6 +322,22 @@ export function LauncherHome({
           onOpenChange={(o) => !o && close()}
           existingNames={snapshot.profiles.map((p) => p.name)}
           onCreated={setSnapshot}
+          api={api}
+        />
+        <ProfileDialog
+          profile={editingProfile}
+          profiles={snapshot.profiles}
+          running={editingRun !== undefined}
+          verifyDisabled={editingRun !== undefined || !accountReady}
+          removeDisabled={editingRun !== undefined}
+          onClose={close}
+          onUpdated={setSnapshot}
+          onVerify={() =>
+            editingProfile && setSurface({ kind: "prepare", id: editingProfile.id, verify: true })
+          }
+          onRemove={() =>
+            editingProfile && setSurface({ kind: "remove-profile", id: editingProfile.id })
+          }
           api={api}
         />
         <PrepareDialog

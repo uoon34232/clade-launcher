@@ -102,6 +102,25 @@ describe("the translator", () => {
     const chars = (count: number) => renderMessage("ru", ru["signin.passphraseNote"], { count });
     expect(chars(8)).toBe("Не менее 8 символов. Подойдёт несколько слов.");
     expect(chars(21)).toContain("21 символа");
+    expect(t("profile.unreadableNotice", { count: 1, folders: "old" })).toBe(
+      "1 profile folder couldn’t be read (old). Its files were left untouched.",
+    );
+    expect(t("profile.unreadableNotice", { count: 2, folders: "old, broken" })).toBe(
+      "2 profile folders couldn’t be read (old, broken). Their files were left untouched.",
+    );
+    setLocale("ru");
+    expect(t("profile.unreadableNotice", { count: 1, folders: "old" })).toBe(
+      "Не удалось прочитать 1 папку профиля (old). Файлы не затронуты.",
+    );
+    expect(t("profile.unreadableNotice", { count: 2, folders: "a, b" })).toBe(
+      "Не удалось прочитать 2 папки профилей (a, b). Файлы не затронуты.",
+    );
+    expect(t("profile.unreadableNotice", { count: 5, folders: "a, b" })).toBe(
+      "Не удалось прочитать 5 папок профилей (a, b). Файлы не затронуты.",
+    );
+    expect(t("profile.unreadableNotice", { count: 21, folders: "a, b" })).toBe(
+      "Не удалось прочитать 21 папку профиля (a, b). Файлы не затронуты.",
+    );
   });
 
   it("falls back to English for a key missing in the current language, never crashing", () => {
@@ -237,6 +256,10 @@ describe("structured backend errors are worded in the current language", () => {
         new BackendError("x", "duplicate_name", { params: { name: "Survival" } }),
       ),
     ).toBe("A profile named “Survival” already exists.");
+    expect(describeCode("profile", "invalid_memory", { min: 1024, max: 12288 })).toBe(
+      "That amount of memory isn't safe for this computer. Choose between 1 GB and 12 GB.",
+    );
+    expect(describeCode("profile", "open_failed")).toBe("Windows couldn't open that folder.");
     setLocale("ru");
     expect(
       describeError(
@@ -246,6 +269,10 @@ describe("structured backend errors are worded in the current language", () => {
         }),
       ),
     ).toBe("Для Minecraft 1.20.1 нет версии Fabric.");
+    expect(describeCode("profile", "invalid_memory", { min: 1024, max: 12288 })).toBe(
+      "Такой объём памяти небезопасен для этого компьютера. Выбери от 1 ГБ до 12 ГБ.",
+    );
+    expect(describeCode("profile", "open_failed")).toBe("Windows не смог открыть эту папку.");
     expect(describeCode("launch", "needs_sign_in")).toBe(
       "Этому аккаунту нужно войти снова, чтобы играть.",
     );
@@ -386,6 +413,8 @@ describe("structured backend errors are worded in the current language", () => {
       "no_compatible_loader",
       "loader_version_not_offered",
       "invalid_name",
+      "invalid_memory",
+      "open_failed",
       "already_running",
       "busy",
       "remove_failed",

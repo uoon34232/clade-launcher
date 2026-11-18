@@ -15,6 +15,8 @@ interface Props {
   selectedProfileId: string | null;
   onSelectProfile: (id: string) => void;
   onCreateProfile: () => void;
+  onOpenProfileSettings: () => void;
+  onOpenProfileFolder: () => void;
   onPlay: () => void;
   /** What the primary button shows for the selected profile. */
   playState: PlayState;
@@ -43,6 +45,8 @@ export function LauncherDock(p: Props) {
           selectedId={p.selectedProfileId}
           onSelect={p.onSelectProfile}
           onCreate={p.onCreateProfile}
+          onOpenSettings={p.onOpenProfileSettings}
+          onOpenFolder={p.onOpenProfileFolder}
           onVerify={p.onVerifyProfile}
           verifyDisabled={p.verifyDisabled}
           onRemove={p.onRemoveProfile}

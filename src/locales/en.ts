@@ -71,6 +71,14 @@ export const en = {
   "profile.createFirst": "Create a profile",
   "profile.trigger": "Profile: {label}. Change profile",
   "profile.create": "+ Create profile",
+  "profile.settings": "Profile settings…",
+  "profile.openFolder": "Open profile folder",
+  "profile.openInstancesFolder": "Open profiles folder",
+  "profile.unreadableNotice": {
+    by: "count",
+    one: "1 profile folder couldn’t be read ({folders}). Its files were left untouched.",
+    other: "{count} profile folders couldn’t be read ({folders}). Their files were left untouched.",
+  } satisfies Message,
   "profile.verify": "Verify files",
   "profile.remove": "Remove from Clade…",
   "removeProfile.title": "Remove “{profile}” from Clade?",
@@ -80,6 +88,22 @@ export const en = {
   "removeProfile.working": "Removing…",
   "profile.vanilla": "Vanilla",
   "profile.modded": "Modded",
+
+  // ---- profile settings
+  "profileModal.details": "Profile",
+  "profileModal.saveName": "Save",
+  "profileModal.saving": "Saving…",
+  "profileModal.status": "Status",
+  "profileModal.statusReady": "Ready",
+  "profileModal.statusPending": "Needs setup",
+  "profileModal.playtime": "Playtime",
+  "profileModal.memoryDefault": "Launcher default",
+  "profileModal.memoryDefaultNote": "Follows Settings ({value} on this computer).",
+  "profileModal.files": "Files",
+  "profileModal.filesNoteVanilla":
+    "Worlds, resource packs, screenshots and options live in this profile’s folder.",
+  "profileModal.filesNoteModded":
+    "Place compatible mods in the mods folder inside this profile’s folder.",
 
   // ---- create profile
   "create.title": "New profile",
@@ -444,6 +468,9 @@ export const en = {
   "error.profile.remove_refused": "This profile can't be removed from here. Nothing was changed.",
   "error.profile.already_running": "This profile is starting or running. Close the game first.",
   "error.profile.busy": "This profile is being set up. Wait for it to finish.",
+  "error.profile.invalid_memory":
+    "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
+  "error.profile.open_failed": "Windows couldn't open that folder.",
 
   "error.catalog.unknown": "Could not load the version list.",
   "error.catalog.catalog_unavailable":

@@ -42,6 +42,12 @@ function setup(
     ),
     loaderOptions: vi.fn<ProfilesApi["loaderOptions"]>(() => Promise.resolve([])),
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("no"))),
+    rename: vi.fn<ProfilesApi["rename"]>(() => Promise.reject(new Error("not used in this test"))),
+    setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    openFolder: vi.fn<ProfilesApi["openFolder"]>(() => Promise.resolve()),
+    openInstancesFolder: vi.fn<ProfilesApi["openInstancesFolder"]>(() => Promise.resolve()),
     prepare: vi.fn<ProfilesApi["prepare"]>(() => new Promise<ProfilesSnapshot>(() => undefined)),
     cancelPrepare: vi.fn<ProfilesApi["cancelPrepare"]>(() => Promise.resolve()),
     remove: vi.fn<ProfilesApi["remove"]>((id) => {
@@ -109,7 +115,13 @@ describe("Remove from Clade", () => {
     await flush();
     const menu = await openMenu();
     const items = screen.getAllByRole("menuitem").map((i) => i.textContent);
-    expect(items).toEqual(["+ Create profile", "Verify files", "Remove from Clade…"]);
+    expect(items).toEqual([
+      "+ Create profile",
+      "Profile settings…",
+      "Open profile folder",
+      "Verify files",
+      "Remove from Clade…",
+    ]);
     // two separators: the list | the normal actions | the removal
     expect(menu.querySelectorAll('[data-slot="dropdown-menu-separator"]').length).toBe(2);
     expect(menu.querySelectorAll("button").length).toBe(0); // no per-row trash buttons

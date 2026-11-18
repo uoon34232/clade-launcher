@@ -64,9 +64,49 @@ describe("parsers validate backend data instead of trusting it", () => {
       playtimeSeconds: 0,
     });
     expect(s.profiles[2].loader).toBeNull();
+    expect(s.profiles[0].memoryMb).toBeNull();
     expect(s.selected).toBe("a");
     expect(s.totalPlaytimeSeconds).toBe(99720);
-    expect(parseProfiles(null)).toEqual({ profiles: [], selected: null, totalPlaytimeSeconds: 0 });
+    expect(s.unreadable).toEqual([]);
+    expect(parseProfiles(null)).toEqual({
+      profiles: [],
+      selected: null,
+      totalPlaytimeSeconds: 0,
+      unreadable: [],
+    });
+  });
+
+  it("profiles: validates memoryMb overrides and unreadable instance folder names", () => {
+    const mk = (id: string, memoryMb: unknown) => ({
+      id,
+      name: id,
+      minecraft: "1.21.4",
+      kind: "vanilla",
+      memoryMb,
+    });
+    const s = parseProfiles({
+      profiles: [
+        mk("pos", 6144),
+        mk("nul", null),
+        mk("zero", 0),
+        mk("neg", -512),
+        mk("nan", Number.NaN),
+        mk("inf", Number.POSITIVE_INFINITY),
+        mk("str", "4096"),
+      ],
+      unreadable: ["corrupt-a", "", 42, null, "broken-b"],
+    });
+    expect(s.profiles.map((p) => [p.id, p.memoryMb])).toEqual([
+      ["pos", 6144],
+      ["nul", null],
+      ["zero", null],
+      ["neg", null],
+      ["nan", null],
+      ["inf", null],
+      ["str", null],
+    ]);
+    expect(s.unreadable).toEqual(["corrupt-a", "broken-b"]);
+    expect(parseProfiles({ profiles: [], unreadable: "not-an-array" }).unreadable).toEqual([]);
   });
 
   it("catalog: only known kinds, and an unknown origin counts as stale", () => {
@@ -118,6 +158,10 @@ describe("calls", () => {
     tauri(false);
     await expect(profilesApi.list()).rejects.toThrow(/not available/);
     await expect(profilesApi.versionCatalog()).rejects.toThrow();
+    await expect(profilesApi.rename("survival", "Hardcore")).rejects.toThrow(/not available/);
+    await expect(profilesApi.setMemory("survival", 6144)).rejects.toThrow(/not available/);
+    await expect(profilesApi.openFolder("survival")).rejects.toThrow(/not available/);
+    await expect(profilesApi.openInstancesFolder()).rejects.toThrow(/not available/);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -137,12 +181,22 @@ describe("calls", () => {
       },
     };
     await profilesApi.create(req);
+    await profilesApi.rename("survival", "Hardcore");
+    await profilesApi.setMemory("survival", 6144);
+    await profilesApi.setMemory("survival", null);
+    await profilesApi.openFolder("survival");
+    await profilesApi.openInstancesFolder();
     expect(invoke.mock.calls).toEqual([
       ["list_profiles", undefined],
       ["select_profile", { id: "my-world" }],
       ["get_version_catalog", { force: true }],
       ["get_loader_options", { minecraft: "1.21.4" }],
       ["create_profile", { request: req }],
+      ["rename_profile", { id: "survival", name: "Hardcore" }],
+      ["set_profile_memory", { id: "survival", mb: 6144 }],
+      ["set_profile_memory", { id: "survival", mb: null }],
+      ["open_profile_folder", { id: "survival" }],
+      ["open_instances_folder", undefined],
     ]);
   });
 
