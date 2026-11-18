@@ -520,6 +520,73 @@ pub fn resume_window(app: &tauri::AppHandle) {
 #[cfg(not(windows))]
 pub fn resume_window(_app: &tauri::AppHandle) {}
 
+/// Disposable Chromium component-updater and telemetry directories inside `data/webview2/EBWebView`
+/// that serve no purpose in a local Tauri UI (DRM modules, speech models, URL blocklists, CRX
+/// caches, and metrics buffers — easily 60+ MB on a USB drive).
+const DISPOSABLE_EBWEBVIEW_DIRS: &[&str] = &[
+    "WidevineCdm",
+    "Speech Recognition",
+    "Subresource Filter",
+    "component_crx_cache",
+    "extensions_crx_cache",
+    "BrowserMetrics",
+    "ZxcvbnData",
+    "OptimizationHints",
+    "SafetyTips",
+    "MEIPreload",
+    "OnDeviceHeadSuggestModel",
+    "Crowd Deny",
+    "SSLErrorAssistant",
+];
+
+const DISPOSABLE_EBWEBVIEW_FILES: &[&str] = &["BrowserMetrics-spare.pma"];
+
+/// Removes disposable Chromium component-updater and telemetry bloat from `data/webview2/EBWebView`
+/// before WebView2 starts, while keeping `Default`, `Local State`, and compiled shader caches
+/// untouched. Never traverses symlinks or NTFS junctions.
+pub fn sweep_profile_bloat(root: &PortableRoot) {
+    use crate::portable::fsutil::{is_link, reject_links_between};
+
+    let eb = root.webview_data_dir().join("EBWebView");
+    if !eb.exists() {
+        return;
+    }
+    if reject_links_between(root.path(), &eb).is_err() || !matches!(is_link(&eb), Ok(false)) {
+        return;
+    }
+
+    for dir_name in DISPOSABLE_EBWEBVIEW_DIRS {
+        let target = eb.join(dir_name);
+        if target.exists() && matches!(is_link(&target), Ok(false)) {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+    }
+    for file_name in DISPOSABLE_EBWEBVIEW_FILES {
+        let target = eb.join(file_name);
+        if target.exists() && matches!(is_link(&target), Ok(false)) {
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+    let crash_reports = eb.join("Crashpad").join("reports");
+    if crash_reports.exists()
+        && reject_links_between(&eb, &crash_reports).is_ok()
+        && matches!(is_link(&crash_reports), Ok(false))
+    {
+        if let Ok(entries) = std::fs::read_dir(&crash_reports) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if matches!(is_link(&path), Ok(false)) {
+                    if path.is_dir() {
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,5 +1009,58 @@ mod tests {
         );
 
         std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+    }
+
+    #[test]
+    fn sweep_profile_bloat_removes_disposable_components_and_preserves_shaders_and_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(tmp.path().join("Clade"));
+        root.ensure_data_dir().unwrap();
+        let eb = root.webview_data_dir().join("EBWebView");
+
+        // Bloat that Chromium's component updater / metrics write to EBWebView.
+        for bloat_dir in [
+            "WidevineCdm/4.10.3112.0",
+            "Speech Recognition/1.15.0.1",
+            "Subresource Filter/Indexed Rules",
+            "component_crx_cache",
+            "BrowserMetrics",
+            "ZxcvbnData",
+        ] {
+            let dir = eb.join(bloat_dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("payload.bin"), vec![0u8; 64]).unwrap();
+        }
+        std::fs::write(eb.join("BrowserMetrics-spare.pma"), vec![0u8; 64]).unwrap();
+        let reports = eb.join("Crashpad").join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("minidump.dmp"), b"dump").unwrap();
+
+        // Useful state that must remain untouched for fast cold starts.
+        let shaders = eb.join("GrShaderCache");
+        let default_profile = eb.join("Default");
+        std::fs::create_dir_all(&shaders).unwrap();
+        std::fs::create_dir_all(&default_profile).unwrap();
+        std::fs::write(shaders.join("data_1"), b"shader").unwrap();
+        std::fs::write(default_profile.join("Preferences"), b"{}").unwrap();
+        std::fs::write(eb.join("Local State"), b"{}").unwrap();
+
+        sweep_profile_bloat(&root);
+
+        for gone in [
+            "WidevineCdm",
+            "Speech Recognition",
+            "Subresource Filter",
+            "component_crx_cache",
+            "BrowserMetrics",
+            "ZxcvbnData",
+            "BrowserMetrics-spare.pma",
+        ] {
+            assert!(!eb.join(gone).exists(), "{gone} should have been swept");
+        }
+        assert!(!reports.join("minidump.dmp").exists());
+        assert!(shaders.join("data_1").is_file());
+        assert!(default_profile.join("Preferences").is_file());
+        assert!(eb.join("Local State").is_file());
     }
 }

@@ -126,7 +126,9 @@ const stripTypeOnlyImports = (text) =>
 const sourceImports = (text, { isCss = false } = {}) => {
   const cleaned = isCss ? text : stripTypeOnlyImports(text);
   const found = new Set();
-  const specifier = /(?:from\s+|import\s*\(\s*|import\s+|@import\s+(?:url\()?\s*)["']([^"']+)["']/g;
+  const specifier = isCss
+    ? /(?:@import\s+(?:url\()?\s*|url\(\s*)["']([^"']+)["']/g
+    : /(?:from\s+|import\s*\(\s*|import\s+|@import\s+(?:url\()?\s*)["']([^"']+)["']/g;
   for (const m of cleaned.matchAll(specifier)) found.add(m[1]);
   return found;
 };

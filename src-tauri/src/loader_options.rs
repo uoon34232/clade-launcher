@@ -224,7 +224,7 @@ pub async fn all_options<F: Fetcher>(
     mc: &McVersion,
     now: i64,
 ) -> Vec<LoaderOptions> {
-    let (fabric, forge, neoforge, quilt) = futures::join!(
+    let (fabric, forge, neoforge, quilt) = tokio::join!(
         options_for(fetcher, cache_dir, LoaderKind::Fabric, mc, now),
         options_for(fetcher, cache_dir, LoaderKind::Forge, mc, now),
         options_for(fetcher, cache_dir, LoaderKind::NeoForge, mc, now),

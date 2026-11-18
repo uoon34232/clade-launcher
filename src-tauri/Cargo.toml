@@ -13,7 +13,7 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "clade_launcher_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -25,13 +25,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.21"
 url = "2.5.8"
-tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
-futures = "0.3.34"
+tracing = { version = "0.1.44", features = ["release_max_level_info"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
-zip = "8.6.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util", "net"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream"] }
@@ -46,9 +46,27 @@ socket2 = "0.6.5"
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = 3
+opt-level = "s"
 panic = "abort"
 strip = true
+
+# Keep full speed optimization on CPU-bound hashing, decompression, and vault crypto crates.
+[profile.release.package.argon2]
+opt-level = 3
+[profile.release.package.blake2]
+opt-level = 3
+[profile.release.package.chacha20poly1305]
+opt-level = 3
+[profile.release.package.crc32fast]
+opt-level = 3
+[profile.release.package.flate2]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.sha1]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.5.2"

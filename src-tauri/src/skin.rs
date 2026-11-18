@@ -220,7 +220,7 @@ impl SkinCache {
         if waiting.is_empty() {
             return false;
         }
-        let all = futures::future::join_all(waiting.iter().map(|u| self.sync(fetcher, u)));
+        let all = futures_util::future::join_all(waiting.iter().map(|u| self.sync(fetcher, u)));
         let _ = tokio::time::timeout(budget, all).await;
         true
     }

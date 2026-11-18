@@ -116,6 +116,11 @@ fn the_webview_caps_caches_and_v8_heap_while_retaining_wry_default_disabled_feat
         "--media-cache-size=4194304",
         "--js-flags=--max-old-space-size=128",
         "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--disable-speech-api",
+        "--no-pings",
     ] {
         assert!(
             tokens.contains(&flag),

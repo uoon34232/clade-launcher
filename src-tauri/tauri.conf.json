@@ -23,7 +23,7 @@
         "fullscreen": false,
         "decorations": false,
         "backgroundColor": "#F3EDE3",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disk-cache-size=16777216 --media-cache-size=4194304 --js-flags=--max-old-space-size=128 --disable-background-networking",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,OptimizationHints,MediaRouter,Translate,SubresourceFilter,AutofillServerCommunication,CertificateTransparencyComponentUpdater --disk-cache-size=16777216 --media-cache-size=4194304 --js-flags=--max-old-space-size=128 --disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --disable-speech-api --no-pings",
         "create": false
       }
     ],
