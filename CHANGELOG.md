@@ -14,7 +14,7 @@ The first public build is planned as a preview release rather than `1.0.0`. Brea
 
 ## [0.1.0]
 
-Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is not supported by this Preview. Clade is not code-signed, so Windows SmartScreen may warn about `Clade.exe`, and Windows 11 Smart App Control in enforcement mode may block it completely, with no "Run anyway" option. Please do not disable or bypass Windows security features to run Clade. Report bugs in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose) and never post passwords, sign-in codes, tokens or vault files.
+Before you run it: the Preview targets **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`)**. Clade is not code-signed, so Windows SmartScreen may warn about `Clade.exe`, and Windows 11 Smart App Control in enforcement mode may block it completely, with no "Run anyway" option. Please do not disable or bypass Windows security features to run Clade. Report bugs in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose) and never post passwords, sign-in codes, tokens or vault files.
 
 ### Added
 
@@ -47,6 +47,8 @@ Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is no
 - Preparing, verifying and launching a profile require a ready active account; without one the main button reads "Sign in to continue". Creating and browsing profiles still works.
 - "Forgot passphrase?" with "Start fresh" on every passphrase unlock: the old encrypted sign-in store is archived under `data/retired-vaults/` (nothing is deleted), every account signs in again with a new passphrase, and profiles, worlds, playtime and settings are kept. It does not sign you out at Microsoft.
 - "Remove from Clade" takes a profile out of the list and keeps its whole folder, worlds included, under `instances/.removed/`. Nothing is deleted.
+- Per-profile settings and folder actions: rename any profile without moving or renaming its folder, set a per-profile game memory override in MiB (or follow the global / automatic setting), open the profile's `game/` folder directly from Clade, and surface unreadable profile folders in `instances/` as warnings without touching their files.
+- Windows 10 (64-bit) (`x64`) support alongside Windows 11 (64-bit) (`x64`): automatic Win32 AppContainer read-and-execute ACL setup (`S-1-15-2-1` and `S-1-15-2-2`) on `runtimes/webview2/` for NTFS folders without administrator rights, Evergreen WebView2 fallback on non-ACL `FAT32`/`exFAT` volumes, and automatic fallback to the warm opaque paper window surface where Windows 11's DWM Mica backdrop is unavailable.
 - The dock's profile button shows only the profile's name, and the profile and account menus are denser.
 - Exported diagnostics redact the known Minecraft profile names and UUIDs.
 - Windows QA tooling: a Windows Sandbox harness (offline, online, online with GPU), an environment report and a before/after portability audit.
@@ -54,7 +56,7 @@ Before you run it: the Preview targets **Windows 11 x64** only. Windows 10 is no
 
 ### Known limitations
 
-- Windows 11 x64 only. Windows 10 and other platforms are not supported by this Preview.
+- 64-bit Windows 10 and Windows 11 (`x64`) only. On Windows 10, FAT32 and exFAT drives do not support persistent ACLs, so Clade cannot grant the bundled WebView2 runtime's AppContainer permissions on those drives and falls back to the PC's installed Evergreen WebView2 runtime; prefer NTFS if a clean Windows 10 PC may not have WebView2 installed.
 - Not code-signed. SmartScreen may warn, and Smart App Control in enforcement mode may block `Clade.exe` outright.
 - No self-update yet: download a new release to update.
 - Skin and cape changes are new and have not yet been tried against a real Minecraft account, so report anything odd.

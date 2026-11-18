@@ -30,7 +30,7 @@ A profile is one Minecraft setup: a version, its worlds, its settings and, if yo
 
 Create a **Vanilla** profile for any Minecraft version Mojang has published, from the newest release back to the old betas. Or create a **Modded** profile and choose Fabric, Forge, NeoForge or Quilt. Clade installs the version and the loader for you. The mods themselves are yours to add: Clade never downloads or manages them.
 
-Profiles are completely separate. Keeping a heavily modded world next to a clean Vanilla one is safe.
+Profiles are completely separate. Keeping a heavily modded world next to a clean Vanilla one is safe. Each profile can be renamed at any time without moving or renaming its folder, given its own game memory override (or left to follow your global setting), and opened straight to its `game/` folder from Clade. If a folder inside `instances/` ever has a damaged or unreadable `instance.json`, Clade leaves its files untouched and shows a warning so it never disappears silently while your other profiles keep working.
 
 <p align="center"><img src="docs/media/create-profile.gif" alt="Creating a profile: choosing Vanilla or Modded, a Minecraft version and a loader" width="720"></p>
 
@@ -60,7 +60,7 @@ Clade speaks English and Russian. Change the language in Settings and the whole 
 
 Clade is in active pre-release development.
 
-Implemented today: creating profiles, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game, removing a profile from Clade without deleting its files, and the English and Russian interface.
+Implemented today: creating and renaming profiles, per-profile memory overrides, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game, removing a profile from Clade without deleting its files, surfacing unreadable profile folders as warnings without touching their files, and the English and Russian interface.
 
 Sign-in and launching have been verified with a real Minecraft account on a development PC, for Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and the clean-machine validation of a release package is still to do. There is no stable release.
 
@@ -72,8 +72,9 @@ The first portable preview will be published in [GitHub Releases](https://github
 
 ## Requirements
 
-- **Windows 11, 64-bit (x64).** This is the only platform the first Preview targets. Windows 10 is not supported by this Preview.
+- **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`).**
 - Nothing to install: extract the ZIP to a normal folder and run `Clade.exe`. No administrator rights are needed.
+- **Windows 10 notes:** on an NTFS folder, Clade automatically grants the AppContainer read-and-execute permissions its bundled WebView2 runtime needs on `runtimes/webview2/` (using Win32 security APIs, without administrator rights). FAT32 and exFAT drives cannot store those permissions, so on Windows 10 Clade falls back to the PC's installed Evergreen WebView2 runtime on those drives; prefer NTFS for a removable drive meant for a clean Windows 10 PC that might not have WebView2 installed. Where Windows 11 uses the DWM Mica window backdrop, Windows 10 uses Clade's warm opaque paper window look.
 
 ## The Preview is not code-signed
 

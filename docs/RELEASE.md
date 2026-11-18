@@ -78,41 +78,48 @@ runtime cannot pass validation, so it cannot be released.)
 
 ### WebView2 Fixed Version: where it can and cannot run
 
-What Microsoft documents for the Fixed Version Runtime (WebView2 distribution guide), and what that means for a
-portable folder. None of it has been verified on those machines by this project yet (see the matrix in
-section 9); this is a reading of the documentation, not a test result.
+What Microsoft documents for the Fixed Version Runtime (WebView2 distribution guide), and how Clade handles each
+environment at startup. Clean-machine verification is tracked in the matrix in section 9.
 
-- **Windows 10, unpackaged Win32 app, Fixed Version 120 or later:** Microsoft documents that the runtime folder
-  must grant read-and-execute, with inheritance, to the AppContainer groups `ALL APPLICATION PACKAGES`
-  (S-1-15-2-1) and `ALL RESTRICTED APPLICATION PACKAGES` (S-1-15-2-2), for example
-  `icacls <runtime folder> /grant *S-1-15-2-2:(OI)(CI)(RX)` and the same for `*S-1-15-2-1`. Without it the
-  runtime may fail to start. Windows 11 is not described as needing this.
-- **Network / UNC paths:** the Fixed Version runtime must not be assumed to work from a network location.
+- **Windows 10 (`build < 22000`), unpackaged Win32 app, Fixed Version 120 or later:** Microsoft documents that the
+  runtime folder must grant inheritable read-and-execute permissions to the AppContainer SIDs
+  `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) and `ALL RESTRICTED APPLICATION PACKAGES` (`S-1-15-2-2`). At startup,
+  Clade checks the OS build (`RtlGetVersion`) and the volume flags (`GetVolumeInformationW` for
+  `FILE_PERSISTENT_ACLS`). When `runtimes/webview2/` is on an ACL-capable volume (such as NTFS), Clade inspects its
+  DACL through Win32 security APIs (`GetNamedSecurityInfoW`, `SetEntriesInAclW`, `SetNamedSecurityInfoW` — never
+  spawning `icacls.exe`, and needing no administrator rights on a normal user-owned folder) and writes those
+  inheritable RX grants only if they are missing. Windows 11 (`build >= 22000`) does not require this step.
+- **Windows 10 on non-ACL volumes (`FAT32` / `exFAT`):** those file systems lack `FILE_PERSISTENT_ACLS`, so the
+  AppContainer permissions cannot be stored on the volume. When `FILE_PERSISTENT_ACLS` is absent on Windows 10 (or if
+  applying the ACL fails), Clade falls back to the PC's installed Evergreen WebView2 runtime if one is present, and
+  otherwise still attempts the bundled runtime as a last resort.
+- **Network / UNC paths:** Chromium's Fixed Version sandbox refuses to start renderer processes from SMB/UNC shares;
+  Clade logs a warning and falls back to the system WebView2 runtime, and UNC paths remain unsupported as a portable
+  root.
 - **Extraction:** the CAB must be expanded with `expand`, not Explorer (the release script does).
 - **Security software** that rewrites file ACLs can break the runtime.
 
-| Row | Environment                                 | Expected behaviour of Clade's current design                                                                                                                                                                                                    |
-| --- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A   | Windows 11, local NTFS                      | Supported by design; the primary target. To be confirmed in the clean VM.                                                                                                                                                                       |
-| B   | Windows 11, removable drive (NTFS or exFAT) | No documented requirement beyond A. Expected to work, with slower I/O. To be confirmed.                                                                                                                                                         |
-| C   | Windows 10, NTFS, user-owned folder         | An extracted folder inherits its parent's ACL, which normally lacks the AppContainer groups. **The documented requirement is not met by the package and Clade does not set it; expected to fail or be unreliable on Windows 10 until handled.** |
-| D   | Windows 10, FAT32 / exFAT removable drive   | These file systems have no ACLs, so the documented permissions cannot be granted at all. Whether the runtime starts there is **not documented by Microsoft and unknown here**. Treat as unsupported until tested.                               |
-| E   | UNC / network path                          | Not supported (see above).                                                                                                                                                                                                                      |
+| Row | Environment                                 | Expected behaviour of Clade's current design                                                                                                                                                                                               |
+| --- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A   | Windows 11, local NTFS                      | Supported by design (`webview=Bundled`, no ACL grant needed). To be confirmed in the clean VM.                                                                                                                                             |
+| B   | Windows 11, removable drive (NTFS or exFAT) | Supported by design (`webview=Bundled` on both NTFS and exFAT, with slower removable-drive I/O). To be confirmed.                                                                                                                          |
+| C   | Windows 10, NTFS, user-owned folder         | Supported. `FILE_PERSISTENT_ACLS` is present; Clade grants the inheritable RX ACEs for `S-1-15-2-1` and `S-1-15-2-2` on `runtimes/webview2` automatically (idempotently, without elevation) and runs `webview=Bundled`. To be confirmed.   |
+| D   | Windows 10, FAT32 / exFAT removable drive   | `FILE_PERSISTENT_ACLS` is absent, so Clade falls back to the PC's Evergreen WebView2 runtime when installed (`webview=System`) and tries the bundled runtime only if no Evergreen runtime exists. Recommend NTFS for clean Windows 10 PCs. |
+| E   | UNC / network path                          | Unsupported for Fixed Version sandbox and portable folder locking/atomic writes; Clade logs a warning and falls back to the system WebView2 runtime.                                                                                       |
 
-Conclusions, without a speculative workaround:
+Design notes:
 
-- **Windows 10 support likely needs an application change**: Clade would have to apply the two ACL grants to
-  `runtimes/webview2` (at startup or in a first-run step). That writes ACLs, may need rights that a restricted
-  account or a USB stick does not give, and changes the portable contract. It is **not implemented** and is a
-  **release blocker for claiming Windows 10 support**. Until it is decided, the README and release notes must not
-  promise Windows 10.
-- **FAT/exFAT is a real incompatibility with the documented ACL requirement** on Windows 10. It is not a
-  Clade-specific bug and Clade cannot fix it.
-- The bundled-runtime contract is **not weakened**: a release still requires the bundled runtime and a
-  `webview=Bundled` smoke test. A fallback to an installed runtime on Windows 10 would be a deliberate product
-  decision, not part of this pipeline.
-- A UNC path also contradicts the folder lock and atomic-write assumptions; refusing or warning about it would be a
-  later application change.
+- **Windows 10 NTFS needs no installer or elevation**: the Win32 DACL check on `runtimes/webview2` runs in-process
+  only on Windows 10 (`build < 22000`) when `FILE_PERSISTENT_ACLS` is set, touches nothing outside `runtimes/webview2`,
+  and does nothing once both AppContainer RX ACEs are already present.
+- **FAT32/exFAT on Windows 10 is a real filesystem limit**: persistent ACLs do not exist on those volumes, which Clade
+  cannot change. Falling back to an installed Evergreen WebView2 runtime keeps exFAT USB drives working on ordinary
+  Windows 10 PCs that already have Edge/WebView2, while NTFS remains recommended when carrying Clade to a clean
+  Windows 10 machine that may have no WebView2 installed.
+- **The bundled-runtime release contract is unchanged**: a release package must ship `runtimes/webview2` and pass the
+  `webview=Bundled` smoke test on local NTFS.
+- **UNC paths remain unsupported**: Clade warns in the log and avoids pointing the Fixed Version sandbox at a UNC
+  share, and portable folder locking and atomic renames still require a local or removable drive.
 
 ## 3. Versions and tags
 
@@ -208,17 +215,18 @@ Tests: `pnpm exec vitest run scripts` (also part of `pnpm check`).
 
 ## 9. Manual release validation (not automated)
 
-Run on the downloaded draft ZIP before publishing, on a **clean Windows 11 virtual machine** with no Java and
-no system-wide WebView2 assumed. Then repeat the start-up checks on every row of the portability matrix (section 2)
-that the release claims to support; a row that was not tested must be listed as untested in the release notes.
+Run on the downloaded draft ZIP before publishing, on **clean Windows 11 x64 and Windows 10 x64 virtual machines**
+with no Java and no system-wide WebView2 assumed (plus an Evergreen WebView2 check for Row D on Windows 10 exFAT).
+Repeat the start-up checks on every row of the portability matrix (section 2) that the release claims to support; a
+row that was not tested must be listed as untested in the release notes.
 
-| Matrix row                                                                      | Tested | Result |
-| ------------------------------------------------------------------------------- | ------ | ------ |
-| A. Windows 11, local NTFS                                                       | [ ]    |        |
-| B. Windows 11, removable drive                                                  | [ ]    |        |
-| C. Windows 10, NTFS, user-owned folder (check the AppContainer ACL requirement) | [ ]    |        |
-| D. Windows 10, FAT32/exFAT removable drive                                      | [ ]    |        |
-| E. UNC / network path (expected unsupported; confirm the failure is clear)      | [ ]    |        |
+| Matrix row                                                                                                      | Tested | Result |
+| --------------------------------------------------------------------------------------------------------------- | ------ | ------ |
+| A. Windows 11, local NTFS                                                                                       | [ ]    |        |
+| B. Windows 11, removable drive (NTFS and exFAT)                                                                 | [ ]    |        |
+| C. Windows 10, NTFS, user-owned folder (confirm automatic `S-1-15-2-1` / `S-1-15-2-2` RX ACL grant + `Bundled`) | [ ]    |        |
+| D. Windows 10, FAT32/exFAT removable drive (confirm Evergreen WebView2 fallback when installed)                 | [ ]    |        |
+| E. UNC / network path (unsupported; confirm warning log and system WebView2 fallback)                           | [ ]    |        |
 
 Checks:
 
@@ -255,7 +263,10 @@ Checks:
 - `LICENSE` is the canonical, unmodified Apache License 2.0. The `[yyyy] [name of copyright owner]` text in its
   appendix is part of the standard licence text (instructions for applying it), not a field to fill in, and it is
   not an open decision.
-- Windows 10 is not claimed as supported: see "WebView2 Fixed Version: where it can and cannot run".
+- On Windows 10, FAT32 and exFAT drives do not support persistent ACLs (`FILE_PERSISTENT_ACLS`), so Clade cannot
+  grant the AppContainer permissions the bundled Fixed Version WebView2 runtime needs there; on those drives Clade
+  falls back to an installed Evergreen WebView2 runtime when present (see "WebView2 Fixed Version: where it can and
+  cannot run"). Removable drives meant for clean Windows 10 PCs without WebView2 should be formatted as NTFS.
 - No SBOM or build-provenance attestation is produced yet.
 - The real tag workflow cannot be exercised without creating a tag and a draft release; its structure is verified by
   static tests, and its first real run is a manual validation step.

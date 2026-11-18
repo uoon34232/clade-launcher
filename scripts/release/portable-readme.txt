@@ -4,7 +4,7 @@ Clade Launcher {{VERSION}} (portable)
 Clade is a portable launcher for Minecraft: Java Edition on Windows.
 
 Requirements
- - Windows 11, 64-bit (x64). This Preview targets nothing else; Windows 10 is not supported by this Preview.
+ - Windows 10 (64-bit) or Windows 11 (64-bit) (x64).
  - Nothing needs to be installed and no administrator rights are needed.
 
 To start
@@ -26,7 +26,11 @@ Your data
  - Close Clade before unplugging a drive that holds it.
 
 Tips
- - Use an NTFS or exFAT drive. FAT32 cannot hold files larger than 4 GB.
+ - Use an NTFS or exFAT drive. FAT32 cannot hold files larger than 4 GB. On Windows 10, an NTFS folder
+   uses Clade's bundled WebView2 directly, whereas an exFAT drive uses the PC's installed WebView2
+   runtime (so prefer NTFS if a Windows 10 PC may not have WebView2 installed).
+ - On Windows 10, where Windows 11's Mica backdrop is unavailable, Clade uses its opaque warm paper
+   window look.
  - For the best compatibility with older Minecraft and Java versions, keep the folder in a reasonably
    short path that uses only English letters, digits and plain punctuation (for example D:\Clade-Launcher).
  - Microsoft may ask you to sign in again, on any computer.
