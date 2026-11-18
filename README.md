@@ -62,13 +62,18 @@ Clade is in active pre-release development.
 
 Implemented today: creating and renaming profiles, per-profile memory overrides, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game, removing a profile from Clade without deleting its files, surfacing unreadable profile folders as warnings without touching their files, and the English and Russian interface.
 
-Sign-in and launching have been verified with a real Minecraft account on a development PC, for Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and the clean-machine validation of a release package is still to do. There is no stable release.
+Sign-in, Java provisioning, launching and zero-footprint portability have been verified with a real Microsoft/Minecraft account on Windows 11 x64, covering Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and there is no stable `1.0` release yet.
 
 ## Download
 
-No public build has been released yet.
+Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
 
-The first portable preview will be published in [GitHub Releases](https://github.com/uoon34232/clade-launcher/releases) once the release package has passed clean-machine testing.
+To verify the download in PowerShell against the `.sha256` file published next to the ZIP:
+
+```powershell
+(Get-FileHash .\Clade-Launcher-Portable.zip -Algorithm SHA256).Hash.ToLower()
+Get-Content .\Clade-Launcher-Portable.zip.sha256
+```
 
 ## Requirements
 
