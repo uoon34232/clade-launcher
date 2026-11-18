@@ -1279,7 +1279,7 @@ mod tests {
                         .map_err(|e| FetchError::Local(e.to_string()))?;
                         sink.chunk(&[1u8; 64])
                             .map_err(|e| FetchError::Local(e.to_string()))?;
-                        self.slow_started.notify_waiters();
+                        self.slow_started.notify_one();
                         tokio::time::sleep(Duration::from_secs(60)).await;
                         Ok(())
                     } else if url.as_str().ends_with("fail.jar") {
