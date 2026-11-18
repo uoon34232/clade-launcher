@@ -4,9 +4,12 @@ Clade Launcher is still in pre-release development. Security issues are taken se
 
 ## Supported versions
 
-There is no stable public release yet.
+Clade is in pre-release (`0.x`). Security fixes are applied to `main` and shipped in the latest preview release; older pre-releases are not maintained separately.
 
-Until the first preview is published, security fixes apply to the current development version only. After releases begin, this document will be updated with an explicit supported-version policy.
+| Version                             | Supported |
+| ----------------------------------- | --------- |
+| `0.1.x` (latest preview) and `main` | Yes       |
+| Older pre-releases                  | No        |
 
 ## Reporting a vulnerability
 
@@ -14,9 +17,7 @@ Ordinary bugs belong in [GitHub Issues](https://github.com/uoon34232/clade-launc
 
 Please do **not** publish secrets, access tokens, refresh tokens, vault contents, personal account data, or exploit details in a public issue.
 
-If GitHub private vulnerability reporting is enabled for this repository, use the repository's **Security** tab to report the issue privately.
-
-If no private reporting channel is available yet, open a minimal public issue requesting a private security contact **without including sensitive details**.
+Report security issues privately through **[GitHub Private Vulnerability Reporting](https://github.com/uoon34232/clade-launcher/security/advisories/new)** (**Security → Report a vulnerability**).
 
 Useful information includes:
 
