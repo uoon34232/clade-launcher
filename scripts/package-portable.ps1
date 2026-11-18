@@ -108,7 +108,7 @@ if (-not $SkipBuild) {
     $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE) { throw 'pnpm install failed' }
-    pnpm tauri build --no-bundle --target $target -- -- --locked --config $cargoCfg
+    pnpm tauri build --no-bundle --target $target '--' --locked --config $cargoCfg
     if ($LASTEXITCODE) { throw 'tauri build failed' }
   } finally {
     Remove-Item -LiteralPath Env:CFLAGS -ErrorAction SilentlyContinue
