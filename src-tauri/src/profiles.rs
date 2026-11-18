@@ -383,6 +383,105 @@ fn check_name_and_problems(
     Ok(())
 }
 
+async fn verify_version_and_loader<G: Fetcher, L: Fetcher>(
+    global: &G,
+    loaders: &L,
+    root: &PortableRoot,
+    minecraft: &McVersion,
+    profile: &Profile,
+    now: i64,
+) -> Result<(), ProfileError> {
+    let catalog = mc_catalog::load(global, &manifest_cache(root), now, false)
+        .await
+        .map_err(|e| {
+            tracing::info!(error = %e, "the Minecraft version list could not be checked");
+            ProfileError::CannotVerify(None)
+        })?;
+    if !catalog.catalog.contains(minecraft) {
+        return Err(ProfileError::UnknownMinecraft(minecraft.to_string()));
+    }
+
+    if let Profile::Modded {
+        loader,
+        loader_version,
+    } = profile
+    {
+        let opts =
+            loader_options::options_for(loaders, &catalogs_dir(root), *loader, minecraft, now)
+                .await;
+        let name = loader.name();
+        match opts.status {
+            Status::Unavailable => {
+                return Err(ProfileError::CannotVerify(Some((
+                    name,
+                    minecraft.to_string(),
+                ))))
+            }
+            Status::None => {
+                return Err(ProfileError::NoCompatibleLoader {
+                    loader: name,
+                    minecraft: minecraft.to_string(),
+                })
+            }
+            Status::Ok => {}
+        }
+        if let LoaderVersionSpec::Pinned { version } = loader_version {
+            if !opts.versions.iter().any(|o| &o.version == version) {
+                return Err(ProfileError::LoaderVersionNotOffered {
+                    loader: name,
+                    version: version.to_string(),
+                    minecraft: minecraft.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strips a trailing `" (N)"` (`N >= 2`) from `name` so duplicating `"Survival (2)"` yields
+/// `"Survival (3)"` rather than `"Survival (2) (2)"`.
+fn strip_copy_suffix(name: &str) -> &str {
+    let trimmed = name.trim();
+    if let Some(open) = trimmed.rfind(" (") {
+        let rest = &trimmed[open + 2..];
+        if let Some(digits) = rest.strip_suffix(')') {
+            if !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.parse::<u32>().is_ok_and(|n| n >= 2)
+            {
+                let stem = trimmed[..open].trim_end();
+                if !stem.is_empty() {
+                    return stem;
+                }
+            }
+        }
+    }
+    trimmed
+}
+
+/// Allocates the next conflict-free `"Name (2)"`, `"Name (3)"`, ... within the 64-character limit.
+pub(crate) fn next_duplicate_name(
+    source_name: &str,
+    listing: &crate::instances::Listing,
+) -> String {
+    let stem = strip_copy_suffix(source_name);
+    for n in 2u32..=9_999 {
+        let suffix = format!(" ({n})");
+        let max_stem = 64usize.saturating_sub(suffix.chars().count());
+        let head: String = stem.chars().take(max_stem).collect();
+        let head = head.trim_end();
+        let candidate = if head.is_empty() {
+            format!("Profile{suffix}")
+        } else {
+            format!("{head}{suffix}")
+        };
+        if check_name_and_problems(listing, &candidate).is_ok() {
+            return candidate;
+        }
+    }
+    "Profile (copy)".to_owned()
+}
+
 /// Creates a profile after verifying it against the official catalogs. Returns the new snapshot
 /// with the new profile selected.
 pub async fn create_verified<G: Fetcher, L: Fetcher>(
@@ -403,59 +502,16 @@ pub async fn create_verified<G: Fetcher, L: Fetcher>(
     .await
     .map_err(|e| ProfileError::Io(std::io::Error::other(e.to_string())))??;
 
-    // 2. The Minecraft version must be in Mojang's official catalog (live or saved).
-    let catalog = mc_catalog::load(global, &manifest_cache(root), now, false)
-        .await
-        .map_err(|e| {
-            tracing::info!(error = %e, "the Minecraft version list could not be checked");
-            ProfileError::CannotVerify(None)
-        })?;
-    if !catalog.catalog.contains(&request.minecraft) {
-        return Err(ProfileError::UnknownMinecraft(
-            request.minecraft.to_string(),
-        ));
-    }
-
-    // 3. Modded: the loader version must be compatible according to the loader's official catalog.
-    if let Profile::Modded {
-        loader,
-        loader_version,
-    } = &request.profile
-    {
-        let opts = loader_options::options_for(
-            loaders,
-            &catalogs_dir(root),
-            *loader,
-            &request.minecraft,
-            now,
-        )
-        .await;
-        let name = loader.name();
-        match opts.status {
-            Status::Unavailable => {
-                return Err(ProfileError::CannotVerify(Some((
-                    name,
-                    request.minecraft.to_string(),
-                ))))
-            }
-            Status::None => {
-                return Err(ProfileError::NoCompatibleLoader {
-                    loader: name,
-                    minecraft: request.minecraft.to_string(),
-                })
-            }
-            Status::Ok => {}
-        }
-        if let LoaderVersionSpec::Pinned { version } = loader_version {
-            if !opts.versions.iter().any(|o| &o.version == version) {
-                return Err(ProfileError::LoaderVersionNotOffered {
-                    loader: name,
-                    version: version.to_string(),
-                    minecraft: request.minecraft.to_string(),
-                });
-            }
-        }
-    }
+    // 2 & 3. Official Minecraft and (when Modded) loader catalog checks.
+    verify_version_and_loader(
+        global,
+        loaders,
+        root,
+        &request.minecraft,
+        &request.profile,
+        now,
+    )
+    .await?;
 
     // 4. Re-check, create (isolated, Pending), persist selection and snapshot off Tokio workers.
     let root_for_create = root.clone();
@@ -472,6 +528,71 @@ pub async fn create_verified<G: Fetcher, L: Fetcher>(
     })
     .await
     .map_err(|e| ProfileError::Io(std::io::Error::other(e.to_string())))?
+}
+
+pub struct VersionUpdate<'a> {
+    pub id: &'a str,
+    pub minecraft: &'a str,
+    pub loader_version: Option<LoaderVersionSpec>,
+}
+
+/// Verifies and updates an existing profile's Minecraft (and optional loader) version while
+/// keeping its `Vanilla` vs `Modded` type and all `game/` files intact.
+pub async fn set_version_verified<G: Fetcher, L: Fetcher>(
+    global: &G,
+    loaders: &L,
+    root: &PortableRoot,
+    locks: &Arc<ProfileLocks>,
+    selected: Option<InstanceId>,
+    update: VersionUpdate<'_>,
+    now: i64,
+) -> Result<ProfilesDto, CodedError> {
+    let iid =
+        InstanceId::new(update.id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let mc = McVersion::new(update.minecraft).map_err(|e| {
+        CodedError::new("unknown_minecraft", e.to_string())
+            .with(param("minecraft", update.minecraft.to_owned()))
+    })?;
+    let held = claim_profile_lock(locks, &iid)?;
+
+    let root_read = root.clone();
+    let iid_read = iid.clone();
+    let current = tokio::task::spawn_blocking(move || {
+        InstanceStore::new(&root_read)
+            .get(&iid_read)
+            .map_err(|e| ProfileError::Instance(e).coded())
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile read task failed: {e}")))??;
+
+    let target_profile = match (&current.profile, &update.loader_version) {
+        (Profile::Vanilla, None) => Profile::Vanilla,
+        (Profile::Vanilla, Some(_)) => {
+            return Err(CodedError::storage(
+                "a Vanilla profile cannot specify a loader version",
+            ))
+        }
+        (Profile::Modded { loader, .. }, spec) => Profile::Modded {
+            loader: *loader,
+            loader_version: spec.clone().unwrap_or(LoaderVersionSpec::Auto),
+        },
+    };
+
+    verify_version_and_loader(global, loaders, root, &mc, &target_profile, now)
+        .await
+        .map_err(|e| e.coded())?;
+
+    let root_write = root.clone();
+    let loader_version = update.loader_version;
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        InstanceStore::new(&root_write)
+            .set_version(&iid, mc, loader_version)
+            .map_err(|e| ProfileError::Instance(e).coded())?;
+        snapshot(&root_write, selected).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile version task failed: {e}")))?
 }
 
 pub(crate) struct HeldProfileLock {
@@ -613,6 +734,47 @@ pub(crate) async fn set_profile_memory_inner(
     .map_err(|e| CodedError::storage(format!("profile memory task failed: {e}")))?
 }
 
+pub(crate) async fn duplicate_profile_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    id: &str,
+    now: i64,
+) -> Result<ProfilesDto, CodedError> {
+    let _guard = state.create_lock.lock().await;
+    let iid = InstanceId::new(id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let held = claim_profile_lock(&state.locks, &iid)?;
+    let root = state.root.clone();
+    let settings_for_dup = settings.clone();
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        let store = InstanceStore::new(&root);
+        let source = store
+            .get(&iid)
+            .map_err(|e| ProfileError::Instance(e).coded())?;
+        let listing = store.list().map_err(CodedError::storage)?;
+        let copy_name = next_duplicate_name(&source.name, &listing);
+        let created = store
+            .duplicate(&iid, &copy_name, now)
+            .map_err(|e| match e {
+                InstanceError::NotFound(_) | InstanceError::BadId(_) => {
+                    CodedError::new("not_found", e.to_string())
+                }
+                _ => CodedError::new("duplicate_failed", e.to_string()),
+            })?;
+        if let Err(e) = settings_for_dup.set_last_instance(Some(created.id.clone())) {
+            tracing::warn!(error = %e, "could not remember the duplicated profile as selected");
+        }
+        snapshot(&root, Some(created.id)).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| {
+        CodedError::new(
+            "duplicate_failed",
+            format!("profile duplicate task failed: {e}"),
+        )
+    })?
+}
+
 // ------------------------------------------------------------------------------ Tauri commands
 
 fn fetcher(f: &Result<HttpFetcher, String>) -> Result<&HttpFetcher, CodedError> {
@@ -711,6 +873,40 @@ pub async fn set_profile_memory(
     mb: Option<u32>,
 ) -> Result<ProfilesDto, CodedError> {
     set_profile_memory_inner(&state, &settings, &id, mb).await
+}
+
+#[tauri::command]
+pub async fn set_profile_version(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+    minecraft: String,
+    loader_version: Option<LoaderVersionSpec>,
+) -> Result<ProfilesDto, CodedError> {
+    let (g, l) = (fetcher(&state.global)?, fetcher(&state.loaders)?);
+    set_version_verified(
+        g,
+        l,
+        &state.root,
+        &state.locks,
+        settings.last_instance(),
+        VersionUpdate {
+            id: &id,
+            minecraft: &minecraft,
+            loader_version,
+        },
+        now_unix(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn duplicate_profile(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+) -> Result<ProfilesDto, CodedError> {
+    duplicate_profile_inner(&state, &settings, &id, now_unix()).await
 }
 
 #[tauri::command]
@@ -1609,5 +1805,188 @@ mod tests {
             assert_eq!(err.code, "storage");
             fs::remove_dir(&inst_dir).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn set_version_verified_checks_catalogs_respects_locks_and_resets_ready() {
+        let e = env();
+        let locks = Arc::new(ProfileLocks::default());
+        let created = create_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &e.settings,
+            NewInstance::vanilla("Survival", "1.20.1").unwrap(),
+            100,
+        )
+        .await
+        .unwrap();
+        let id = created.profiles[0].id.clone();
+        let iid = InstanceId::new(&id).unwrap();
+        InstanceStore::new(&e.root)
+            .mark_ready(
+                &iid,
+                crate::versions::VersionId::new("1.20.1").unwrap(),
+                None,
+            )
+            .unwrap();
+
+        // Unknown Minecraft version is refused before touching the profile.
+        let bad = set_version_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &locks,
+            Some(iid.clone()),
+            VersionUpdate {
+                id: &id,
+                minecraft: "9.99.9",
+                loader_version: None,
+            },
+            101,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bad.code, "unknown_minecraft");
+        assert!(InstanceStore::new(&e.root).get(&iid).unwrap().is_ready());
+
+        // Running lock refuses the change with `already_running`.
+        locks.claim(&id, Activity::Launching).unwrap();
+        let locked = set_version_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &locks,
+            Some(iid.clone()),
+            VersionUpdate {
+                id: &id,
+                minecraft: "1.21.4",
+                loader_version: None,
+            },
+            102,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(locked.code, "already_running");
+        locks.release(&id);
+
+        // Valid change updates Minecraft version and flips `ready` to false.
+        let updated = set_version_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &locks,
+            Some(iid.clone()),
+            VersionUpdate {
+                id: &id,
+                minecraft: "1.21.4",
+                loader_version: None,
+            },
+            103,
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.profiles[0].minecraft, "1.21.4");
+        assert!(!updated.profiles[0].ready);
+
+        // Modded profile verifies loader compatibility against official loader catalog.
+        let modded = create_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &e.settings,
+            NewInstance::modded(
+                "Fabric World",
+                "1.21.4",
+                LoaderKind::Fabric,
+                LoaderVersionSpec::Auto,
+            )
+            .unwrap(),
+            110,
+        )
+        .await
+        .unwrap();
+        let mid = modded
+            .profiles
+            .iter()
+            .find(|p| p.name == "Fabric World")
+            .unwrap()
+            .id
+            .clone();
+        // 1.20.1 has empty Fabric list in `env()` -> `no_compatible_loader`.
+        let incompatible = set_version_verified(
+            &e.global,
+            &e.loaders,
+            &e.root,
+            &locks,
+            None,
+            VersionUpdate {
+                id: &mid,
+                minecraft: "1.20.1",
+                loader_version: Some(LoaderVersionSpec::Auto),
+            },
+            111,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(incompatible.code, "no_compatible_loader");
+    }
+
+    #[tokio::test]
+    async fn duplicate_profile_increments_copy_names_clones_files_and_selects_new_copy() {
+        let e = env();
+        let state = ProfilesState::new(e.root.clone(), Err("unused".into()), Err("unused".into()));
+        let store = InstanceStore::new(&e.root);
+        let src = store
+            .create(NewInstance::vanilla("Survival", "1.21.4").unwrap(), 200)
+            .unwrap();
+        fs::write(
+            store.dirs(&src.id).game_dir().join("options.txt"),
+            b"gamma:1.0",
+        )
+        .unwrap();
+
+        let snap1 = duplicate_profile_inner(&state, &e.settings, src.id.as_str(), 201)
+            .await
+            .unwrap();
+        assert_eq!(snap1.profiles.len(), 2);
+        let copy1 = snap1
+            .profiles
+            .iter()
+            .find(|p| p.name == "Survival (2)")
+            .unwrap();
+        assert_eq!(snap1.selected.as_deref(), Some(copy1.id.as_str()));
+        assert_eq!(
+            fs::read(
+                store
+                    .dirs(&InstanceId::new(&copy1.id).unwrap())
+                    .game_dir()
+                    .join("options.txt")
+            )
+            .unwrap(),
+            b"gamma:1.0"
+        );
+
+        // Duplicating "Survival (2)" produces "Survival (3)", not "Survival (2) (2)".
+        let snap2 = duplicate_profile_inner(&state, &e.settings, &copy1.id, 202)
+            .await
+            .unwrap();
+        assert!(snap2.profiles.iter().any(|p| p.name == "Survival (3)"));
+
+        // Long 64-char name truncates cleanly to fit " (2)".
+        let long_name = "A".repeat(64);
+        let long_inst = store
+            .create(NewInstance::vanilla(&long_name, "1.21.4").unwrap(), 203)
+            .unwrap();
+        let snap3 = duplicate_profile_inner(&state, &e.settings, long_inst.id.as_str(), 204)
+            .await
+            .unwrap();
+        let copy_long = snap3
+            .profiles
+            .iter()
+            .find(|p| p.id != long_inst.id.as_str() && p.name.starts_with("AAAA"))
+            .unwrap();
+        assert!(copy_long.name.chars().count() <= 64);
+        assert!(copy_long.name.ends_with(" (2)"));
     }
 }

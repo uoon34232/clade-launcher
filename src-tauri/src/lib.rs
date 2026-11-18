@@ -321,6 +321,8 @@ pub fn run() {
             profiles::create_profile,
             profiles::rename_profile,
             profiles::set_profile_memory,
+            profiles::set_profile_version,
+            profiles::duplicate_profile,
             profiles::open_profile_folder,
             profiles::open_instances_folder,
             accounts_api::list_accounts,

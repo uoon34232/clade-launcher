@@ -67,6 +67,12 @@ function setup(profiles: ProfilesSnapshot, accounts: AccountsSnapshot) {
     setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
+    setVersion: vi.fn<ProfilesApi["setVersion"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    duplicate: vi.fn<ProfilesApi["duplicate"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
     openFolder: vi.fn<ProfilesApi["openFolder"]>(() => Promise.resolve()),
     openInstancesFolder: vi.fn<ProfilesApi["openInstancesFolder"]>(() => Promise.resolve()),
     prepare: vi.fn<ProfilesApi["prepare"]>(() => new Promise<ProfilesSnapshot>(() => undefined)),

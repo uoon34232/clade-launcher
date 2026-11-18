@@ -97,6 +97,15 @@ export const en = {
   "profileModal.statusReady": "Ready",
   "profileModal.statusPending": "Needs setup",
   "profileModal.playtime": "Playtime",
+  "profileModal.changeVersion": "Change version…",
+  "profileModal.saveVersion": "Save version",
+  "profileModal.loaderVersionFor": "{loader} version",
+  "profileModal.versionKeepNote":
+    "Worlds and options stay in place. Clade will set up the new version before you play.",
+  "profileModal.versionModdedNote":
+    "Worlds and options stay in place. Check that any mods in your mods folder match the new version.",
+  "profileModal.duplicate": "Duplicate",
+  "profileModal.duplicating": "Duplicating…",
   "profileModal.memoryDefault": "Launcher default",
   "profileModal.memoryDefaultNote": "Follows Settings ({value} on this computer).",
   "profileModal.files": "Files",
@@ -470,6 +479,9 @@ export const en = {
   "error.profile.busy": "This profile is being set up. Wait for it to finish.",
   "error.profile.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
+  "error.profile.not_found": "That profile no longer exists.",
+  "error.profile.duplicate_failed":
+    "Could not duplicate the profile. Check available disk space and close anything using its folder.",
   "error.profile.open_failed": "Windows couldn't open that folder.",
 
   "error.catalog.unknown": "Could not load the version list.",

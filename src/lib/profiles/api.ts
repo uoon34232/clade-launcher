@@ -79,6 +79,8 @@ export interface LoaderOption {
   error: string | null;
 }
 
+export type LoaderVersionChoice = { mode: "auto" } | { mode: "pinned"; version: string };
+
 export type NewProfileRequest = {
   name: string;
   minecraft: string;
@@ -87,7 +89,7 @@ export type NewProfileRequest = {
     | {
         type: "modded";
         loader: LoaderKind;
-        loader_version: { mode: "auto" } | { mode: "pinned"; version: string };
+        loader_version: LoaderVersionChoice;
       };
 };
 
@@ -270,6 +272,15 @@ export const profilesApi = {
     parseProfiles(await call("rename_profile", { id, name })),
   setMemory: async (id: string, mb: number | null) =>
     parseProfiles(await call("set_profile_memory", { id, mb })),
+  setVersion: async (
+    id: string,
+    minecraft: string,
+    loaderVersion: LoaderVersionChoice | null = null,
+  ) =>
+    parseProfiles(
+      await call("set_profile_version", { id, minecraft, loaderVersion: loaderVersion ?? null }),
+    ),
+  duplicate: async (id: string) => parseProfiles(await call("duplicate_profile", { id })),
   openFolder: async (id: string): Promise<void> => {
     await call("open_profile_folder", { id });
   },

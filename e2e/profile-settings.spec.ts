@@ -223,6 +223,12 @@ test.describe("profile settings", () => {
     ).toBeDisabled();
     await expect(dialog.getByRole("button", { name: text("profile.verify") })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: text("profile.remove") })).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: text("profileModal.changeVersion") }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: text("profileModal.duplicate") }),
+    ).toBeDisabled();
 
     const openFolder = dialog.getByRole("button", { name: text("profile.openFolder") });
     await expect(openFolder).toBeEnabled();
@@ -292,6 +298,48 @@ test.describe("profile settings", () => {
       ruDialog.getByRole("slider", { name: textRu("settings.memory.slider") }),
     ).toBeVisible();
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
+  });
+
+  test("duplicates a profile and changes its Minecraft version without touching the original", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openProfileSettings(page);
+
+    // Duplicate "Survival" -> "Survival (2)" and switch straight onto the new copy
+    await dialog.getByRole("button", { name: text("profileModal.duplicate") }).click();
+    await expect
+      .poll(async () => (await backend.calls("duplicate_profile")).map((c) => c.args))
+      .toEqual([{ id: SURVIVAL.id }]);
+    await expect(dialog.getByRole("heading", { name: "Survival (2)" })).toBeVisible();
+    await expect(dialog.getByLabel(text("create.name"))).toHaveValue("Survival (2)");
+
+    // Change the copy's Minecraft version to 1.21.1 -> flips copy to Needs setup + dock Set up
+    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await dialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    await page.getByRole("option", { name: /^1\.21\.1/ }).click();
+    await dialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
+
+    await expect(
+      dialog.getByText(text("profileModal.statusPending"), { exact: true }),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(profileTrigger(page)).toHaveAccessibleName(
+      text("profile.trigger", { label: "Survival (2)" }),
+    );
+    await expect(playButton(page)).toHaveText(text("play.setup"));
+
+    // Original "Survival" stays Ready on 1.21.4
+    const snap = await backend.state();
+    const orig = snap.profiles.find((p) => p.id === SURVIVAL.id);
+    const copy = snap.profiles.find((p) => p.name === "Survival (2)");
+    expect(orig?.minecraft).toBe("1.21.4");
+    expect(orig?.ready).toBe(true);
+    expect(copy?.minecraft).toBe("1.21.1");
+    expect(copy?.ready).toBe(false);
   });
 });
 
