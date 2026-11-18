@@ -203,11 +203,11 @@ function Compare-Lists([string[]] $a, [string[]] $b, [scriptblock] $key) {
 }
 
 function Read-Snapshot([string] $path) {
-  $resolved = if (Test-Path -LiteralPath $path) {
-    @(Resolve-Path -LiteralPath $path -ErrorAction Stop)
+  $resolved = @(if (Test-Path -LiteralPath $path) {
+    Resolve-Path -LiteralPath $path -ErrorAction Stop
   } else {
-    @(Resolve-Path -Path $path -ErrorAction Stop)
-  }
+    Resolve-Path -Path $path -ErrorAction Stop
+  })
   if ($resolved.Count -ne 1) { throw "Expected exactly one snapshot for '$path', found $($resolved.Count)." }
   return Get-Content -LiteralPath $resolved[0].Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
