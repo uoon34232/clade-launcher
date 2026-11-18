@@ -1081,7 +1081,7 @@ mod tests {
         let cancel_wait = cancel.clone();
         let started_wait = started.clone();
 
-        let waiter = tokio::spawn(async move {
+        let mut waiter = tokio::spawn(async move {
             let fut = cancel_wait.cancelled();
             tokio::pin!(fut);
             // Poll once so the waiter is parked on Notify before `cancel()` fires.
@@ -1091,13 +1091,12 @@ mod tests {
         });
 
         started.notified().await;
-        let t0 = std::time::Instant::now();
+        assert!(futures::poll!(&mut waiter).is_pending());
         cancel.cancel();
-        tokio::time::timeout(Duration::from_millis(25), waiter)
-            .await
-            .expect("cancel wakeup must be immediate, not 40ms-polled")
-            .unwrap();
-        assert!(t0.elapsed() < Duration::from_millis(25));
+        // On the single-threaded test runtime, a Notify wakeup is ready after one cooperative
+        // yield without advancing any timer wheel.
+        tokio::task::yield_now().await;
+        assert!(futures::poll!(&mut waiter).is_ready());
     }
 
     #[tokio::test]

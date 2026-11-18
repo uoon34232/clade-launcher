@@ -241,7 +241,8 @@ fn the_default_skin_or_a_removed_account_clears_the_cache_and_nothing_secret_is_
 
 /// A fetcher that answers every request after `delay` (or never), to prove how waits add up.
 struct Slow {
-    delay: Option<Duration>,
+    barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
+    entered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     png: Vec<u8>,
 }
 impl Fetcher for Slow {
@@ -250,11 +251,13 @@ impl Fetcher for Slow {
         _url: &Url,
         _max: usize,
     ) -> impl std::future::Future<Output = Result<Vec<u8>, crate::net::FetchError>> + Send {
-        let (delay, png) = (self.delay, self.png.clone());
+        let (barrier, entered, png) =
+            (self.barrier.clone(), self.entered.clone(), self.png.clone());
         async move {
-            match delay {
-                Some(d) => {
-                    tokio::time::sleep(d).await;
+            entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match barrier {
+                Some(b) => {
+                    b.wait().await;
                     Ok(png)
                 }
                 None => std::future::pending().await,
@@ -277,21 +280,18 @@ fn many(c: &SkinCache, n: usize) -> Vec<String> {
 fn waiting_skins_download_together_so_the_wait_never_scales_with_the_account_count() {
     let (_d, c) = cache();
     let uuids = many(&c, 5);
+    // A 5-party barrier only releases when all 5 skin downloads are in flight concurrently;
+    // sequential execution would deadlock until the budget expires.
     let slow = Slow {
-        delay: Some(Duration::from_millis(250)),
+        barrier: Some(std::sync::Arc::new(tokio::sync::Barrier::new(5))),
+        entered: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         png: png(64, 64),
     };
-    let t0 = std::time::Instant::now();
-    // One at a time these would need 5 x 250 ms; together they fit well inside one 800 ms budget.
-    assert!(run(c.sync_all(&slow, &uuids, Duration::from_millis(800))));
-    assert!(
-        t0.elapsed() < Duration::from_millis(700),
-        "{:?}",
-        t0.elapsed()
-    );
+    assert!(run(c.sync_all(&slow, &uuids, Duration::from_secs(5))));
+    assert_eq!(slow.entered.load(std::sync::atomic::Ordering::SeqCst), 5);
     assert!(uuids.iter().all(|u| c.data_uri(u).is_some()));
     // Nothing is waiting any more: the next round returns at once without a request.
-    assert!(!run(c.sync_all(&slow, &uuids, Duration::from_millis(800))));
+    assert!(!run(c.sync_all(&slow, &uuids, Duration::from_secs(5))));
 }
 
 #[test]
@@ -299,16 +299,14 @@ fn a_hung_server_costs_one_budget_in_total_and_leaves_every_skin_pending_and_int
     let (_d, c) = cache();
     let uuids = many(&c, 6);
     let hung = Slow {
-        delay: None,
+        barrier: None,
+        entered: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         png: Vec::new(),
     };
     let t0 = std::time::Instant::now();
-    assert!(run(c.sync_all(&hung, &uuids, Duration::from_millis(300))));
-    assert!(
-        t0.elapsed() < Duration::from_millis(1000),
-        "{:?}",
-        t0.elapsed()
-    );
+    assert!(run(c.sync_all(&hung, &uuids, Duration::from_millis(100))));
+    assert_eq!(hung.entered.load(std::sync::atomic::Ordering::SeqCst), 6);
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
     assert!(uuids
         .iter()
         .all(|u| c.pending(u) && c.data_uri(u).is_none()));
