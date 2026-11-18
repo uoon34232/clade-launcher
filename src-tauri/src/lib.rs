@@ -189,6 +189,8 @@ pub fn run() {
     });
     tracing::info!(layout = LAYOUT_VERSION, webview = ?webview_source, %webview_version, "launcher starting");
 
+    // One lock registry shared across profile edits, preparation and launching.
+    let profile_locks = std::sync::Arc::new(profile_lock::ProfileLocks::default());
     // Networking lives in Rust only. Two clients: one for Mojang and the global allow-list, one
     // restricted to the loaders' own hosts. A failure to build one only disables discovery.
     let profiles_state = profiles::ProfilesState::new(
@@ -198,7 +200,8 @@ pub fn run() {
         ))
         .map_err(|e| e.to_string()),
         net::HttpFetcher::new(loaders::official_policy()).map_err(|e| e.to_string()),
-    );
+    )
+    .with_locks(profile_locks.clone());
     let accounts_state = accounts_api::AccountsState::new(root.accounts_file()).with_skins(
         skin::SkinCache::new(root.cache_dir().join("skins")),
         net::HttpFetcher::new(download_policy::DownloadPolicy::new(
@@ -213,8 +216,6 @@ pub fn run() {
         ))
         .map_err(|e| e.to_string()),
     );
-    // One lock registry for both: launching and preparing the same profile exclude each other.
-    let profile_locks = std::sync::Arc::new(profile_lock::ProfileLocks::default());
     let prepare_state = prepare_cmd::PrepareState::new(
         root.clone(),
         net::HttpFetcher::new(download_policy::DownloadPolicy::new(
@@ -315,6 +316,10 @@ pub fn run() {
             profiles::get_version_catalog,
             profiles::get_loader_options,
             profiles::create_profile,
+            profiles::rename_profile,
+            profiles::set_profile_memory,
+            profiles::open_profile_folder,
+            profiles::open_instances_folder,
             accounts_api::list_accounts,
             accounts_api::select_account,
             accounts_api::remove_account,

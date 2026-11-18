@@ -15,10 +15,12 @@
 //!   race-free by the store, so identifiers cannot conflict.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::coded_error::{param, params, CodedError};
 use crate::instances::{
@@ -31,6 +33,7 @@ use crate::mc_catalog::{self, CatalogError, Origin, VersionCatalog, VersionKind}
 use crate::net::{Fetcher, HttpFetcher};
 use crate::playtime::PlaytimeStore;
 use crate::portable::PortableRoot;
+use crate::profile_lock::{Activity, ProfileLocks};
 use crate::ui_settings::SettingsState;
 use crate::versions::McVersion;
 
@@ -48,8 +51,10 @@ pub struct ProfilesState {
     pub global: Result<HttpFetcher, String>,
     /// Loader hosts only.
     pub loaders: Result<HttpFetcher, String>,
-    /// Serialises concurrent `create_profile` calls across async catalog verification.
+    /// Serialises concurrent `create_profile` and `rename_profile` calls.
     pub create_lock: tokio::sync::Mutex<()>,
+    /// Per-profile activity locks shared with preparation and launch.
+    pub locks: Arc<ProfileLocks>,
 }
 
 impl ProfilesState {
@@ -63,7 +68,13 @@ impl ProfilesState {
             global,
             loaders,
             create_lock: tokio::sync::Mutex::new(()),
+            locks: Arc::new(ProfileLocks::default()),
         }
+    }
+
+    pub fn with_locks(mut self, locks: Arc<ProfileLocks>) -> Self {
+        self.locks = locks;
+        self
     }
 }
 
@@ -90,6 +101,7 @@ pub struct ProfileDto {
     pub loader_version: Option<String>,
     pub ready: bool,
     pub playtime_seconds: u64,
+    pub memory_mb: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +110,7 @@ pub struct ProfilesDto {
     pub profiles: Vec<ProfileDto>,
     pub selected: Option<String>,
     pub total_playtime_seconds: u64,
+    pub unreadable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,9 +303,16 @@ pub fn snapshot(root: &PortableRoot, selected: Option<InstanceId>) -> std::io::R
                     .instance_total(&i.id)
                     .map(|t| t.total_seconds)
                     .unwrap_or(0),
+                memory_mb: i.memory_mb,
             }
         })
         .collect();
+    let mut unreadable: Vec<String> = listing
+        .problems
+        .into_iter()
+        .map(|(folder, _)| folder)
+        .collect();
+    unreadable.sort();
     // A selection that no longer exists (deleted, or a folder from another launcher) falls back to the first profile.
     let selected = selected
         .map(|s| s.to_string())
@@ -305,6 +325,7 @@ pub fn snapshot(root: &PortableRoot, selected: Option<InstanceId>) -> std::io::R
             .lifetime_total()
             .map(|t| t.total_seconds)
             .unwrap_or(0),
+        unreadable,
     })
 }
 
@@ -453,6 +474,145 @@ pub async fn create_verified<G: Fetcher, L: Fetcher>(
     .map_err(|e| ProfileError::Io(std::io::Error::other(e.to_string())))?
 }
 
+pub(crate) struct HeldProfileLock {
+    locks: Arc<ProfileLocks>,
+    id: String,
+}
+
+impl Drop for HeldProfileLock {
+    fn drop(&mut self) {
+        self.locks.release(&self.id);
+    }
+}
+
+pub(crate) fn claim_profile_lock(
+    locks: &Arc<ProfileLocks>,
+    id: &InstanceId,
+) -> Result<HeldProfileLock, CodedError> {
+    match locks.claim(id.as_str(), Activity::Preparing) {
+        Ok(()) => Ok(HeldProfileLock {
+            locks: locks.clone(),
+            id: id.as_str().to_owned(),
+        }),
+        Err(Activity::Launching) => Err(CodedError::new(
+            "already_running",
+            "This profile is starting or running.",
+        )),
+        Err(Activity::Preparing) => Err(CodedError::new("busy", "This profile is being set up.")),
+    }
+}
+
+pub(crate) fn rename_in_store(
+    root: &PortableRoot,
+    iid: &InstanceId,
+    name: &str,
+    selected: Option<InstanceId>,
+) -> Result<ProfilesDto, CodedError> {
+    let store = InstanceStore::new(root);
+    store
+        .get(iid)
+        .map_err(|e| ProfileError::Instance(e).coded())?;
+    let listing = store.list().map_err(CodedError::storage)?;
+    let trimmed = name.trim();
+    let wanted = trimmed.to_lowercase();
+    if listing
+        .instances
+        .iter()
+        .filter(|i| i.id != *iid)
+        .any(|i| i.name.trim().to_lowercase() == wanted)
+    {
+        return Err(ProfileError::DuplicateName(trimmed.to_owned()).coded());
+    }
+    store
+        .rename(iid, name)
+        .map_err(|e| ProfileError::Instance(e).coded())?;
+    snapshot(root, selected).map_err(CodedError::storage)
+}
+
+pub(crate) fn set_memory_in_store(
+    root: &PortableRoot,
+    iid: &InstanceId,
+    mb: Option<u32>,
+    total_mb: Option<u64>,
+    selected: Option<InstanceId>,
+) -> Result<ProfilesDto, CodedError> {
+    if let Some(m) = mb {
+        let (min, max) = crate::system::memory_limits_mb(total_mb);
+        if m < min || m > max || !m.is_multiple_of(256) {
+            return Err(
+                CodedError::new("invalid_memory", "memory is outside the safe range")
+                    .with(params([("min", min.into()), ("max", max.into())])),
+            );
+        }
+    }
+    InstanceStore::new(root)
+        .set_memory(iid, mb)
+        .map_err(|e| ProfileError::Instance(e).coded())?;
+    snapshot(root, selected).map_err(CodedError::storage)
+}
+
+pub(crate) fn resolve_profile_game_dir(
+    root: &PortableRoot,
+    iid: &InstanceId,
+) -> Result<PathBuf, CodedError> {
+    let store = InstanceStore::new(root);
+    store
+        .get(iid)
+        .map_err(|e| ProfileError::Instance(e).coded())?;
+    let dir = store.dirs(iid).game_dir();
+    crate::portable::fsutil::reject_links_between(root.path(), &dir)
+        .map_err(CodedError::storage)?;
+    std::fs::create_dir_all(&dir).map_err(CodedError::storage)?;
+    Ok(dir)
+}
+
+pub(crate) fn resolve_instances_dir(root: &PortableRoot) -> Result<PathBuf, CodedError> {
+    let dir = root.instances_dir();
+    crate::portable::fsutil::reject_links_between(root.path(), &dir)
+        .map_err(CodedError::storage)?;
+    std::fs::create_dir_all(&dir).map_err(CodedError::storage)?;
+    Ok(dir)
+}
+
+pub(crate) async fn rename_profile_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    id: &str,
+    name: &str,
+) -> Result<ProfilesDto, CodedError> {
+    let _guard = state.create_lock.lock().await;
+    let iid = InstanceId::new(id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let held = claim_profile_lock(&state.locks, &iid)?;
+    let root = state.root.clone();
+    let name = name.to_owned();
+    let selected = settings.last_instance();
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        rename_in_store(&root, &iid, &name, selected)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile rename task failed: {e}")))?
+}
+
+pub(crate) async fn set_profile_memory_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    id: &str,
+    mb: Option<u32>,
+) -> Result<ProfilesDto, CodedError> {
+    let iid = InstanceId::new(id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let held = claim_profile_lock(&state.locks, &iid)?;
+    let root = state.root.clone();
+    let selected = settings.last_instance();
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        let total = crate::system::total_memory_mb();
+        set_memory_in_store(&root, &iid, mb, total, selected)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile memory task failed: {e}")))?
+}
+
 // ------------------------------------------------------------------------------ Tauri commands
 
 fn fetcher(f: &Result<HttpFetcher, String>) -> Result<&HttpFetcher, CodedError> {
@@ -531,6 +691,60 @@ pub async fn create_profile(
     create_verified(g, l, &state.root, &settings, request, now_unix())
         .await
         .map_err(|e| e.coded())
+}
+
+#[tauri::command]
+pub async fn rename_profile(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+    name: String,
+) -> Result<ProfilesDto, CodedError> {
+    rename_profile_inner(&state, &settings, &id, &name).await
+}
+
+#[tauri::command]
+pub async fn set_profile_memory(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+    mb: Option<u32>,
+) -> Result<ProfilesDto, CodedError> {
+    set_profile_memory_inner(&state, &settings, &id, mb).await
+}
+
+#[tauri::command]
+pub async fn open_profile_folder(
+    app: tauri::AppHandle,
+    state: State<'_, ProfilesState>,
+    id: String,
+) -> Result<(), CodedError> {
+    let iid = InstanceId::new(&id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let root = state.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let dir = resolve_profile_game_dir(&root, &iid)?;
+        app.opener()
+            .open_path(dir.to_string_lossy(), None::<&str>)
+            .map_err(|e| CodedError::new("open_failed", e.to_string()))
+    })
+    .await
+    .map_err(|e| CodedError::new("open_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn open_instances_folder(
+    app: tauri::AppHandle,
+    state: State<'_, ProfilesState>,
+) -> Result<(), CodedError> {
+    let root = state.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let dir = resolve_instances_dir(&root)?;
+        app.opener()
+            .open_path(dir.to_string_lossy(), None::<&str>)
+            .map_err(|e| CodedError::new("open_failed", e.to_string()))
+    })
+    .await
+    .map_err(|e| CodedError::new("open_failed", e.to_string()))?
 }
 
 #[cfg(test)]
@@ -1002,9 +1216,11 @@ mod tests {
             loader_version: Some("21.4.158".into()),
             ready: false,
             playtime_seconds: 5,
+            memory_mb: Some(4096),
         })
         .unwrap();
         assert_eq!(json["playtimeSeconds"], 5);
+        assert_eq!(json["memoryMb"], 4096);
         assert_eq!(json["loader"], "neoforge");
         assert_eq!(json["loaderVersion"], "21.4.158");
         let cat = serde_json::to_value(catalog_dto(
@@ -1051,5 +1267,347 @@ mod tests {
 
         let st = ProfilesState::new(e.root.clone(), Err("offline".into()), Err("offline".into()));
         let _guard = st.create_lock.lock().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_memory_mb_and_sorted_unreadable_folders_ignoring_removed() {
+        let e = env();
+        let a = create(&e, vanilla("First", "1.21.4")).await.unwrap();
+        let mut req_b = vanilla("Second", "1.20.1");
+        req_b.memory_mb = Some(4096);
+        let b = create(&e, req_b).await.unwrap();
+        let (id_a, id_b) = (a.profiles[0].id.clone(), b.profiles[1].id.clone());
+
+        let inst_dir = e.root.instances_dir();
+        fs::create_dir_all(inst_dir.join("zeta-corrupt")).unwrap();
+        fs::write(inst_dir.join("zeta-corrupt/instance.json"), b"{broken").unwrap();
+        fs::create_dir_all(inst_dir.join("alpha-empty")).unwrap();
+        fs::create_dir_all(inst_dir.join("BadUpper")).unwrap();
+        fs::create_dir_all(inst_dir.join(".removed/old-world")).unwrap();
+        fs::write(inst_dir.join("stray-note.txt"), b"ignored").unwrap();
+
+        let snap = snapshot(&e.root, None).unwrap();
+        assert_eq!(
+            snap.profiles
+                .iter()
+                .find(|p| p.id == id_a)
+                .unwrap()
+                .memory_mb,
+            None
+        );
+        assert_eq!(
+            snap.profiles
+                .iter()
+                .find(|p| p.id == id_b)
+                .unwrap()
+                .memory_mb,
+            Some(4096)
+        );
+        assert_eq!(
+            snap.unreadable,
+            vec!["BadUpper", "alpha-empty", "zeta-corrupt"]
+        );
+
+        let wire = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            wire["unreadable"],
+            serde_json::json!(["BadUpper", "alpha-empty", "zeta-corrupt"])
+        );
+    }
+
+    fn offline_state(root: &PortableRoot) -> ProfilesState {
+        ProfilesState::new(root.clone(), Err("offline".into()), Err("offline".into()))
+    }
+
+    #[tokio::test]
+    async fn rename_allows_case_only_self_rename_and_ignores_damaged_folder_slug_collision() {
+        let e = env();
+        let created = create(&e, vanilla("survival", "1.21.4")).await.unwrap();
+        let id = created.profiles[0].id.clone();
+        assert_eq!(id, "survival");
+
+        let save_file = e
+            .root
+            .instances_dir()
+            .join(&id)
+            .join("game/saves/World/level.dat");
+        fs::create_dir_all(save_file.parent().unwrap()).unwrap();
+        fs::write(&save_file, b"precious-save").unwrap();
+
+        let state = offline_state(&e.root);
+        let renamed = rename_profile_inner(&state, &e.settings, &id, "Survival")
+            .await
+            .unwrap();
+        assert_eq!(renamed.profiles.len(), 1);
+        assert_eq!(renamed.profiles[0].id, "survival");
+        assert_eq!(renamed.profiles[0].name, "Survival");
+        assert_eq!(renamed.selected.as_deref(), Some("survival"));
+        assert_eq!(fs::read(&save_file).unwrap(), b"precious-save");
+        assert!(!e.root.instances_dir().join("survival-2").exists());
+
+        let renamed_upper = rename_profile_inner(&state, &e.settings, &id, "  SURVIVAL  ")
+            .await
+            .unwrap();
+        assert_eq!(renamed_upper.profiles[0].id, "survival");
+        assert_eq!(renamed_upper.profiles[0].name, "SURVIVAL");
+
+        // Renaming another profile to a name whose slug matches a damaged folder in `problems`
+        // must succeed because rename never moves or allocates directories.
+        let second = create(&e, vanilla("Builder", "1.20.1")).await.unwrap();
+        let builder_id = second
+            .profiles
+            .iter()
+            .find(|p| p.name == "Builder")
+            .unwrap()
+            .id
+            .clone();
+        let damaged = e.root.instances_dir().join("redstone-lab");
+        fs::create_dir_all(&damaged).unwrap();
+        fs::write(damaged.join("instance.json"), b"{corrupt").unwrap();
+
+        let after = rename_profile_inner(&state, &e.settings, &builder_id, "Redstone Lab")
+            .await
+            .unwrap();
+        let builder = after.profiles.iter().find(|p| p.id == builder_id).unwrap();
+        assert_eq!(builder.name, "Redstone Lab");
+        assert!(e.root.instances_dir().join(&builder_id).is_dir());
+        assert_eq!(after.unreadable, vec!["redstone-lab"]);
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_duplicates_invalid_names_and_unknown_or_bad_ids() {
+        let e = env();
+        create(&e, vanilla("First", "1.21.4")).await.unwrap();
+        let second = create(&e, vanilla("Second", "1.20.1")).await.unwrap();
+        let second_id = second
+            .profiles
+            .iter()
+            .find(|p| p.name == "Second")
+            .unwrap()
+            .id
+            .clone();
+
+        let state = offline_state(&e.root);
+
+        for (raw, expected_trimmed) in [
+            ("first", "first"),
+            ("FIRST", "FIRST"),
+            ("  First  ", "First"),
+        ] {
+            let err = rename_profile_inner(&state, &e.settings, &second_id, raw)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "duplicate_name");
+            assert_eq!(err.params.as_ref().unwrap()["name"], expected_trimmed);
+        }
+
+        for bad_name in ["", "   ", &"x".repeat(65), "bad\nname"] {
+            let err = rename_profile_inner(&state, &e.settings, &second_id, bad_name)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_name", "name={bad_name:?}");
+        }
+
+        assert_eq!(
+            InstanceStore::new(&e.root)
+                .get(&InstanceId::new(&second_id).unwrap())
+                .unwrap()
+                .name,
+            "Second"
+        );
+
+        for bad_id in ["missing-profile", "../escape", "UPPER", ""] {
+            let err = rename_profile_inner(&state, &e.settings, bad_id, "Valid Name")
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_found", "id={bad_id:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_locks_guard_rename_and_set_memory_and_release_on_drop() {
+        let e = env();
+        let snap = create(&e, vanilla("Locked", "1.21.4")).await.unwrap();
+        let id = snap.profiles[0].id.clone();
+        let iid = InstanceId::new(&id).unwrap();
+
+        let locks = Arc::new(ProfileLocks::default());
+        let state = offline_state(&e.root).with_locks(locks.clone());
+
+        {
+            let _held = claim_profile_lock(&locks, &iid).unwrap();
+            assert_eq!(locks.current(&id), Some(Activity::Preparing));
+        }
+        assert_eq!(locks.current(&id), None);
+
+        locks.claim(&id, Activity::Launching).unwrap();
+        assert_eq!(
+            rename_profile_inner(&state, &e.settings, &id, "Other")
+                .await
+                .unwrap_err()
+                .code,
+            "already_running"
+        );
+        assert_eq!(
+            set_profile_memory_inner(&state, &e.settings, &id, None)
+                .await
+                .unwrap_err()
+                .code,
+            "already_running"
+        );
+        assert_eq!(locks.current(&id), Some(Activity::Launching));
+        locks.release(&id);
+
+        locks.claim(&id, Activity::Preparing).unwrap();
+        assert_eq!(
+            rename_profile_inner(&state, &e.settings, &id, "Other")
+                .await
+                .unwrap_err()
+                .code,
+            "busy"
+        );
+        assert_eq!(
+            set_profile_memory_inner(&state, &e.settings, &id, None)
+                .await
+                .unwrap_err()
+                .code,
+            "busy"
+        );
+        assert_eq!(locks.current(&id), Some(Activity::Preparing));
+        locks.release(&id);
+
+        let ok_rename = rename_profile_inner(&state, &e.settings, &id, "Renamed")
+            .await
+            .unwrap();
+        assert_eq!(ok_rename.profiles[0].name, "Renamed");
+        assert_eq!(locks.current(&id), None);
+
+        let err_rename = rename_profile_inner(&state, &e.settings, &id, "   ")
+            .await
+            .unwrap_err();
+        assert_eq!(err_rename.code, "invalid_name");
+        assert_eq!(locks.current(&id), None);
+
+        let (min_mb, _) = crate::system::memory_limits_mb(crate::system::total_memory_mb());
+        let ok_mem = set_profile_memory_inner(&state, &e.settings, &id, Some(min_mb))
+            .await
+            .unwrap();
+        assert_eq!(ok_mem.profiles[0].memory_mb, Some(min_mb));
+        assert_eq!(locks.current(&id), None);
+
+        let err_mem = set_profile_memory_inner(&state, &e.settings, &id, Some(512))
+            .await
+            .unwrap_err();
+        assert_eq!(err_mem.code, "invalid_memory");
+        assert_eq!(locks.current(&id), None);
+
+        for bad_id in ["missing-profile", "../escape", "UPPER"] {
+            assert_eq!(
+                set_profile_memory_inner(&state, &e.settings, bad_id, None)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "not_found"
+            );
+            assert_eq!(locks.current(bad_id), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn set_memory_in_store_validates_bounds_and_step_and_round_trips() {
+        let e = env();
+        let snap = create(&e, vanilla("MemTest", "1.21.4")).await.unwrap();
+        let iid = InstanceId::new(&snap.profiles[0].id).unwrap();
+
+        let total = Some(16_384);
+        let (min, max) = crate::system::memory_limits_mb(total);
+        assert_eq!((min, max), (1024, 12_288));
+
+        for bad in [0, 512, min - 256, max + 256, 32_768, 4000, 1025] {
+            let res = set_memory_in_store(&e.root, &iid, Some(bad), total, Some(iid.clone()));
+            let err = res.unwrap_err();
+            assert_eq!(err.code, "invalid_memory", "mb={bad}");
+            let p = err.params.as_ref().unwrap();
+            assert_eq!(p["min"], min);
+            assert_eq!(p["max"], max);
+        }
+
+        let sel = Some(iid.clone());
+        let set_snap = set_memory_in_store(&e.root, &iid, Some(4096), total, sel.clone()).unwrap();
+        assert_eq!(set_snap.selected.as_deref(), Some(iid.as_str()));
+        assert_eq!(set_snap.profiles[0].memory_mb, Some(4096));
+        assert_eq!(
+            InstanceStore::new(&e.root).get(&iid).unwrap().memory_mb,
+            Some(4096)
+        );
+
+        let cleared_snap = set_memory_in_store(&e.root, &iid, None, total, sel).unwrap();
+        assert_eq!(cleared_snap.profiles[0].memory_mb, None);
+        assert_eq!(
+            InstanceStore::new(&e.root).get(&iid).unwrap().memory_mb,
+            None
+        );
+
+        let missing = InstanceId::new("ghost").unwrap();
+        let err = set_memory_in_store(&e.root, &missing, Some(4096), total, None).unwrap_err();
+        assert_eq!(err.code, "not_found");
+    }
+
+    #[tokio::test]
+    async fn resolve_folder_helpers_create_missing_dirs_and_reject_unknown_or_linked_paths() {
+        let e = env();
+        let snap = create(&e, vanilla("FolderTest", "1.21.4")).await.unwrap();
+        let iid = InstanceId::new(&snap.profiles[0].id).unwrap();
+
+        let expected_game = InstanceStore::new(&e.root).dirs(&iid).game_dir();
+        fs::remove_dir_all(&expected_game).unwrap();
+        assert!(!expected_game.exists());
+
+        let resolved_game = resolve_profile_game_dir(&e.root, &iid).unwrap();
+        assert_eq!(resolved_game, expected_game);
+        assert!(resolved_game.is_dir());
+
+        let missing = InstanceId::new("missing").unwrap();
+        let err = resolve_profile_game_dir(&e.root, &missing).unwrap_err();
+        assert_eq!(err.code, "not_found");
+        assert!(!e.root.instances_dir().join("missing").exists());
+
+        let empty = env();
+        fs::remove_dir_all(empty.root.instances_dir()).unwrap();
+        assert!(!empty.root.instances_dir().exists());
+        let resolved_instances = resolve_instances_dir(&empty.root).unwrap();
+        assert_eq!(resolved_instances, empty.root.instances_dir());
+        assert!(resolved_instances.is_dir());
+
+        #[cfg(windows)]
+        {
+            let outside = e._d.path().join("outside-target");
+            fs::create_dir_all(&outside).unwrap();
+
+            fs::remove_dir_all(&expected_game).unwrap();
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&expected_game)
+                .arg(&outside)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "mklink /J failed: {out:?}");
+            let err = resolve_profile_game_dir(&e.root, &iid).unwrap_err();
+            assert_eq!(err.code, "storage");
+            fs::remove_dir(&expected_game).unwrap();
+
+            let inst_dir = empty.root.instances_dir();
+            fs::remove_dir_all(&inst_dir).unwrap();
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&inst_dir)
+                .arg(&outside)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "mklink /J failed: {out:?}");
+            let err = resolve_instances_dir(&empty.root).unwrap_err();
+            assert_eq!(err.code, "storage");
+            fs::remove_dir(&inst_dir).unwrap();
+        }
     }
 }
