@@ -1,5 +1,6 @@
-//! Read-only facts about the machine that launching and preparing need: how much RAM there is
-//! (to pick the game's memory) and how much free disk space the Clade folder's drive has.
+//! Read-only facts about the machine that launching, preparing, and portable WebView2 setup need:
+//! how much RAM there is (to pick the game's memory), how much free disk space and whether
+//! persistent ACLs exist on the Clade folder's drive, and whether the kernel is Windows 10.
 //! Nothing here reads the environment or the registry directly and nothing is stored. Two Windows
 //! display preferences (transparency effects, High Contrast) are read through their OS APIs.
 
@@ -119,8 +120,39 @@ pub fn high_contrast() -> bool {
     false
 }
 
+#[cfg(any(windows, test))]
+const fn is_windows_10_version(major: u32, build: u32) -> bool {
+    major == 10 && build < 22000
+}
+
+/// True when the host OS is Windows 10 (`dwMajorVersion == 10 && dwBuildNumber < 22000`), queried
+/// directly via `ntdll!RtlGetVersion` so compatibility manifests cannot mask the kernel build.
 #[cfg(windows)]
-fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
+pub fn is_windows_10() -> bool {
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(version_info: *mut OSVERSIONINFOW) -> i32;
+    }
+    // SAFETY: `OSVERSIONINFOW` is plain data; `dwOSVersionInfoSize` is set to the struct's exact
+    // byte size and `&mut info` is valid for the duration of the call.
+    unsafe {
+        let mut info: OSVERSIONINFOW = std::mem::zeroed();
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        if RtlGetVersion(&mut info) != 0 {
+            return false;
+        }
+        is_windows_10_version(info.dwMajorVersion, info.dwBuildNumber)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_windows_10() -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
@@ -184,6 +216,89 @@ pub fn free_disk_bytes(path: &Path) -> Option<u64> {
 
 #[cfg(not(windows))]
 pub fn free_disk_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+#[cfg(windows)]
+fn volume_root_win32(verbatim: &Path) -> Option<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Component;
+
+    let mut comps = verbatim.components();
+    let Component::Prefix(prefix) = comps.next()? else {
+        return None;
+    };
+    if !matches!(comps.next(), Some(Component::RootDir) | None) {
+        return None;
+    }
+    let mut root = OsString::from(prefix.as_os_str());
+    if prefix.as_os_str().encode_wide().last() != Some(u16::from(b'\\')) {
+        root.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    Some(std::path::PathBuf::from(root))
+}
+
+/// Whether the volume holding `path` supports persistent NTFS-style ACLs (`FILE_PERSISTENT_ACLS`),
+/// or `None` when the volume cannot be queried.
+#[cfg(windows)]
+pub fn volume_supports_acls(path: &Path) -> Option<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+
+    const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
+
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let verbatim = to_verbatim_win32(&abs);
+    let mut dir: &Path = &verbatim;
+    while !dir.exists() {
+        dir = dir.parent()?;
+    }
+    let dir_wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut vol_buf = vec![0u16; dir.as_os_str().len().max(260) + 16];
+    // SAFETY: `dir_wide` is NUL-terminated and valid; `vol_buf` is writable for `vol_buf.len()`
+    // UTF-16 code units.
+    let got_mount = unsafe {
+        GetVolumePathNameW(
+            dir_wide.as_ptr(),
+            vol_buf.as_mut_ptr(),
+            vol_buf.len() as u32,
+        )
+    };
+    let root_wide: Vec<u16> = if got_mount != 0 {
+        let nul = vol_buf.iter().position(|&c| c == 0);
+        let len = nul.unwrap_or(vol_buf.len());
+        let mut v = vol_buf[..len].to_vec();
+        if v.last().copied() != Some(u16::from(b'\\')) {
+            v.push(u16::from(b'\\'));
+        }
+        v.push(0);
+        v
+    } else {
+        let fallback = volume_root_win32(dir)?;
+        fallback.as_os_str().encode_wide().chain(Some(0)).collect()
+    };
+
+    let mut flags = 0u32;
+    // SAFETY: `root_wide` is a NUL-terminated volume root ending with `\`; `&mut flags` is valid
+    // and optional buffers are null with zero lengths.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root_wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok != 0).then_some((flags & FILE_PERSISTENT_ACLS) != 0)
+}
+
+#[cfg(not(windows))]
+pub fn volume_supports_acls(_path: &Path) -> Option<bool> {
     None
 }
 
@@ -412,6 +527,18 @@ mod tests {
     }
 
     #[test]
+    fn windows_10_build_boundary_separates_win10_from_win11_and_older_nt() {
+        assert!(is_windows_10_version(10, 10240));
+        assert!(is_windows_10_version(10, 19045));
+        assert!(is_windows_10_version(10, 21999));
+        assert!(!is_windows_10_version(10, 22000));
+        assert!(!is_windows_10_version(10, 22631));
+        assert!(!is_windows_10_version(10, 26100));
+        assert!(!is_windows_10_version(6, 9600));
+        let _ = is_windows_10();
+    }
+
+    #[test]
     fn the_machine_can_be_queried_including_deep_long_paths() {
         let d = tempfile::tempdir().unwrap();
         let free = free_disk_bytes(d.path()).expect("free space of the temp drive");
@@ -441,12 +568,28 @@ mod tests {
                 to_verbatim_win32(Path::new(r"D:\Portable\Clade")),
                 std::path::PathBuf::from(r"\\?\D:\Portable\Clade")
             );
+            assert_eq!(
+                volume_root_win32(Path::new(r"\\?\D:\Portable\Clade")),
+                Some(std::path::PathBuf::from(r"\\?\D:\"))
+            );
+            assert_eq!(
+                volume_root_win32(Path::new(r"\\?\UNC\server\share\Clade")),
+                Some(std::path::PathBuf::from(r"\\?\UNC\server\share\"))
+            );
+            assert_eq!(volume_supports_acls(d.path()), Some(true));
+            assert_eq!(
+                volume_supports_acls(&d.path().join("not/yet/created")),
+                Some(true)
+            );
+            assert_eq!(volume_supports_acls(&deep), Some(true));
 
             // Existing >260-char directory passed without `\\?\` prefix still succeeds.
             let verbatim_deep = to_verbatim_win32(&deep);
             std::fs::create_dir_all(&verbatim_deep).unwrap();
             assert!(free_disk_bytes(&deep).is_some());
             assert!(free_disk_bytes(&deep.join("missing-leaf")).is_some());
+            assert_eq!(volume_supports_acls(&deep), Some(true));
+            assert_eq!(volume_supports_acls(&deep.join("missing-leaf")), Some(true));
             let _ = std::fs::remove_dir_all(to_verbatim_win32(&d.path().join(&seg)));
 
             let snap = memory_snapshot().expect("Windows memory snapshot");

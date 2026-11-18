@@ -29,7 +29,7 @@ This document explains how Clade Launcher is built and which rules its code foll
 
 ## 1. Overview
 
-Clade is a Windows desktop launcher for Minecraft: Java Edition. It is built with **Tauri 2**: a Rust backend does all privileged work, and a **React + TypeScript + Vite** frontend (styled with Tailwind CSS) is a thin view layer on top of it.
+Clade is a Windows desktop launcher for Minecraft: Java Edition on 64-bit Windows 10 and Windows 11 (`x64`). It is built with **Tauri 2**: a Rust backend does all privileged work, and a **React + TypeScript + Vite** frontend (styled with Tailwind CSS) is a thin view layer on top of it.
 
 Two requirements shape most of the design:
 
@@ -90,7 +90,7 @@ scripts/          release packaging
 | Area               | Modules                                                                                                                                              |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Storage and safety | `portable/` (root discovery, validated relative paths, atomic writes, hashing, folder lock), `safe_archive`, `download_policy`, `net`, `coded_error` |
-| Settings and state | `settings`, `ui_settings`, `startup`, `startup_text`, `webview`                                                                                      |
+| Settings and state | `settings`, `ui_settings`, `startup`, `startup_text`, `webview`, `glass`, `support_cmd`                                                              |
 | Profiles           | `instances`, `versions`, `profiles`, `mc_catalog`, `loader_options`, `loaders`                                                                       |
 | Preparation        | `prepare`, `prepare_cmd`, `download`, `mc_meta`, `java_install`, `runtimes`, `natives`, `loader_prepare`, `loader_install`                           |
 | Accounts           | `vault`, `accounts`, `accounts_api`, `auth`, `ms_auth`, `profile_service`                                                                            |
@@ -131,7 +131,7 @@ Rules that keep it portable:
 
 **Launcher state versus WebView state.** Launcher-owned state (sound settings, language, last phrase, last profile) lives in `data/settings.json`, written only by the Rust settings service, sanitized on load and saved atomically. The WebView profile is a disposable browser cache, so the frontend never uses `localStorage`, `sessionStorage`, `indexedDB`, cookies or the Cache API for launcher state (a test scans the frontend to enforce this).
 
-**WebView2.** Release builds ship the Fixed Version runtime in `runtimes/webview2/` and point WebView2 at it before any window exists. If neither the bundled nor an installed runtime loads, Clade shows a native message and exits; it never downloads or runs an installer.
+**WebView2.** Release builds ship the Fixed Version runtime in `runtimes/webview2/` and select the runtime before any window exists. On Windows 11 (`RtlGetVersion` `build >= 22000`), Clade points `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` straight at `runtimes/webview2/`. On Windows 10 (`build < 22000`), unpackaged Win32 apps using a Fixed Version runtime must grant inheritable read-and-execute permissions on `runtimes/webview2/` to the AppContainer SIDs `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) and `ALL RESTRICTED APPLICATION PACKAGES` (`S-1-15-2-2`). Clade checks the volume flags with `GetVolumeInformationW`: when `FILE_PERSISTENT_ACLS` is present (such as on NTFS), it inspects the folder's DACL through Win32 security APIs (`GetNamedSecurityInfoW`, `SetEntriesInAclW`, `SetNamedSecurityInfoW` — never spawning `icacls.exe`, and needing no administrator rights on a normal user-owned folder) and writes those grants only if they are missing. On Windows 10 volumes without `FILE_PERSISTENT_ACLS` (`FAT32` and `exFAT`), or if applying the ACL fails, Clade falls back to the PC's installed Evergreen WebView2 runtime when one is present, and otherwise still tries the bundled runtime as a last resort. Running from a UNC share (`\\server\share`) also logs a warning and falls back to the system runtime because Chromium's Fixed Version sandbox refuses SMB shares. If neither the bundled nor an installed runtime loads, Clade shows a native message and exits; it never downloads or runs an installer.
 
 ## 5. Profiles and isolation
 
@@ -148,6 +148,8 @@ instances/<id>/
 
 - **Vanilla** profiles install only the selected Minecraft version and what it needs. `game/` starts empty.
 - **Modded** profiles also select one loader (Fabric, Forge, NeoForge or Quilt) and create empty `mods`, `config`, `resourcepacks`, `shaderpacks` and `saves` folders inside `game/`. Clade never fills, lists, searches, enables, disables or updates their content.
+- **Per-profile settings and folder actions.** A profile can be **renamed** at any time: Rust validates the new display name (including case-insensitive uniqueness against existing profiles and any unreadable folders in `instances/`) and updates `name` in `instance.json` while keeping the folder name and `id` unchanged. Each profile can also store its own **memory override** (`memory_mb` in `instance.json`, in MiB on the same portable step grid as the global setting and clamped at launch to the current PC's safe ceiling, or `null` to follow the global / automatic setting), and Clade can **open the profile's `game/` folder** directly from Rust (verifying the profile is a real folder inside `instances/` and not a link, creating `game/` if needed, with no generic opener permission exposed to the frontend).
+- **Unreadable profile folders never vanish silently.** When a folder under `instances/` has a missing, truncated or malformed `instance.json`, Clade leaves all of its files untouched, omits it from the playable profile list so healthy profiles keep working, writes a warning to the log and the diagnostics summary, and returns the unreadable folder names with `list_profiles` so the interface shows a non-destructive warning.
 - **Removing a profile never deletes files.** _Remove from Clade_ (profile menu, after a confirmation) takes the selected profile out of the list and moves its whole folder, unchanged, to `instances/.removed/<profile-id>-<unix-time>-<random>/` (one atomic rename on the same drive: worlds, mods, config, screenshots, options, game logs, `home/`, `playtime.json` and any unknown file stay exactly as they were). `.removed` is not a valid profile id, and the profile scanner skips it, so a retained profile is never listed, launched or reported as a problem. The Rust command refuses a profile whose game is starting or running and one that is being prepared or verified (they share the per-profile claim), refuses anything that is not a readable Clade profile or is a link, and checks all of this before moving anything. If the rename fails (for example a file inside is open) the profile stays where it was and the error is shown; there is deliberately no copy-then-delete fallback. The selection moves to the next remaining profile, or to the empty state after the last one. There is no restore or permanent-delete screen yet: to get a profile back by hand, close Clade, move the folder out of `instances/.removed/` into `instances/`, and rename it to its original id (the id is also inside its `instance.json`); to free the space, delete the folder yourself. The store's recursive delete exists only in test builds.
 - **Isolation is absolute.** Everything a player or a mod can modify lives under that profile's `game/`. There is intentionally no shared mods, config, saves, resource-pack or shader folder, and no links or junctions between profiles.
 - **What may be shared** (`minecraft/`, `libraries/`, `assets/`, `runtimes/`): only immutable, hash-verified files published by Mojang or the loader project.
@@ -157,7 +159,7 @@ instances/<id>/
 
 ## 6. Version catalog and profile creation
 
-The frontend never fetches Minecraft or loader metadata. Rust does, through the commands `list_profiles`, `select_profile`, `get_version_catalog`, `get_loader_options` and `create_profile`.
+The frontend never fetches Minecraft or loader metadata and never edits profile manifests directly. Rust handles discovery and profile management through `profiles`: listing profiles alongside any unreadable-folder warnings (`list_profiles`), selecting a profile (`select_profile`), querying the version and loader catalogs (`get_version_catalog`, `get_loader_options`), creating a profile (`create_profile`), renaming a profile, setting or clearing a profile's memory override, and opening a profile's `game/` folder.
 
 - **Network layer.** A `Fetcher` trait with an HTTPS-only implementation that re-checks every redirect host against an allow-list, caps response size, uses short connect and total timeouts and an anonymous `Clade/<version>` User-Agent. Tests inject a fake fetcher.
 - **Minecraft catalog.** Only Mojang's `version_manifest_v2.json`. Releases, snapshots, old betas and old alphas are kept; releases are the default view, never the only one.
@@ -317,7 +319,7 @@ These hold for all new code. Reporting vulnerabilities is covered in [SECURITY.m
 - Archive extraction guards against traversal, absolute paths, links and decompression bombs.
 - The game and loader installers are started with `Command::new(java).args([...])`, never through a shell, with a cleared environment.
 - User-supplied JVM arguments and all downloaded metadata are untrusted: strictly parsed, bounded in size and validated.
-- Tauri capabilities are least-privilege, with no wildcard filesystem or shell scopes and no remote content in the WebView. The frontend is granted no opener permission at all: opening the Clade folder, the logs and the sign-in page is done by Rust with fixed locations (the opener plugin is registered only so Rust can use it), and `tests/window_rules.rs` fails if an opener permission or the opener's JavaScript package returns.
+- Tauri capabilities are least-privilege, with no wildcard filesystem or shell scopes and no remote content in the WebView. The frontend is granted no opener permission at all: opening the Clade folder, a profile's `game/` folder, the logs and the sign-in page is done by Rust with fixed, validated locations (the opener plugin is registered only so Rust can use it), and `tests/window_rules.rs` fails if an opener permission or the opener's JavaScript package returns.
 - The WebView runs under a strict Content Security Policy (`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost`): no remote origins, no `unsafe-eval`, no inline or remote scripts. Inline styles are allowed because the interface sets some. A test pins the policy.
 - At startup Clade removes inherited `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` and `WEBVIEW2_USER_DATA_FOLDER`, so the environment cannot move the web engine or its profile out of the folder. Release builds also remove `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`; a development build keeps that one so DevTools can be attached.
 - Scratch files go to `cache/`, never the system TEMP; a child process never inherits the user's environment.
@@ -357,15 +359,15 @@ The runtime's redistribution terms, the unsigned executable, the lack of automat
 - The bundled WebView2 runtime is not updated automatically; security fixes require re-packaging with a newer runtime.
 - A clean-machine test without any WebView2 installed has not been done yet.
 - `Clade.exe` is not code-signed and signing is not implemented yet (the provider is still to be chosen). Windows Smart App Control blocks an unsigned `Clade.exe` in Windows Sandbox, SmartScreen may warn, and antivirus software may block it. Smart App Control also evaluates the third-party DLLs a game loads, which signing Clade cannot change.
-- The filesystem must be NTFS or exFAT; FAT32 cannot hold files over 4 GB and has no atomic-rename guarantee.
+- The filesystem should be NTFS or exFAT; FAT32 cannot hold files over 4 GB and has no atomic-rename guarantee. On Windows 10, FAT32 and exFAT do not support persistent ACLs (`FILE_PERSISTENT_ACLS`), so the AppContainer permissions needed by the bundled Fixed Version WebView2 runtime cannot be stored on those volumes; Clade falls back to the PC's installed Evergreen WebView2 runtime when one is present, and NTFS is recommended for removable drives meant for clean Windows 10 PCs without WebView2. Also on Windows 10, where Windows 11's DWM Mica backdrop (22H2+) is unavailable, Clade uses its warm opaque paper window surface.
 - The launcher is not fully hermetic: Java may touch the registry for its preferences, and mods can write wherever they choose.
-- A profile whose `instance.json` is damaged is left untouched and does not appear in the profile list; healthy profiles are unaffected. The reason is written to the log and to the diagnostics summary, but the interface has no warning surface for it yet.
+- A folder under `instances/` whose `instance.json` is damaged or unreadable is left untouched and omitted from the playable profile list; healthy profiles are unaffected. The problem is written to the log, included in the diagnostics summary, and surfaced as a warning in the interface so the folder never disappears silently.
 - "Verify files" can only check a Java runtime against a list that Mojang's manifest provides: the list recorded at install time, or the current manifest when it describes the same version. An older runtime whose version Mojang no longer lists is covered only by its `java.exe` hash.
 - Self-update is not implemented yet. Skin and cape changes are implemented but have not yet been exercised against a real account.
 
 ## 20. Settings, first-run introduction and diagnostics
 
-Settings are deliberately short: Interface (language, sound effects, volume, reduced motion), Minecraft (game memory), Behavior (what the window does around a game) and Support (open the Clade folder, open the logs, export diagnostics, reset settings). There are no theme, Java-path, JVM-argument, network, update or telemetry options.
+Settings are deliberately short: Interface (language, sound effects, volume, transparency, reduced motion), Minecraft (game memory), Behavior (what the window does around a game) and Support (open the Clade folder, open the logs, export diagnostics, reset settings). There are no theme, Java-path, JVM-argument, network, update or telemetry options.
 
 ### The settings file
 
@@ -403,6 +405,10 @@ The frontend reads them once at start (`get_ui_settings`, which also reports the
 ### Reduced motion
 
 One module (`src/lib/motion.ts`) decides whether decorative motion is reduced. The Settings choice wins; `system` defers to the operating system. It sets `data-motion` (`reduce`, `full` or `system`) on the root element, which the stylesheet follows, and scripted animations ask `prefersReducedMotion()`. Necessary state changes and focus feedback are kept; ambient background motion, entrance animations, burst particles and long fades are removed or shortened.
+
+### Window backdrop (glass)
+
+When transparency is enabled (`ui.transparency` set to `on`, or `system` while Windows "Transparency effects" are on and High Contrast is off), Windows 11 (22H2+) uses the DWM Mica backdrop (`DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW` in light mode) behind translucent interface surfaces. On Windows 10, where DWM Mica does not exist, or whenever transparency is off or unavailable, Clade automatically stays on its warm opaque paper window look.
 
 ### Game memory
 
