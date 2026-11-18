@@ -165,6 +165,9 @@ pub fn run() {
     if let Err(e) = loader_install::sweep_stale(&root) {
         tracing::warn!(error = %e, "could not clean stale loader staging");
     }
+    // Reclaim disposable Chromium component-updater bloat (Widevine DRM, Speech, Subresource
+    // Filter, metrics) before WebView2 opens its user-data directory.
+    webview::sweep_profile_bloat(&root);
     // A profile whose instance.json cannot be read is hidden from the list but never touched; say so
     // in the log (and in the diagnostics) instead of letting it vanish without a trace.
     if let Ok(listing) = instances::InstanceStore::new(&root).list() {

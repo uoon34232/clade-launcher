@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::{self, StreamExt};
+use futures_util::stream::{self, StreamExt};
 use url::Url;
 
 use crate::net::{FetchError, StreamHead, StreamSink, Streamer};
@@ -1085,18 +1085,35 @@ mod tests {
             let fut = cancel_wait.cancelled();
             tokio::pin!(fut);
             // Poll once so the waiter is parked on Notify before `cancel()` fires.
-            let _ = futures::poll!(&mut fut);
+            let _ = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(fut.as_mut(), cx))
+            })
+            .await;
             started_wait.notify_one();
             fut.await;
         });
 
         started.notified().await;
-        assert!(futures::poll!(&mut waiter).is_pending());
+        assert!(std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(
+                std::pin::Pin::new(&mut waiter),
+                cx,
+            ))
+        })
+        .await
+        .is_pending());
         cancel.cancel();
         // On the single-threaded test runtime, a Notify wakeup is ready after one cooperative
         // yield without advancing any timer wheel.
         tokio::task::yield_now().await;
-        assert!(futures::poll!(&mut waiter).is_ready());
+        assert!(std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(
+                std::pin::Pin::new(&mut waiter),
+                cx,
+            ))
+        })
+        .await
+        .is_ready());
     }
 
     #[tokio::test]

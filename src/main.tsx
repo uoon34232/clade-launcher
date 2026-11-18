@@ -15,14 +15,14 @@ async function main() {
   installInputModality();
 
   // Launcher preferences live in the portable settings file (data/settings.json), owned by the Rust
-  // backend. Load them before the first render so the UI starts with the right values; a slow or
-  // failing backend falls back to defaults rather than blocking the launcher.
-  const ui = await loadUiSettings();
+  // backend, and the window backdrop status comes from the same native layer. Fetch both in parallel
+  // before the first render so startup only pays one IPC round-trip.
+  const [ui, glassStatus] = await Promise.all([loadUiSettings(), loadGlassStatus()]);
   sound.hydrate(soundOf(ui));
   setMotionMode(ui.reducedMotion);
   // The window material is cosmetic: the page starts opaque and only switches once the backend says
   // the material is really on.
-  applyGlass(await loadGlassStatus());
+  applyGlass(glassStatus);
   void onGlassStatusChanged(applyGlass);
   // An explicit language choice wins; before one is ever made the Windows language decides.
   setLocale(localeOf(ui));

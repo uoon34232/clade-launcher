@@ -627,7 +627,12 @@ async fn metadata_that_fails_its_hash_is_never_used() {
 #[cfg(test)]
 impl World {
     fn fetcher_get(&self, url: &str) -> Vec<u8> {
-        futures::executor::block_on(self.fetcher.get(&Url::parse(url).unwrap(), 1 << 20)).unwrap()
+        use futures_util::FutureExt;
+        self.fetcher
+            .get(&Url::parse(url).unwrap(), 1 << 20)
+            .now_or_never()
+            .unwrap()
+            .unwrap()
     }
 }
 
