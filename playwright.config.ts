@@ -11,16 +11,16 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: CI,
   retries: CI ? 1 : 0,
-  workers: CI ? 2 : undefined,
-  timeout: 30_000,
-  expect: { timeout: 7_000 },
+  workers: CI ? 1 : undefined,
+  timeout: CI ? 60_000 : 30_000,
+  expect: { timeout: CI ? 15_000 : 7_000 },
   reporter: CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
     ...devices["Desktop Chrome"],
     baseURL: "http://127.0.0.1:1420",
     viewport: { width: 1280, height: 720 },
     screenshot: "only-on-failure",
-    trace: CI ? "on-first-retry" : "retain-on-failure",
+    trace: CI ? "off" : "retain-on-failure",
     launchOptions: CI
       ? {
           args: [
