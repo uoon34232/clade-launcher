@@ -63,6 +63,8 @@ jobs:
 
       # The same gates as normal CI, on the tagged commit.
       - run: pnpm check
+      - run: pnpm exec playwright install chromium
+      - run: pnpm test:e2e
       - name: Rust gates
         shell: pwsh
         working-directory: src-tauri
@@ -73,8 +75,6 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           cargo test --locked
           if ($LASTEXITCODE) { exit 1 }
-      - run: pnpm exec playwright install chromium
-      - run: pnpm test:e2e
 
       # The pinned runtime CAB, from the one URL in scripts/release/webview2-runtime.json, verified against
       # the pinned SHA-256 before it is used for anything.

@@ -7,8 +7,18 @@ const openSettings = async (page: Page) => {
   await settingsButton(page).click();
   const dialog = page.getByRole("dialog", { name: text("settings.title") });
   await expect(dialog).toBeVisible();
-  // let the dialog finish its own opening motion before anything is measured
-  await expect.poll(() => dialog.evaluate((d) => d.getAnimations().length)).toBe(0);
+  await page.evaluate(() => document.fonts.ready);
+  // Let the dialog finish its opening scale/fade motion (and reach scale 1) before measuring.
+  await expect
+    .poll(() =>
+      dialog.evaluate(
+        (d) =>
+          !d.hasAttribute("data-starting-style") &&
+          d.getAnimations({ subtree: true }).length === 0 &&
+          Math.abs(d.getBoundingClientRect().width - (d as HTMLElement).offsetWidth) < 0.5,
+      ),
+    )
+    .toBe(true);
 };
 const cat = (page: Page) => page.getByRole("button", { name: text("settings.cat") });
 
@@ -29,8 +39,13 @@ const position = (page: Page) =>
   cat(page).evaluate((el) => {
     const b = el.getBoundingClientRect();
     const d = el.closest('[role="dialog"]')?.getBoundingClientRect();
-    return [Math.round(b.left - (d?.left ?? 0)), Math.round(b.top - (d?.top ?? 0))];
+    return [b.left - (d?.left ?? 0), b.top - (d?.top ?? 0)] as const;
   });
+
+const expectSameSpot = (actual: readonly [number, number], before: readonly [number, number]) => {
+  expect(Math.abs(actual[0] - before[0])).toBeLessThanOrEqual(1);
+  expect(Math.abs(actual[1] - before[1])).toBeLessThanOrEqual(1);
+};
 
 /**
  * Watches the drawn cat (the button and the union of its strokes) frame by frame for `ms` and
@@ -81,13 +96,13 @@ test.describe("the cat in Settings", () => {
     // ears, eyes, tail and body move; the button itself never does
     const moving = await animatedProperties(page);
     expect(moving).toContain("transform");
-    expect(await position(page)).toEqual(before);
+    expectSameSpot(await position(page), before);
     // the small movements of ears, tail and body stay within a few pixels: it never runs anywhere
     expect(await watching).toBeLessThanOrEqual(4);
     // it settles back by itself and is still there
     await expect(cat(page)).not.toHaveAttribute("data-reaction", /.+/);
     await expect(cat(page)).toBeVisible();
-    expect(await position(page)).toEqual(before);
+    expectSameSpot(await position(page), before);
     expect(await animatedProperties(page)).toEqual([]);
   });
 
@@ -180,7 +195,7 @@ test.describe("the cat with reduced motion", () => {
     expect(await animatedProperties(page)).toEqual([]);
     // the eyes are the only thing that changes
     await expect(cat(page).locator(".cat-eyes")).toHaveCSS("opacity", "0.2");
-    expect(await position(page)).toEqual(before);
+    expectSameSpot(await position(page), before);
     await expect(cat(page)).not.toHaveAttribute("data-reaction", /.+/);
     await expect(cat(page).locator(".cat-eyes")).toHaveCSS("opacity", "1");
     await expect(cat(page)).toBeVisible();
