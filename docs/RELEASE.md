@@ -29,12 +29,12 @@ of any kind, may be in the package.** The validator enforces that (section 6).
 
 ## 2. What a release needs before it can run
 
-| Input                                                                                                                   | Where                                                                                                       | Status                                                                                          |
-| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| A pinned WebView2 Fixed Version: exact version, download URL, SHA-256 of the CAB, who accepted the redistribution terms | `scripts/release/webview2-runtime.json`                                                                     | **Pinned (154.0.4258.53). Approval fields empty: a person must record who accepted the terms.** |
-| A version that agrees everywhere, and a `## [X.Y.Z]` entry in `CHANGELOG.md`                                            | `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.lock`, `CHANGELOG.md` | Checked automatically                                                                           |
-| Mojang's approval of the Microsoft application ID, and a real-account launch verified by hand                           | external                                                                                                    | **Done.** Approved; verified on a development PC.                                               |
-| A completed clean-machine validation (section 9)                                                                        | external                                                                                                    | Not done yet                                                                                    |
+| Input                                                                                                                   | Where                                                                                                       | Status                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| A pinned WebView2 Fixed Version: exact version, download URL, SHA-256 of the CAB, who accepted the redistribution terms | `scripts/release/webview2-runtime.json`                                                                     | **Done.** Pinned (`154.0.4258.53`) and approved (`qcww`, `2026-11-18`). |
+| A version that agrees everywhere, and a `## [X.Y.Z]` entry in `CHANGELOG.md`                                            | `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.lock`, `CHANGELOG.md` | Checked automatically                                                   |
+| Mojang's approval of the Microsoft application ID, and a real-account launch verified by hand                           | external                                                                                                    | **Done.** Approved; verified on a development PC.                       |
+| A completed clean-machine validation (section 9)                                                                        | external                                                                                                    | Not done yet                                                            |
 
 ### The WebView2 pin
 
@@ -46,8 +46,8 @@ of any kind, may be in the package.** The validator enforces that (section 6).
   "architecture": "x64",
   "downloadUrl": "<Microsoft's download URL of the x64 Fixed Version CAB>",
   "sha256": "<SHA-256 of that CAB>",
-  "approvedBy": null,
-  "approvedOn": null
+  "approvedBy": "qcww",
+  "approvedOn": "2026-11-18"
 }
 ```
 
@@ -56,8 +56,8 @@ Fixed Version, x64), and the SHA-256 was computed locally from the downloaded CA
 (Microsoft Corporation) and `msedgewebview2.exe` ProductVersion were verified. The runtime that happens to be
 installed on a developer machine is never used as a pin.
 
-**`approvedBy` and `approvedOn` are intentionally empty and are the remaining manual step.** The release
-workflow refuses to run while they are empty (`webview2.mjs status`). A person must:
+**`approvedBy` and `approvedOn` record who reviewed the redistribution terms.** The release
+workflow refuses to run if either field is empty (`webview2.mjs status`). Whenever pinning or updating a runtime, a person must:
 
 1. Read the redistribution terms (`scripts/licenses/WebView2-Fixed-Version-License.txt`, from Microsoft). They
    require that end users are bound by terms protecting Microsoft at least as much, that the runtime is obtained

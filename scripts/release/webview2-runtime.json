@@ -1,9 +1,9 @@
 {
-  "_about": "The ONE approved Microsoft WebView2 Fixed Version Runtime a release may ship. version, downloadUrl and sha256 were taken from Microsoft's official WebView2 download page (https://developer.microsoft.com/microsoft-edge/webview2) and the CAB's SHA-256 was computed locally; its Authenticode signature (Microsoft Corporation) and the ProductVersion of msedgewebview2.exe were verified. approvedBy and approvedOn are deliberately empty: a release is blocked until a person who has read the redistribution terms (scripts/licenses/WebView2-Fixed-Version-License.txt) fills them in. See docs/RELEASE.md.",
+  "_about": "The ONE approved Microsoft WebView2 Fixed Version Runtime a release may ship. version, downloadUrl and sha256 were taken from Microsoft's official WebView2 download page (https://developer.microsoft.com/microsoft-edge/webview2) and the CAB's SHA-256 was computed locally; its Authenticode signature (Microsoft Corporation) and the ProductVersion of msedgewebview2.exe were verified. approvedBy and approvedOn record who reviewed and accepted the redistribution terms (scripts/licenses/WebView2-Fixed-Version-License.txt). See docs/RELEASE.md.",
   "version": "154.0.4258.53",
   "architecture": "x64",
   "downloadUrl": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/0b89c3a3-0043-4746-b39e-65830da7744d/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.53.x64.cab",
   "sha256": "ec12b2db6423d127fb8e1935d34e2e68abc70fe8ecb1f6162ba1c1ccc2825f6d",
-  "approvedBy": null,
-  "approvedOn": null
+  "approvedBy": "qcww",
+  "approvedOn": "2026-11-18"
 }
