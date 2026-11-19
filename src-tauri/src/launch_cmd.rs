@@ -394,6 +394,7 @@ pub async fn plan_launch<T: Transport>(
             access_token: token,
         },
         memory_mb,
+        resolution: inst.resolution,
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,

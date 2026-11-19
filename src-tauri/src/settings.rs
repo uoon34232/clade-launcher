@@ -36,6 +36,9 @@ pub const MOTION_MODES: [&str; 3] = ["system", "on", "off"];
 /// How the window material (the translucent "glass" treatment) is chosen: follow the Windows
 /// "Transparency effects" preference, always try it, or never use it.
 pub const TRANSPARENCY_MODES: [&str; 3] = ["system", "on", "off"];
+/// Whether the launcher shows only essential everyday controls (`simple`) or full power-user
+/// options (`advanced`).
+pub const UI_MODES: [&str; 2] = ["simple", "advanced"];
 /// What Clade does with its window when Minecraft starts.
 pub const ON_LAUNCH_MODES: [&str; 2] = ["keep_open", "hide"];
 /// What Clade does with its window when Minecraft closes.
@@ -52,6 +55,8 @@ pub struct UiPrefs {
     /// The language the person chose (`en` or `ru`). `None` means "never chosen": the UI then
     /// follows the Windows language, and an explicit choice is never overridden afterwards.
     pub language: Option<String>,
+    /// `simple` (minimal everyday controls) or `advanced` (full controls).
+    pub ui_mode: String,
     /// `system` (follow Windows), `on` or `off`.
     pub reduced_motion: String,
     /// `system` (follow the Windows "Transparency effects" setting), `on` or `off`.
@@ -67,6 +72,7 @@ impl Default for UiPrefs {
             sound: SoundPrefs::default(),
             last_phrase: None,
             language: None,
+            ui_mode: "simple".to_owned(),
             reduced_motion: "system".to_owned(),
             transparency: "system".to_owned(),
             onboarding_done: false,
@@ -170,6 +176,9 @@ impl UiPrefs {
             .is_some_and(|l| !is_supported_language(l))
         {
             self.language = None;
+        }
+        if !UI_MODES.contains(&self.ui_mode.as_str()) {
+            self.ui_mode = Self::default().ui_mode;
         }
         if !MOTION_MODES.contains(&self.reduced_motion.as_str()) {
             self.reduced_motion = Self::default().reduced_motion;
@@ -334,6 +343,7 @@ impl LauncherSettings {
                     &mut bad,
                 ),
                 language: leaf(&ui, "language", "ui.language", d.ui.language, &mut bad),
+                ui_mode: leaf(&ui, "ui_mode", "ui.ui_mode", d.ui.ui_mode, &mut bad),
                 reduced_motion: leaf(
                     &ui,
                     "reduced_motion",
@@ -462,6 +472,15 @@ impl LauncherSettings {
             return false;
         }
         self.ui.language = Some(code.to_owned());
+        true
+    }
+
+    /// Records the interface complexity mode (`simple` or `advanced`).
+    pub fn set_ui_mode(&mut self, mode: &str) -> bool {
+        if !UI_MODES.contains(&mode) {
+            return false;
+        }
+        self.ui.ui_mode = mode.to_owned();
         true
     }
 
@@ -1273,5 +1292,23 @@ mod tests {
             Err(SettingsError::FolderTooNew { .. })
         ));
         assert!(p.is_file());
+    }
+
+    #[test]
+    fn ui_mode_defaults_to_simple_switches_to_advanced_and_sanitizes_unknown_values() {
+        let mut s = LauncherSettings::default();
+        assert_eq!(s.ui.ui_mode, "simple");
+        assert!(s.set_ui_mode("advanced"));
+        assert_eq!(s.ui.ui_mode, "advanced");
+        assert!(!s.set_ui_mode("expert"));
+        assert_eq!(s.ui.ui_mode, "advanced");
+        assert!(s.reset_user_prefs());
+        assert_eq!(s.ui.ui_mode, "simple");
+
+        let mut doc = full_valid();
+        doc["ui"]["ui_mode"] = serde_json::json!("turbo");
+        let (_d, salvaged) = load_json(&doc);
+        assert_eq!(salvaged.ui.ui_mode, "simple");
+        assert_eq!(salvaged.ui.language.as_deref(), Some("ru"));
     }
 }

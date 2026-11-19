@@ -44,6 +44,16 @@ const MANIFEST: &str = "instance.json";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_JVM_ARGS: usize = 64;
 const MAX_JVM_ARG_LEN: usize = 512;
+pub const MIN_RESOLUTION_WIDTH: u32 = 320;
+pub const MAX_RESOLUTION_WIDTH: u32 = 7680;
+pub const MIN_RESOLUTION_HEIGHT: u32 = 240;
+pub const MAX_RESOLUTION_HEIGHT: u32 = 4320;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstanceError {
@@ -55,6 +65,8 @@ pub enum InstanceError {
     BadName(&'static str),
     #[error("invalid JVM argument: {0}")]
     BadJvmArg(&'static str),
+    #[error("invalid resolution: {0}")]
+    BadResolution(&'static str),
     #[error("instance '{0}' does not exist")]
     NotFound(String),
     #[error("instance manifest in '{dir}' claims id '{claimed}'")]
@@ -177,6 +189,8 @@ pub struct Instance {
     pub setup: SetupState,
     pub java: JavaChoice,
     pub memory_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
     /// Untrusted user input; validated for shape here and shown to the user before launch.
     pub extra_jvm_args: Vec<String>,
     pub created_at: i64,
@@ -254,6 +268,8 @@ pub struct NewInstance {
     pub java: JavaChoice,
     #[serde(default)]
     pub memory_mb: Option<u32>,
+    #[serde(default)]
+    pub resolution: Option<Resolution>,
     #[serde(skip)]
     pub extra_jvm_args: Vec<String>,
 }
@@ -267,6 +283,7 @@ impl NewInstance {
             profile: Profile::Vanilla,
             java: JavaChoice::Auto,
             memory_mb: None,
+            resolution: None,
             extra_jvm_args: Vec::new(),
         })
     }
@@ -287,6 +304,7 @@ impl NewInstance {
             },
             java: JavaChoice::Auto,
             memory_mb: None,
+            resolution: None,
             extra_jvm_args: Vec::new(),
         })
     }
@@ -430,6 +448,19 @@ fn validate_jvm_args(args: &[String]) -> Result<(), InstanceError> {
         if FORBIDDEN_JVM_PREFIXES.iter().any(|p| lower.starts_with(p)) || !is_allowed_jvm_arg(a) {
             return Err(InstanceError::BadJvmArg(
                 "flag is not in the safe JVM allowlist",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_resolution(resolution: Option<Resolution>) -> Result<(), InstanceError> {
+    if let Some(r) = resolution {
+        if !(MIN_RESOLUTION_WIDTH..=MAX_RESOLUTION_WIDTH).contains(&r.width)
+            || !(MIN_RESOLUTION_HEIGHT..=MAX_RESOLUTION_HEIGHT).contains(&r.height)
+        {
+            return Err(InstanceError::BadResolution(
+                "dimensions outside the allowed window range",
             ));
         }
     }
@@ -611,9 +642,11 @@ impl<'a> InstanceStore<'a> {
                 setup: SetupState::Pending,
                 java: new.java,
                 memory_mb: new.memory_mb,
+                resolution: new.resolution,
                 extra_jvm_args: new.extra_jvm_args,
                 created_at: now,
             };
+            validate_resolution(instance.resolution)?;
             atomic_write(
                 &dirs.manifest_file(),
                 &serde_json::to_vec_pretty(&instance)?,
@@ -669,6 +702,7 @@ impl<'a> InstanceStore<'a> {
             });
         }
         validate_jvm_args(&inst.extra_jvm_args)?;
+        validate_resolution(inst.resolution)?;
         validate_consistency(&inst)?;
         Ok(inst)
     }
@@ -722,6 +756,38 @@ impl<'a> InstanceStore<'a> {
     ) -> Result<Instance, InstanceError> {
         let mut inst = self.get(id)?;
         inst.memory_mb = memory_mb;
+        atomic_write(
+            &self.dirs(id).manifest_file(),
+            &serde_json::to_vec_pretty(&inst)?,
+        )?;
+        Ok(inst)
+    }
+
+    /// Sets or clears (`None` = game default) the profile's initial game window resolution.
+    pub fn set_resolution(
+        &self,
+        id: &InstanceId,
+        resolution: Option<Resolution>,
+    ) -> Result<Instance, InstanceError> {
+        validate_resolution(resolution)?;
+        let mut inst = self.get(id)?;
+        inst.resolution = resolution;
+        atomic_write(
+            &self.dirs(id).manifest_file(),
+            &serde_json::to_vec_pretty(&inst)?,
+        )?;
+        Ok(inst)
+    }
+
+    /// Updates the profile's validated extra JVM flags (`vec![]` clears them).
+    pub fn set_jvm_args(
+        &self,
+        id: &InstanceId,
+        args: Vec<String>,
+    ) -> Result<Instance, InstanceError> {
+        validate_jvm_args(&args)?;
+        let mut inst = self.get(id)?;
+        inst.extra_jvm_args = args;
         atomic_write(
             &self.dirs(id).manifest_file(),
             &serde_json::to_vec_pretty(&inst)?,
@@ -852,6 +918,7 @@ impl<'a> InstanceStore<'a> {
                 setup: source.setup,
                 java: source.java,
                 memory_mb: source.memory_mb,
+                resolution: source.resolution,
                 extra_jvm_args: source.extra_jvm_args,
                 created_at: now,
             };
@@ -1714,6 +1781,73 @@ mod tests {
         );
         assert!(!copy_dirs.natives_dir().exists());
         assert!(!copy_dirs.playtime_file().exists());
+    }
+
+    #[test]
+    fn set_resolution_and_jvm_args_validate_persist_and_reject_unsafe_inputs() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let inst = store
+            .create(NewInstance::vanilla("Bench", "1.21.4").unwrap(), 300)
+            .unwrap();
+        assert_eq!(inst.resolution, None);
+        assert!(inst.extra_jvm_args.is_empty());
+
+        let updated = store
+            .set_resolution(
+                &inst.id,
+                Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            updated.resolution,
+            Some(Resolution {
+                width: 1280,
+                height: 720
+            })
+        );
+        assert!(matches!(
+            store.set_resolution(
+                &inst.id,
+                Some(Resolution {
+                    width: 100,
+                    height: 720
+                })
+            ),
+            Err(InstanceError::BadResolution(_))
+        ));
+        assert_eq!(
+            store.set_resolution(&inst.id, None).unwrap().resolution,
+            None
+        );
+
+        let with_jvm = store
+            .set_jvm_args(
+                &inst.id,
+                vec![
+                    "-XX:+UseStringDeduplication".into(),
+                    "-Dfml.readTimeout=120".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(with_jvm.extra_jvm_args.len(), 2);
+        for forbidden in ["-Xmx4G", "-javaagent:evil.jar", "-cp", "plain"] {
+            assert!(
+                matches!(
+                    store.set_jvm_args(&inst.id, vec![forbidden.into()]),
+                    Err(InstanceError::BadJvmArg(_))
+                ),
+                "{forbidden}"
+            );
+        }
+        assert!(store
+            .set_jvm_args(&inst.id, vec![])
+            .unwrap()
+            .extra_jvm_args
+            .is_empty());
     }
 }
 
