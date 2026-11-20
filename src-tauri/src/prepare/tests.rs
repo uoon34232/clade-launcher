@@ -118,17 +118,11 @@ pub(crate) fn add_runtime(f: &FakeFetcher, s: &FakeStreamer, components: &[&str]
     let mut index = serde_json::Map::new();
     let mut urls = Vec::new();
     for (n, comp) in components.iter().enumerate() {
-        let mut files: Vec<(&str, Vec<u8>)> = vec![
-            ("bin/java", bytes(300, 1 + n as u8)),
+        let files: Vec<(&str, Vec<u8>)> = vec![
             ("bin/java.exe", bytes(300, 1 + n as u8)),
             ("bin/javaw.exe", bytes(200, 2 + n as u8)),
             ("lib/modules", bytes(2000, 3 + n as u8)),
         ];
-        if !cfg!(windows) {
-            files.retain(|(p, _)| *p != "bin/java.exe" && *p != "bin/javaw.exe");
-        } else {
-            files.retain(|(p, _)| *p != "bin/java");
-        }
         let mut entries = serde_json::Map::new();
         entries.insert("bin".into(), json!({"type": "directory"}));
         entries.insert("lib".into(), json!({"type": "directory"}));
@@ -136,7 +130,7 @@ pub(crate) fn add_runtime(f: &FakeFetcher, s: &FakeStreamer, components: &[&str]
             let url = format!("{DATA}/{}/{comp}/{path}", sha1_hex(data));
             s.add(&url, data);
             urls.push(url.clone());
-            entries.insert((*path).into(), json!({"type": "file", "executable": path.starts_with("bin/"), "downloads": {"raw": {"sha1": sha1_hex(data), "size": data.len(), "url": url}}}));
+            entries.insert((*path).into(), json!({"type": "file", "downloads": {"raw": {"sha1": sha1_hex(data), "size": data.len(), "url": url}}}));
         }
         let manifest = json!({"files": entries}).to_string();
         let manifest_url =
@@ -147,10 +141,7 @@ pub(crate) fn add_runtime(f: &FakeFetcher, s: &FakeStreamer, components: &[&str]
             json!([{"availability": {"group": 1, "progress": 100}, "manifest": {"sha1": sha1_hex(manifest.as_bytes()), "size": manifest.len(), "url": manifest_url}, "version": {"name": "9.9.9", "released": "2025-01-01T00:00:00+00:00"}}]),
         );
     }
-    f.ok(
-        RUNTIME_INDEX_URL,
-        json!({"windows-x64": index, "linux": index}).to_string(),
-    );
+    f.ok(RUNTIME_INDEX_URL, json!({"windows-x64": index}).to_string());
     urls
 }
 
@@ -167,88 +158,44 @@ pub(crate) fn world(mc: &str, era: Era) -> World {
     let lib_path = "com/example/alpha/1.0/alpha-1.0.jar";
     let lib_url = format!("{LIBS}/{lib_path}");
     streamer.add(&lib_url, &lib_a);
-    let native_jar = zip_of(&[
-        (
-            if cfg!(windows) {
-                "windows/x64/org/lwjgl/lwjgl.dll"
-            } else {
-                "linux/x64/org/lwjgl/liblwjgl.so"
-            },
-            b"native-bytes",
-        ),
-        (
-            if cfg!(windows) {
-                "lwjgl.dll"
-            } else {
-                "liblwjgl.so"
-            },
-            b"old-style-native",
-        ),
+    let dll_jar = zip_of(&[
+        ("windows/x64/org/lwjgl/lwjgl.dll", b"dll-bytes"),
+        ("lwjgl.dll", b"old-style-dll"),
         ("META-INF/MANIFEST.MF", b"x"),
     ]);
-    let libraries = match era {
+    let (native_path, libraries) = match era {
         Era::Modern => {
-            let win_p = "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar";
-            let lin_p = "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar";
-            let (win_url, win_sha, win_sz) = if cfg!(windows) {
-                let u = format!("{LIBS}/{win_p}");
-                streamer.add(&u, &native_jar);
-                (u, sha1_hex(&native_jar), native_jar.len())
-            } else {
-                (
-                    format!("{LIBS}/never-fetched.jar"),
-                    sha1_hex(b"never fetched"),
-                    13,
-                )
-            };
-            let (lin_url, lin_sha, lin_sz) = if cfg!(windows) {
-                (
-                    format!("{LIBS}/never-fetched.jar"),
-                    sha1_hex(b"never fetched"),
-                    13,
-                )
-            } else {
-                let u = format!("{LIBS}/{lin_p}");
-                streamer.add(&u, &native_jar);
-                (u, sha1_hex(&native_jar), native_jar.len())
-            };
-            json!([
-                {"name": "com.example:alpha:1.0", "downloads": {"artifact": {"path": lib_path, "sha1": sha1_hex(&lib_a), "size": lib_a.len(), "url": lib_url}}},
-                {"name": "org.lwjgl:lwjgl:3.3.3:natives-windows", "rules": [{"action": "allow", "os": {"name": "windows"}}],
-                 "downloads": {"artifact": {"path": win_p, "sha1": win_sha, "size": win_sz, "url": win_url}}},
-                {"name": "org.lwjgl:lwjgl:3.3.3:natives-linux", "rules": [{"action": "allow", "os": {"name": "linux"}}],
-                 "downloads": {"artifact": {"path": lin_p, "sha1": lin_sha, "size": lin_sz, "url": lin_url}}},
-            ])
+            let np = "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar";
+            streamer.add(&format!("{LIBS}/{np}"), &dll_jar);
+            (
+                np,
+                json!([
+                    {"name": "com.example:alpha:1.0", "downloads": {"artifact": {"path": lib_path, "sha1": sha1_hex(&lib_a), "size": lib_a.len(), "url": lib_url}}},
+                    {"name": "org.lwjgl:lwjgl:3.3.3:natives-windows", "rules": [{"action": "allow", "os": {"name": "windows"}}],
+                     "downloads": {"artifact": {"path": np, "sha1": sha1_hex(&dll_jar), "size": dll_jar.len(), "url": format!("{LIBS}/{np}")}}},
+                    {"name": "org.lwjgl:lwjgl:3.3.3:natives-linux", "rules": [{"action": "allow", "os": {"name": "linux"}}],
+                     "downloads": {"artifact": {"path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar", "sha1": sha1_hex(b"never fetched"), "size": 13, "url": format!("{LIBS}/never-fetched.jar")}}},
+                ]),
+            )
         }
         Era::Pre16 | Era::Virtual => {
-            let win_p =
+            let np =
                 "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows.jar";
-            let lin_p =
-                "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-linux.jar";
-            let (win_url, win_sha, win_sz) = if cfg!(windows) {
-                let u = format!("{LIBS}/{win_p}");
-                streamer.add(&u, &native_jar);
-                (u, sha1_hex(&native_jar), native_jar.len())
-            } else {
-                (format!("{LIBS}/never-fetched.jar"), sha1_hex(b"w"), 1)
-            };
-            let (lin_url, lin_sha, lin_sz) = if cfg!(windows) {
-                (format!("{LIBS}/never-fetched.jar"), sha1_hex(b"l"), 1)
-            } else {
-                let u = format!("{LIBS}/{lin_p}");
-                streamer.add(&u, &native_jar);
-                (u, sha1_hex(&native_jar), native_jar.len())
-            };
-            json!([
-                {"name": "com.example:alpha:1.0", "downloads": {"artifact": {"path": lib_path, "sha1": sha1_hex(&lib_a), "size": lib_a.len(), "url": lib_url}}},
-                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4", "natives": {"windows": "natives-windows", "linux": "natives-linux"},
-                 "extract": {"exclude": ["META-INF/"]},
-                 "downloads": {"classifiers": {
-                    "natives-windows": {"path": win_p, "sha1": win_sha, "size": win_sz, "url": win_url},
-                    "natives-linux": {"path": lin_p, "sha1": lin_sha, "size": lin_sz, "url": lin_url}}}},
-            ])
+            streamer.add(&format!("{LIBS}/{np}"), &dll_jar);
+            (
+                np,
+                json!([
+                    {"name": "com.example:alpha:1.0", "downloads": {"artifact": {"path": lib_path, "sha1": sha1_hex(&lib_a), "size": lib_a.len(), "url": lib_url}}},
+                    {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4", "natives": {"windows": "natives-windows", "linux": "natives-linux"},
+                     "extract": {"exclude": ["META-INF/"]},
+                     "downloads": {"classifiers": {
+                        "natives-windows": {"path": np, "sha1": sha1_hex(&dll_jar), "size": dll_jar.len(), "url": format!("{LIBS}/{np}")},
+                        "natives-linux": {"path": "x/linux.jar", "sha1": sha1_hex(b"l"), "size": 1, "url": format!("{LIBS}/never-fetched.jar")}}}},
+                ]),
+            )
         }
     };
+    let _ = native_path;
 
     // client, logging, assets
     let client = bytes(3000, 5);
@@ -429,12 +376,10 @@ async fn a_modern_vanilla_profile_is_fully_prepared_and_marked_ready() {
         .libraries_dir()
         .join("com/example/alpha/1.0/alpha-1.0.jar")
         .is_file());
-    let host_native_jar = if cfg!(windows) {
-        "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar"
-    } else {
-        "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar"
-    };
-    assert!(r.libraries_dir().join(host_native_jar).is_file());
+    assert!(r
+        .libraries_dir()
+        .join("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar")
+        .is_file());
     assert!(log_config_path(r, "client-1.21.2.xml").is_file());
     assert!(asset_index_path(r, "19").is_file());
     for u in &w.asset_urls {
@@ -449,12 +394,10 @@ async fn a_modern_vanilla_profile_is_fully_prepared_and_marked_ready() {
         .all(|(u, _)| !u.contains("never-fetched")));
     // Natives live only in the instance.
     let natives = InstanceStore::new(r).dirs(&id).natives_dir();
-    let native_rel = if cfg!(windows) {
-        "windows/x64/org/lwjgl/lwjgl.dll"
-    } else {
-        "linux/x64/org/lwjgl/liblwjgl.so"
-    };
-    assert_eq!(fs::read(natives.join(native_rel)).unwrap(), b"native-bytes");
+    assert_eq!(
+        fs::read(natives.join("windows/x64/org/lwjgl/lwjgl.dll")).unwrap(),
+        b"dll-bytes"
+    );
     assert!(!natives.join("META-INF").exists());
     // The delta runtime for Java 21 is installed under runtimes/java.
     let java = java_install::find_installed(r, "java-runtime-delta").unwrap();
@@ -635,14 +578,12 @@ async fn verify_files_also_checks_and_repairs_the_managed_java_runtime() {
     assert!(again.exe.starts_with(w.root.java_runtimes_dir()));
 
     // and a missing file is restored too
-    fs::remove_file(java.home.join(crate::java_install::JAVA_EXE)).unwrap();
+    fs::remove_file(java.home.join("bin").join("java.exe")).unwrap();
     prepare_instance(&deep, &id).await.unwrap();
-    assert!(java.home.join(crate::java_install::JAVA_EXE).is_file());
-    if let Some(javaw) = crate::java_install::JAVAW_EXE {
-        fs::remove_file(java.home.join(javaw)).unwrap();
-        prepare_instance(&deep, &id).await.unwrap();
-        assert!(java.home.join(javaw).is_file());
-    }
+    assert!(java.home.join("bin").join("java.exe").is_file());
+    fs::remove_file(java.home.join("bin").join("javaw.exe")).unwrap();
+    prepare_instance(&deep, &id).await.unwrap();
+    assert!(java.home.join("bin").join("javaw.exe").is_file());
 }
 
 #[tokio::test]
@@ -705,14 +646,9 @@ async fn a_pre_1_6_version_uses_the_historical_natives_map_and_resource_layout()
     assert!(inst.is_ready());
     let dirs = InstanceStore::new(&w.root).dirs(&id);
     // The historical classifier jar was extracted (META-INF excluded), not placed on a classpath.
-    let old_native = if cfg!(windows) {
-        "lwjgl.dll"
-    } else {
-        "liblwjgl.so"
-    };
     assert_eq!(
-        fs::read(dirs.natives_dir().join(old_native)).unwrap(),
-        b"old-style-native"
+        fs::read(dirs.natives_dir().join("lwjgl.dll")).unwrap(),
+        b"old-style-dll"
     );
     assert!(!dirs.natives_dir().join("META-INF").exists());
     // Assets are mapped into this instance's game folder, by name.
@@ -1760,29 +1696,14 @@ async fn loader_natives_override_and_supplement_vanilla_natives_because_extracti
         &loader_jar,
     );
 
-    let classifier = if cfg!(windows) {
-        "natives-windows"
-    } else {
-        "natives-linux"
-    };
-    let upgraded_entry = if cfg!(windows) {
-        "windows/x64/org/lwjgl/lwjgl.dll"
-    } else {
-        "linux/x64/org/lwjgl/liblwjgl.so"
-    };
-    let extra_entry = if cfg!(windows) {
-        "fabric_extra.dll"
-    } else {
-        "libfabric_extra.so"
-    };
-    // Override vanilla's native library AND add a supplemental native library.
-    let upgraded_lwjgl = zip_of(&[(upgraded_entry, b"loader-upgraded-dll")]);
-    let upgraded_path = format!("org/lwjgl/lwjgl/3.3.4/lwjgl-3.3.4-{classifier}.jar");
+    // Override vanilla's `org.lwjgl:lwjgl:natives-windows` AND add a supplemental native library.
+    let upgraded_lwjgl = zip_of(&[("windows/x64/org/lwjgl/lwjgl.dll", b"loader-upgraded-dll")]);
+    let upgraded_path = "org/lwjgl/lwjgl/3.3.4/lwjgl-3.3.4-natives-windows.jar";
     w.streamer
         .add(&format!("{LIBS}/{upgraded_path}"), &upgraded_lwjgl);
 
-    let extra_native = zip_of(&[(extra_entry, b"supplemental-dll")]);
-    let extra_path = format!("net/fabricmc/extra-native/1.0/extra-native-1.0-{classifier}.jar");
+    let extra_native = zip_of(&[("fabric_extra.dll", b"supplemental-dll")]);
+    let extra_path = "net/fabricmc/extra-native/1.0/extra-native-1.0-natives-windows.jar";
     w.streamer.add(
         &format!("https://maven.fabricmc.net/{extra_path}"),
         &extra_native,
@@ -1794,10 +1715,10 @@ async fn loader_natives_override_and_supplement_vanilla_natives_because_extracti
         "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
         "libraries": [
             {"name": "net.fabricmc:fabric-loader:0.16.9", "url": "https://maven.fabricmc.net/", "sha1": sha1_hex(&loader_jar), "size": loader_jar.len()},
-            {"name": format!("org.lwjgl:lwjgl:3.3.4:{classifier}"), "downloads": {"artifact": {
+            {"name": "org.lwjgl:lwjgl:3.3.4:natives-windows", "downloads": {"artifact": {
                 "path": upgraded_path, "sha1": sha1_hex(&upgraded_lwjgl), "size": upgraded_lwjgl.len(), "url": format!("{LIBS}/{upgraded_path}")
             }}},
-            {"name": format!("net.fabricmc:extra-native:1.0:{classifier}"), "downloads": {"artifact": {
+            {"name": "net.fabricmc:extra-native:1.0:natives-windows", "downloads": {"artifact": {
                 "path": extra_path, "sha1": sha1_hex(&extra_native), "size": extra_native.len(), "url": format!("https://maven.fabricmc.net/{extra_path}")
             }}}
         ]
@@ -1839,12 +1760,12 @@ async fn loader_natives_override_and_supplement_vanilla_natives_because_extracti
 
     let natives = InstanceStore::new(&w.root).dirs(&id).natives_dir();
     assert_eq!(
-        fs::read(natives.join(upgraded_entry)).unwrap(),
+        fs::read(natives.join("windows/x64/org/lwjgl/lwjgl.dll")).unwrap(),
         b"loader-upgraded-dll",
         "loader's native jar must override vanilla's"
     );
     assert_eq!(
-        fs::read(natives.join(extra_entry)).unwrap(),
+        fs::read(natives.join("fabric_extra.dll")).unwrap(),
         b"supplemental-dll",
         "loader's supplemental native jar must also be extracted"
     );
@@ -1992,7 +1913,7 @@ async fn bytes_to_download_rounds_up_to_cluster_slack_counts_legacy_asset_copies
     let vjson = ensure_version_json(&c, &McVersion::new("b1.7.3").unwrap())
         .await
         .unwrap();
-    let plan = parse_version(&vjson, &HOST_TARGET).unwrap();
+    let plan = parse_version(&vjson, &WINDOWS_X64).unwrap();
     let dl = c.downloader();
     let (assets_name, index) = ensure_asset_index(&c, &dl, &plan).await.unwrap().unwrap();
     let rp = java_install::plan_runtime(&w.fetcher, &plan.java.component)

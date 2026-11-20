@@ -38,20 +38,13 @@ fn env() -> Env {
     }
 }
 
-/// A controlled stand-in for the game: an ordinary child process running a tiny script.
+/// A controlled stand-in for the game: an ordinary Windows process running a tiny script.
 #[cfg(test)]
-fn child(script_win: &str, script_unix: &str) -> Child {
+fn child(script: &str) -> Child {
     // Test code only: production spawns go through `GameCommand::to_process`.
-    let mut cmd = if cfg!(windows) {
-        let mut c = tokio::process::Command::new("cmd");
-        c.args(["/D", "/C", script_win]);
-        c
-    } else {
-        let mut c = tokio::process::Command::new("/bin/sh");
-        c.args(["-c", script_unix]);
-        c
-    };
-    cmd.stdin(Stdio::null())
+    tokio::process::Command::new("cmd")
+        .args(["/D", "/C", script])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -83,10 +76,7 @@ fn session(e: &Env, pid: u32) -> SessionTracker {
 #[tokio::test]
 async fn a_normal_exit_is_logged_summarised_and_counted_as_played_time() {
     let e = env();
-    let c = child(
-        "echo Setting user: Steve & echo Reached the main menu & ping -n 3 127.0.0.1 >nul & exit /b 0",
-        "echo 'Setting user: Steve'; echo 'Reached the main menu'; sleep 2; exit 0",
-    );
+    let c = child("echo Setting user: Steve & echo Reached the main menu & ping -n 3 127.0.0.1 >nul & exit /b 0");
     let tracker = session(&e, c.id().unwrap());
     let playing = Arc::new(AtomicUsize::new(0));
     let p2 = playing.clone();
@@ -130,10 +120,7 @@ async fn a_normal_exit_is_logged_summarised_and_counted_as_played_time() {
 #[tokio::test]
 async fn a_crash_still_counts_the_time_played_and_is_explained_briefly() {
     let e = env();
-    let c = child(
-        "echo Exception in thread \"main\" java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path 1>&2 & exit /b 1",
-        "echo 'Exception in thread \"main\" java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path' >&2; exit 1",
-    );
+    let c = child("echo Exception in thread \"main\" java.lang.UnsatisfiedLinkError: no lwjgl in java.library.path 1>&2 & exit /b 1");
     let tracker = session(&e, c.id().unwrap());
     let out = supervise(c, watch(&e, &[], Some(tracker)), || {}).await;
     assert_eq!(out.exit.code, Some(1));
@@ -166,14 +153,9 @@ async fn a_crash_still_counts_the_time_played_and_is_explained_briefly() {
 async fn the_session_secrets_never_reach_the_log_or_the_summary() {
     let e = env();
     let token = "SECRET-ACCESS-TOKEN-0123456789".to_owned();
-    let c = child(
-        &format!(
-            "echo launching with --accessToken {token} 1>&2 & echo token:{token}:uuid & exit /b 2"
-        ),
-        &format!(
-            "echo 'launching with --accessToken {token}' >&2; echo 'token:{token}:uuid'; exit 2"
-        ),
-    );
+    let c = child(&format!(
+        "echo launching with --accessToken {token} 1>&2 & echo token:{token}:uuid & exit /b 2"
+    ));
     let secrets = [token.clone()];
     let out = supervise(c, watch(&e, &secrets, None), || {}).await;
     let log = fs::read_to_string(out.log_path.unwrap()).unwrap();
@@ -190,7 +172,7 @@ async fn a_process_that_dies_inside_the_grace_period_never_becomes_playing() {
     let c2 = called.clone();
     let mut w = watch(&e, &[], None);
     w.grace = Duration::from_secs(30);
-    supervise(child("exit /b 1", "exit 1"), w, move || {
+    supervise(child("exit /b 1"), w, move || {
         c2.fetch_add(1, Ordering::SeqCst);
     })
     .await;
@@ -201,7 +183,7 @@ async fn a_process_that_dies_inside_the_grace_period_never_becomes_playing() {
 async fn the_supervisor_keeps_working_when_its_starter_is_gone() {
     // Closing Clade's window must not end the watch: it is an independent task that owns the child.
     let e = env();
-    let c = child("ping -n 3 127.0.0.1 >nul & exit /b 0", "sleep 2; exit 0");
+    let c = child("ping -n 3 127.0.0.1 >nul & exit /b 0");
     let tracker = session(&e, c.id().unwrap());
     let (root, id) = (e.root.clone(), e.id.clone());
     let handle = tokio::spawn(async move {
@@ -224,23 +206,10 @@ async fn the_supervisor_keeps_working_when_its_starter_is_gone() {
     assert!((1..=5).contains(&secs));
 }
 
-#[cfg(test)]
-fn exit_status(c: u32) -> Option<ExitStatus> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::ExitStatusExt;
-        Some(ExitStatus::from_raw(c))
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        Some(ExitStatus::from_raw(((c & 0xff) as i32) << 8))
-    }
-}
-
 #[test]
 fn exits_are_classified_into_short_human_messages() {
-    let code = exit_status;
+    use std::os::windows::process::ExitStatusExt;
+    let code = |c: u32| Some(ExitStatus::from_raw(c));
     let lines = |s: &str| vec![s.to_owned()];
     let long = Duration::from_secs(300);
     let short = Duration::from_secs(3);
@@ -277,7 +246,8 @@ fn exits_are_classified_into_short_human_messages() {
 
 #[test]
 fn every_exit_carries_a_stable_reason_code_for_the_ui_to_word() {
-    let code = exit_status;
+    use std::os::windows::process::ExitStatusExt;
+    let code = |c: u32| Some(ExitStatus::from_raw(c));
     let lines = |s: &str| vec![s.to_owned()];
     let long = Duration::from_secs(300);
     let short = Duration::from_secs(1);
@@ -359,20 +329,12 @@ fn only_the_newest_logs_are_kept_and_the_redactor_ignores_trivial_secrets() {
 
 /// A child whose stdout and stderr are the launcher-owned output file, exactly like a real game.
 #[cfg(test)]
-fn child_with_output_file(script_win: &str, script_unix: &str, e: &Env) -> (Child, PathBuf) {
+fn child_with_output_file(script: &str, e: &Env) -> (Child, PathBuf) {
     let (file, path) = open_output(&e.root, &e.id).unwrap();
     let other = file.try_clone().unwrap();
     // Test code only: production spawns go through `GameCommand::to_process`.
-    let mut cmd = if cfg!(windows) {
-        let mut c = tokio::process::Command::new("cmd");
-        c.args(["/D", "/C", script_win]);
-        c
-    } else {
-        let mut c = tokio::process::Command::new("/bin/sh");
-        c.args(["-c", script_unix]);
-        c
-    };
-    let c = cmd
+    let c = tokio::process::Command::new("cmd")
+        .args(["/D", "/C", script])
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(other))
@@ -388,9 +350,6 @@ async fn output_written_to_the_launcher_owned_file_reaches_the_redacted_session_
     let (c, path) = child_with_output_file(
         &format!(
             "echo Setting user: Steve & echo token:{token}:uuid 1>&2 & ping -n 2 127.0.0.1 >nul & echo last line without newline<nul & exit /b 0"
-        ),
-        &format!(
-            "echo 'Setting user: Steve'; echo 'token:{token}:uuid' >&2; sleep 1; printf 'last line without newline'; exit 0"
         ),
         &e,
     );
@@ -416,7 +375,6 @@ async fn a_crash_is_still_detected_and_explained_when_the_output_is_a_file() {
     let e = env();
     let (c, path) = child_with_output_file(
         "echo Exception in thread main java.lang.OutOfMemoryError: Java heap space 1>&2 & ping -n 2 127.0.0.1 >nul & exit /b 1",
-        "echo 'Exception in thread main java.lang.OutOfMemoryError: Java heap space' >&2; sleep 1; exit 1",
         &e,
     );
     let mut w = watch(&e, &[], None);
@@ -435,7 +393,6 @@ async fn a_game_whose_output_is_a_file_keeps_running_and_keeps_writing_with_nobo
     let e = env();
     let (mut c, path) = child_with_output_file(
         "echo before & ping -n 3 127.0.0.1 >nul & echo after the reader would have gone & exit /b 0",
-        "echo before; sleep 2; echo 'after the reader would have gone'; exit 0",
         &e,
     );
     let status = c.wait().await.unwrap();
@@ -589,17 +546,11 @@ async fn lines_are_cut_on_newlines_and_a_partial_line_waits_for_the_rest() {
 #[tokio::test]
 async fn rapid_restarts_within_the_same_second_write_distinct_pid_stamped_logs() {
     let e = env();
-    let c1 = child(
-        "echo first session & exit /b 0",
-        "echo 'first session'; exit 0",
-    );
+    let c1 = child("echo first session & exit /b 0");
     let pid1 = c1.id().unwrap();
     let out1 = supervise(c1, watch(&e, &[], None), || {}).await;
 
-    let c2 = child(
-        "echo second session & exit /b 0",
-        "echo 'second session'; exit 0",
-    );
+    let c2 = child("echo second session & exit /b 0");
     let pid2 = c2.id().unwrap();
     let out2 = supervise(c2, watch(&e, &[], None), || {}).await;
 
@@ -631,16 +582,8 @@ fn sweep_output_preserves_live_game_output_while_emptying_stale_files() {
     live_out.write_all(b"still playing\n").unwrap();
     dead_out.write_all(b"already exited\n").unwrap();
 
-    let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"]);
-        c
-    } else {
-        let mut c = std::process::Command::new("/bin/sh");
-        c.args(["-c", "sleep 2"]);
-        c
-    };
-    let mut proc = cmd
+    let mut proc = std::process::Command::new("cmd")
+        .args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

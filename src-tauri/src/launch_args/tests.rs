@@ -118,11 +118,7 @@ fn modern_vanilla() -> Value {
 #[cfg(test)]
 const VANILLA_LIBS: [&str; 2] = [
     "com/google/code/gson/gson/2.11.0/gson-2.11.0.jar",
-    if cfg!(windows) {
-        "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar"
-    } else {
-        "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar"
-    },
+    "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar",
 ];
 
 #[cfg(test)]
@@ -132,15 +128,13 @@ fn modern_index() -> Value {
 
 #[cfg(test)]
 fn java_for(root: &PortableRoot, major: u32) -> ManagedJava {
-    let id = format!(
-        "java-runtime-delta--21.0.7--{}",
-        crate::java_install::RUNTIME_SUFFIX
-    );
-    let home = root.java_runtimes_dir().join(&id);
+    let home = root
+        .java_runtimes_dir()
+        .join("java-runtime-delta--21.0.7--windows-x64");
     ManagedJava {
-        id,
+        id: "java-runtime-delta--21.0.7--windows-x64".into(),
         java_major: major,
-        exe: home.join(crate::java_install::JAVA_EXE),
+        exe: home.join("bin").join("java.exe"),
         home,
     }
 }
@@ -182,7 +176,6 @@ fn build_for(
         extra_jvm_args: extra,
         sys: &sys,
         temp_dir: &temp,
-        force_x11: false,
     })
 }
 
@@ -197,10 +190,7 @@ fn after<'a>(args: &'a [String], flag: &str) -> &'a str {
 
 #[cfg(test)]
 fn classpath(args: &[String]) -> Vec<String> {
-    after(args, "-cp")
-        .split(CP_SEP)
-        .map(str::to_owned)
-        .collect()
+    after(args, "-cp").split(';').map(str::to_owned).collect()
 }
 
 // ================================================================================ modern Vanilla
@@ -218,9 +208,7 @@ fn modern_vanilla_gets_the_metadata_arguments_in_the_right_order() {
     let cmd = build_for(&e, "1.21.4", 21, 4096, &[]).unwrap();
     let a = &cmd.args;
 
-    assert!(cmd
-        .program
-        .ends_with(Path::new(crate::java_install::JAVA_EXE)));
+    assert!(cmd.program.ends_with("bin/java.exe") || cmd.program.ends_with("bin\\java.exe"));
     assert!(
         cmd.program.starts_with(e.root.java_runtimes_dir()),
         "the managed runtime, never a system one"
@@ -239,11 +227,8 @@ fn modern_vanilla_gets_the_metadata_arguments_in_the_right_order() {
         "game arguments come after it"
     );
 
-    // Rules: host OS x64 only; no macOS flag, no 32-bit flag, no demo mode, no custom resolution.
-    assert_eq!(
-        a.contains(&"-XX:HeapDumpPath=MojangTricks.heapdump".to_string()),
-        cfg!(windows)
-    );
+    // Rules: Windows x64 only; no macOS flag, no 32-bit flag, no demo mode, no custom resolution.
+    assert!(a.contains(&"-XX:HeapDumpPath=MojangTricks.heapdump".to_string()));
     for never in ["-XstartOnFirstThread", "-Xss1M", "--demo", "--width"] {
         assert!(!a.iter().any(|x| x == never), "{never}");
     }
@@ -253,24 +238,19 @@ fn modern_vanilla_gets_the_metadata_arguments_in_the_right_order() {
         env!("CARGO_PKG_VERSION")
     )));
 
-    // The classpath: libraries applicable to the host OS, then the client jar.
+    // The classpath: libraries applicable to Windows, then the client jar.
     let cp = classpath(a);
-    let (want_native, other_native) = if cfg!(windows) {
-        ("natives-windows", "natives-linux")
-    } else {
-        ("natives-linux", "natives-windows")
-    };
     assert_eq!(
         cp.len(),
         3,
-        "gson, lwjgl natives and the client jar; not other OS natives: {cp:?}"
+        "gson, lwjgl natives (windows) and the client jar; not the Linux natives: {cp:?}"
     );
     assert!(
         cp[0].contains("gson-2.11.0.jar")
-            && cp[1].contains(want_native)
+            && cp[1].contains("natives-windows")
             && cp[2].ends_with("1.21.4.jar")
     );
-    assert!(!cp.iter().any(|p| p.contains(other_native)));
+    assert!(!cp.iter().any(|p| p.contains("natives-linux")));
 
     // Identity and isolation.
     let game_dir = InstanceStore::new(&e.root)
@@ -573,7 +553,7 @@ fn neoforge_style_module_path_arguments_expand_library_directory_and_separator()
     assert!(a.contains(&format!("-DlibraryDirectory={lib}")));
     let p = after(a, "-p");
     assert!(
-        p.starts_with(&lib) && p.contains(CP_SEP_STR) && p.contains("securejarhandler-3.0.8.jar"),
+        p.starts_with(&lib) && p.contains(";") && p.contains("securejarhandler-3.0.8.jar"),
         "{p}"
     );
     assert!(!p.contains("${"));
@@ -732,136 +712,28 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
             "{k} must point inside the Clade folder"
         );
     }
-    #[cfg(windows)]
-    {
-        // Only the read-only Windows directory and standard system process variables are allowed outside.
-        let outside: Vec<_> = cmd
-            .env
-            .iter()
-            .filter(|(k, v)| {
-                !Path::new(v.as_str()).starts_with(e.root.path())
-                    && !matches!(
-                        k.as_str(),
-                        "SystemDrive" | "SystemRoot" | "windir" | "PATH" | "COMSPEC" | "PATHEXT"
-                    )
-            })
-            .collect();
-        assert!(outside.is_empty(), "{outside:?}");
-        let sys_root = &cmd.env["SystemRoot"];
-        assert_eq!(
-            cmd.env["PATH"],
-            format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
-            "includes SystemRoot so explorer.exe works for in-game Open Folder buttons"
-        );
-        assert_eq!(cmd.env["COMSPEC"], format!(r"{sys_root}\System32\cmd.exe"));
-        assert_eq!(cmd.env["PATHEXT"], ".COM;.EXE;.BAT;.CMD");
-        assert!(cmd.env["SystemDrive"].ends_with(':'));
-    }
-    #[cfg(not(windows))]
-    {
-        for k in [
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-        ] {
-            assert!(
-                Path::new(&cmd.env[k]).starts_with(e.root.path()),
-                "{k} must point inside the Clade folder"
-            );
-        }
-        assert_eq!(cmd.env["PATH"], "/usr/bin:/bin");
-        let sys = SystemEnv::from_process();
-        let outside: Vec<_> = cmd
-            .env
-            .iter()
-            .filter(|(k, v)| {
-                !Path::new(v.as_str()).starts_with(e.root.path())
-                    && k.as_str() != "PATH"
-                    && !sys.session_env.contains_key(k.as_str())
-            })
-            .collect();
-        assert!(outside.is_empty(), "{outside:?}");
-
-        // Even if dangerous injection keys appear in `session_env`, `build` drops them and never overrides HOME.
-        let mut dirty_sys = sys;
-        dirty_sys
-            .session_env
-            .insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
-        dirty_sys
-            .session_env
-            .insert("JAVA_TOOL_OPTIONS".into(), "-javaagent:evil.jar".into());
-        dirty_sys
-            .session_env
-            .insert("HOME".into(), "/home/real".into());
-        let inst_id = InstanceStore::new(&e.root).list().unwrap().instances[0]
-            .id
-            .clone();
-        let dirs = InstanceStore::new(&e.root).dirs(&inst_id);
-        let temp = e.root.game_tmp_dir().join(inst_id.as_str());
-        let resolved = resolve(&e.root, "1.21.4").unwrap();
-        let checked = build(&BuildInput {
-            root: &e.root,
-            dirs: &dirs,
-            resolved: &resolved,
-            java: &java_for(&e.root, 21),
-            identity: &identity(),
-            memory_mb: 2048,
-            resolution: None,
-            extra_jvm_args: &[],
-            sys: &dirty_sys,
-            temp_dir: &temp,
-            force_x11: false,
+    // Only the read-only Windows directory and standard system process variables are allowed outside.
+    let outside: Vec<_> = cmd
+        .env
+        .iter()
+        .filter(|(k, v)| {
+            !Path::new(v.as_str()).starts_with(e.root.path())
+                && !matches!(
+                    k.as_str(),
+                    "SystemDrive" | "SystemRoot" | "windir" | "PATH" | "COMSPEC" | "PATHEXT"
+                )
         })
-        .unwrap();
-        assert!(!checked.env.contains_key("LD_PRELOAD"));
-        assert!(!checked.env.contains_key("JAVA_TOOL_OPTIONS"));
-        assert!(Path::new(&checked.env["HOME"]).starts_with(e.root.path()));
-
-        let mut x11_sys = dirty_sys.clone();
-        x11_sys.session_env.insert("DISPLAY".into(), ":0".into());
-        x11_sys
-            .session_env
-            .insert("WAYLAND_DISPLAY".into(), "wayland-1".into());
-        x11_sys
-            .session_env
-            .insert("XDG_SESSION_TYPE".into(), "wayland".into());
-        let x11_cmd = build(&BuildInput {
-            root: &e.root,
-            dirs: &dirs,
-            resolved: &resolved,
-            java: &java_for(&e.root, 21),
-            identity: &identity(),
-            memory_mb: 2048,
-            resolution: None,
-            extra_jvm_args: &[],
-            sys: &x11_sys,
-            temp_dir: &temp,
-            force_x11: true,
-        })
-        .unwrap();
-        assert_eq!(x11_cmd.env.get("DISPLAY").map(String::as_str), Some(":0"));
-        assert_eq!(
-            x11_cmd.env.get("WAYLAND_DISPLAY").map(String::as_str),
-            Some("clade-x11-embed")
-        );
-        assert_eq!(
-            x11_cmd.env.get("XDG_SESSION_TYPE").map(String::as_str),
-            Some("x11")
-        );
-        assert_eq!(
-            x11_cmd.env.get("GDK_BACKEND").map(String::as_str),
-            Some("x11")
-        );
-        assert_eq!(
-            x11_cmd.env.get("SDL_VIDEODRIVER").map(String::as_str),
-            Some("x11")
-        );
-        assert_eq!(
-            x11_cmd.env.get("SDL_VIDEO_DRIVER").map(String::as_str),
-            Some("x11")
-        );
-    }
+        .collect();
+    assert!(outside.is_empty(), "{outside:?}");
+    let sys_root = &cmd.env["SystemRoot"];
+    assert_eq!(
+        cmd.env["PATH"],
+        format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
+        "includes SystemRoot so explorer.exe works for in-game Open Folder buttons"
+    );
+    assert_eq!(cmd.env["COMSPEC"], format!(r"{sys_root}\System32\cmd.exe"));
+    assert_eq!(cmd.env["PATHEXT"], ".COM;.EXE;.BAT;.CMD");
+    assert!(cmd.env["SystemDrive"].ends_with(':'));
     let process = cmd.to_process();
     assert_eq!(process.get_program(), cmd.program.as_os_str());
     assert_eq!(process.get_current_dir(), Some(cmd.cwd.as_path()));
@@ -961,7 +833,7 @@ fn forge_1_12_2_2851_merges_parent_minecraft_arguments_with_child_game_args_whil
 #[test]
 fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let bad_root = PortableRoot::at(dir.path().join(format!("Clade{CP_SEP}Portable")));
+    let bad_root = PortableRoot::at(dir.path().join("Clade;Portable"));
     bad_root.ensure_layout().unwrap();
     let bad_env = Env {
         _dir: dir,
@@ -989,7 +861,7 @@ fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
     let resolved = resolve(&clean.root, "1.21.4").unwrap();
     let java = java_for(&clean.root, 21);
     let sys = SystemEnv::from_process();
-    let bad_temp = clean.root.game_tmp_dir().join(format!("bad{CP_SEP}tmp"));
+    let bad_temp = clean.root.game_tmp_dir().join("bad;tmp");
     assert!(matches!(
         build(&BuildInput {
             root: &clean.root,
@@ -1002,7 +874,6 @@ fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &bad_temp,
-            force_x11: false,
         }),
         Err(LaunchError::UnsupportedFolderPath)
     ));
@@ -1279,14 +1150,13 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &temp,
-            force_x11: false,
         })
         .unwrap_or_else(|e| panic!("{}: {e}", inst.name));
         let cp_count = cmd
             .args
             .iter()
             .position(|a| a == "-cp")
-            .map_or(1, |idx| cmd.args[idx + 1].split(CP_SEP).count());
+            .map_or(1, |idx| cmd.args[idx + 1].split(';').count());
         println!(
             "== {} ({}) java {} cp entries {}",
             inst.name, resolved.launch_id, java.id, cp_count
@@ -1397,7 +1267,6 @@ fn custom_resolution_activates_mojang_feature_rule_and_substitutes_dimensions() 
         extra_jvm_args: &["-XX:+UseStringDeduplication".to_owned()],
         sys: &sys,
         temp_dir: &temp,
-        force_x11: false,
     })
     .unwrap();
     assert_eq!(after(&cmd.args, "--width"), "1280");

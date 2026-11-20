@@ -596,7 +596,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hex",
- "libc",
  "raw-window-handle",
  "reqwest",
  "serde",

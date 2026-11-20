@@ -79,6 +79,3 @@ windows = { version = "0.62", features = ["Foundation", "UI_ViewManagement", "Wi
 windows-core = "0.62"
 webview2-com = "0.39.1"
 wry = "0.57"
-
-[target."cfg(unix)".dependencies]
-libc = "0.2"

@@ -91,6 +91,9 @@ pub fn run() {
     });
     startup::preview_requested(root.path());
 
+    // Before any WebView exists: choose the bundled runtime if present (unless on a UNC share).
+    let webview_source = webview::select_runtime(&root);
+
     root.ensure_data_dir().unwrap_or_else(|e| {
         let id = match e {
             portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
@@ -126,24 +129,6 @@ pub fn run() {
     });
     startup::init_logging(&root);
 
-    let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
-        .unwrap_or_else(|e| {
-            let id = match e {
-                settings::SettingsError::FolderTooNew { .. } => StartupMessage::FolderTooNew,
-                _ => StartupMessage::StartupFailed,
-            };
-            startup::fail(id, Some(root.path()), Some(&e.to_string()))
-        });
-
-    // Before any WebView or thread pool exists: choose the bundled runtime if present and configure
-    // Linux X11/NVIDIA WebKitGTK startup overrides while single-threaded so framed game embedding
-    // works immediately even if toggled on in Settings during the session.
-    #[cfg(target_os = "linux")]
-    let x11_host = game_embed::x11::is_available();
-    #[cfg(not(target_os = "linux"))]
-    let x11_host = false;
-    let webview_source = webview::select_runtime(&root, x11_host);
-
     let workers = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(2)
@@ -161,6 +146,15 @@ pub fn run() {
             )
         });
     tauri::async_runtime::set(rt.handle().clone());
+
+    let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
+        .unwrap_or_else(|e| {
+            let id = match e {
+                settings::SettingsError::FolderTooNew { .. } => StartupMessage::FolderTooNew,
+                _ => StartupMessage::StartupFailed,
+            };
+            startup::fail(id, Some(root.path()), Some(&e.to_string()))
+        });
     // Scratch space a crashed preparation may have left (verified files and partial downloads stay).
     if let Err(e) = prepare_cmd::sweep_scratch(&root) {
         tracing::warn!(error = %e, "could not clean scratch space");
@@ -394,16 +388,6 @@ pub fn run() {
             if placement.is_some() {
                 cfg.center = false;
             }
-            #[cfg(not(windows))]
-            let show_after_build = {
-                let show = cfg.visible;
-                // Keep unrealized while tao attaches its Wayland CSD headerbar for decorations=false,
-                // and request an RGBA visual so "Transparency effects" can toggle window alpha live.
-                cfg.visible = false;
-                cfg.transparent = true;
-                cfg.additional_browser_args = None;
-                show
-            };
             let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
                 .maximizable(false)
@@ -418,10 +402,6 @@ pub fn run() {
                 let _ = window.set_position(tauri::Position::Physical(
                     tauri::PhysicalPosition::new(p.x as i32, p.y as i32),
                 ));
-            }
-            #[cfg(not(windows))]
-            if show_after_build {
-                let _ = window.show();
             }
 
             let app_handle = app.handle().clone();

@@ -128,7 +128,7 @@ pub fn resolve_java(root: &PortableRoot, id: &str) -> Result<ManagedJava, Runtim
     })
 }
 
-/// Resolves a verified console `java` executable for headless CLI tasks (such as loader installers)
+/// Resolves a verified console `java.exe` for headless CLI tasks (such as loader installers)
 /// when the runtime's primary launch binary is `javaw.exe`.
 pub fn resolve_cli_java_exe(
     root: &PortableRoot,
@@ -140,7 +140,7 @@ pub fn resolve_cli_java_exe(
         .exe
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("java.exe") || (!cfg!(windows) && n == "java"))
+        .is_some_and(|n| n.eq_ignore_ascii_case("java.exe"))
     {
         return Ok(java.exe.clone());
     }
@@ -189,9 +189,9 @@ pub fn resolve_cli_java_exe(
     }
 
     if let Some(rf) = crate::java_install::recorded_files(root, &java.id).and_then(|files| {
-        files.into_iter().find(|f| {
-            f.path.as_str() == "bin/java.exe" || (!cfg!(windows) && f.path.as_str() == "bin/java")
-        })
+        files
+            .into_iter()
+            .find(|f| f.path.as_str() == "bin/java.exe")
     }) {
         let cli = rf.path.to_path(&java.home);
         fsutil::reject_links_between(root.path(), &cli)
