@@ -307,11 +307,11 @@ export const ru: Record<MessageKey, Message> = {
   "settings.behavior": "Поведение",
   "settings.support": "Поддержка",
   "settings.motion": "Меньше анимации",
-  "settings.motion.system": "Как в Windows",
+  "settings.motion.system": "Как в системе",
   "settings.motion.on": "Вкл.",
   "settings.motion.off": "Выкл.",
   "settings.transparency": "Эффекты прозрачности",
-  "settings.transparency.system": "Как в Windows",
+  "settings.transparency.system": "Как в системе",
   "settings.transparency.on": "Вкл.",
   "settings.transparency.off": "Выкл.",
   "settings.memory": "Память",
@@ -348,7 +348,7 @@ export const ru: Record<MessageKey, Message> = {
   "onboarding.welcomeText": "Чистый портативный лаунчер для Minecraft: Java Edition.",
   "onboarding.portableTitle": "Портативность по замыслу",
   "onboarding.portableText":
-    "Всё, чем управляет Clade, хранится в папке Clade. Её можно перенести на другой диск или на другой компьютер с Windows.",
+    "Всё, чем управляет Clade, хранится в папке Clade. Её можно перенести на другой диск или на другой совместимый компьютер.",
   "onboarding.readyTitle": "Всё готово",
   "onboarding.readyText": "Создай профиль, добавь аккаунт Microsoft или просто осмотрись.",
   "onboarding.createProfile": "Создать профиль",
@@ -361,7 +361,7 @@ export const ru: Record<MessageKey, Message> = {
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
   "error.settings.unsupported_value": "Такая настройка не поддерживается.",
   "error.settings.unsupported_language": "Этот язык не поддерживается.",
-  "error.settings.open_failed": "Windows не смог открыть эту папку.",
+  "error.settings.open_failed": "Не удалось открыть эту папку.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
   "error.generic": "Что-то пошло не так.",
@@ -504,7 +504,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.not_found": "Этого профиля больше нет.",
   "error.profile.duplicate_failed":
     "Не удалось дублировать профиль. Проверь свободное место на диске и закрой всё, что использует его папку.",
-  "error.profile.open_failed": "Windows не смог открыть эту папку.",
+  "error.profile.open_failed": "Не удалось открыть эту папку.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",
   "error.catalog.catalog_unavailable":

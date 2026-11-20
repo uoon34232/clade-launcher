@@ -268,7 +268,7 @@ describe("structured backend errors are worded in the current language", () => {
       }),
     ).toBe("Choose a window size between 320×240 and 7680×4320.");
     expect(describeCode("profile", "invalid_jvm_args")).toMatch(/safe JVM flags/);
-    expect(describeCode("profile", "open_failed")).toBe("Windows couldn't open that folder.");
+    expect(describeCode("profile", "open_failed")).toBe("Could not open that folder.");
     setLocale("ru");
     expect(
       describeError(
@@ -290,7 +290,7 @@ describe("structured backend errors are worded in the current language", () => {
       }),
     ).toBe("Выбери размер окна от 320×240 до 7680×4320.");
     expect(describeCode("profile", "invalid_jvm_args")).toMatch(/безопасные флаги JVM/);
-    expect(describeCode("profile", "open_failed")).toBe("Windows не смог открыть эту папку.");
+    expect(describeCode("profile", "open_failed")).toBe("Не удалось открыть эту папку.");
     expect(describeCode("launch", "needs_sign_in")).toBe(
       "Этому аккаунту нужно войти снова, чтобы играть.",
     );

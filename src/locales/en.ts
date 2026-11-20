@@ -302,11 +302,11 @@ export const en = {
   "settings.behavior": "Behavior",
   "settings.support": "Support",
   "settings.motion": "Reduced motion",
-  "settings.motion.system": "Follow Windows",
+  "settings.motion.system": "Follow system",
   "settings.motion.on": "On",
   "settings.motion.off": "Off",
   "settings.transparency": "Transparency effects",
-  "settings.transparency.system": "Follow Windows",
+  "settings.transparency.system": "Follow system",
   "settings.transparency.on": "On",
   "settings.transparency.off": "Off",
   "settings.memory": "Memory",
@@ -343,7 +343,7 @@ export const en = {
   "onboarding.welcomeText": "A clean, portable launcher for Minecraft: Java Edition.",
   "onboarding.portableTitle": "Portable by design",
   "onboarding.portableText":
-    "Everything Clade manages stays inside the Clade folder, so you can move it to another drive or compatible Windows PC.",
+    "Everything Clade manages stays inside the Clade folder, so you can move it to another drive or compatible PC.",
   "onboarding.readyTitle": "Ready to start",
   "onboarding.readyText": "Create a profile, add your Microsoft account, or just look around.",
   "onboarding.createProfile": "Create profile",
@@ -356,7 +356,7 @@ export const en = {
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
   "error.settings.unsupported_value": "That setting isn't supported.",
   "error.settings.unsupported_language": "That language isn't supported.",
-  "error.settings.open_failed": "Windows couldn't open that folder.",
+  "error.settings.open_failed": "Could not open that folder.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
   "error.generic": "Something went wrong.",
@@ -500,7 +500,7 @@ export const en = {
   "error.profile.not_found": "That profile no longer exists.",
   "error.profile.duplicate_failed":
     "Could not duplicate the profile. Check available disk space and close anything using its folder.",
-  "error.profile.open_failed": "Windows couldn't open that folder.",
+  "error.profile.open_failed": "Could not open that folder.",
 
   "error.catalog.unknown": "Could not load the version list.",
   "error.catalog.catalog_unavailable":

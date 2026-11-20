@@ -155,7 +155,11 @@ export function AnimatedBackground({ paused = false }: { paused?: boolean }) {
       />
       <div
         className="absolute inset-0 opacity-[0.07]"
-        style={{ backgroundImage: GRAIN, backgroundSize: "220px 220px" }}
+        style={{
+          backgroundImage: GRAIN,
+          backgroundSize: "220px 220px",
+          transform: "translateZ(0)",
+        }}
       />
     </div>
   );

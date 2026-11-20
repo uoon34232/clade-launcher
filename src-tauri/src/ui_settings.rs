@@ -63,6 +63,8 @@ pub struct UiSettingsDto {
     pub reduced_motion: String,
     /// `system`, `on` or `off`: the window-material ("Transparency effects") choice.
     pub transparency: String,
+    /// True where the native window translucency/backdrop material is supported (Windows / Linux).
+    pub transparency_supported: bool,
     /// False until the first-run introduction was finished or skipped.
     pub onboarding_done: bool,
     /// The global game memory in MiB, or `None` for the automatic policy.
@@ -100,6 +102,7 @@ impl UiSettingsDto {
             ui_mode: s.ui.ui_mode.clone(),
             reduced_motion: s.ui.reduced_motion.clone(),
             transparency: s.ui.transparency.clone(),
+            transparency_supported: cfg!(any(windows, target_os = "linux")),
             onboarding_done: s.ui.onboarding_done,
             memory_mb: s.minecraft.memory_mb,
             memory: MemoryInfo {
@@ -437,6 +440,7 @@ mod tests {
                 ui_mode: "simple".into(),
                 reduced_motion: "system".into(),
                 transparency: "system".into(),
+                transparency_supported: cfg!(any(windows, target_os = "linux")),
                 onboarding_done: false,
                 memory_mb: None,
                 memory: dto.memory.clone(),
@@ -544,6 +548,7 @@ mod tests {
             ui_mode: "advanced".into(),
             reduced_motion: "on".into(),
             transparency: "off".into(),
+            transparency_supported: true,
             onboarding_done: true,
             memory_mb: Some(4096),
             memory: MemoryInfo {
@@ -560,6 +565,7 @@ mod tests {
         assert_eq!(json["uiMode"], "advanced");
         assert_eq!(json["reducedMotion"], "on");
         assert_eq!(json["transparency"], "off");
+        assert_eq!(json["transparencySupported"], true);
         assert_eq!(json["onboardingDone"], true);
         assert_eq!(json["memoryMb"], 4096);
         assert_eq!(json["memory"]["max"], 12288);

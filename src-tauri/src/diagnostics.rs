@@ -378,7 +378,10 @@ fn redact_user_folder(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     while i < text.len() {
         let rest = &lower[i..];
-        if let Some(prefix) = ["\\users", "/users"].iter().find(|p| rest.starts_with(**p)) {
+        if let Some(prefix) = ["\\users", "/users", "/home", "/run/media", "/media"]
+            .iter()
+            .find(|p| rest.starts_with(**p))
+        {
             let after_prefix = i + prefix.len();
             let sep_len: usize = text[after_prefix..]
                 .chars()

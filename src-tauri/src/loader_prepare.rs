@@ -28,7 +28,7 @@ use crate::loader_install::{
     StageSession, Tripwire,
 };
 use crate::loaders::{self, InstallPlan, LoaderKind};
-use crate::mc_meta::{parse_version, VersionPlan, WINDOWS_X64};
+use crate::mc_meta::{parse_version, VersionPlan, HOST_TARGET};
 use crate::net::{FetchError, Fetcher, Streamer};
 use crate::portable::fsutil::{
     atomic_write, is_link, read_bounded, reject_links_between, remove_file_with_retry, Expected,
@@ -269,7 +269,7 @@ async fn read_valid_local_profile(
         let local = profile_path(&root, &expected);
         reject_links_between(root.path(), &local).ok()?;
         let bytes = read_bounded(&local, MAX_PROFILE_BYTES as u64).ok()?;
-        let plan = parse_version(&bytes, &WINDOWS_X64).ok()?;
+        let plan = parse_version(&bytes, &HOST_TARGET).ok()?;
         if plan.id != expected.as_str() || plan.inherits_from.as_deref() != Some(mc.as_str()) {
             return None;
         }
@@ -317,7 +317,7 @@ pub async fn plan_profile_loader<F: Fetcher, S: Streamer, R: InstallerRunner>(
         }
         Err(e) => return Err(fetch_err(e, &format!("the {} profile", kind.name()))),
     };
-    let plan = parse_version(&bytes, &WINDOWS_X64).map_err(|e| {
+    let plan = parse_version(&bytes, &HOST_TARGET).map_err(|e| {
         PrepareError::Loader(format!("the {} profile is not usable: {e}", kind.name()))
     })?;
     let id = VersionId::new(&plan.id)
@@ -699,7 +699,7 @@ async fn run_in_stage<F: Fetcher, S: Streamer, R: InstallerRunner>(
         let staged_bytes = read_bounded(&staged_json, MAX_PROFILE_BYTES as u64).map_err(|_| {
             PrepareError::Loader("the installer did not produce a readable version profile".into())
         })?;
-        let produced = parse_version(&staged_bytes, &WINDOWS_X64).map_err(|e| {
+        let produced = parse_version(&staged_bytes, &HOST_TARGET).map_err(|e| {
             PrepareError::Loader(format!(
                 "the {} profile produced by the installer is not usable: {e}",
                 kind.name()
@@ -729,7 +729,7 @@ pub fn read_profile(root: &PortableRoot, id: &VersionId) -> Result<VersionPlan, 
     reject_links_between(root.path(), &path).map_err(|e| PrepareError::Storage(e.to_string()))?;
     let bytes = read_bounded(&path, MAX_PROFILE_BYTES as u64)
         .map_err(|_| PrepareError::Loader("the loader's version profile is missing".into()))?;
-    parse_version(&bytes, &WINDOWS_X64).map_err(|e| {
+    parse_version(&bytes, &HOST_TARGET).map_err(|e| {
         PrepareError::Loader(format!("the loader's version profile is not usable: {e}"))
     })
 }
@@ -899,7 +899,7 @@ mod tests {
 
         let java_home = root.java_runtimes_dir().join("jre-test");
         fs::create_dir_all(java_home.join("bin")).unwrap();
-        let java_exe = java_home.join("bin").join("java.exe");
+        let java_exe = java_home.join(crate::java_install::JAVA_EXE);
         fs::write(&java_exe, b"MZ").unwrap();
         let java = ManagedJava {
             id: "jre-test".into(),
@@ -951,7 +951,12 @@ mod tests {
             loader_streamer: &streamer,
             runner: &runner,
             sys: SystemEnv {
-                system_root: PathBuf::from(r"C:\Windows"),
+                system_root: if cfg!(windows) {
+                    PathBuf::from(r"C:\Windows")
+                } else {
+                    PathBuf::from("/usr")
+                },
+                ..Default::default()
             },
             concurrency: 2,
             now: 1,

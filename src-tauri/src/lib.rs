@@ -375,6 +375,16 @@ pub fn run() {
             if placement.is_some() {
                 cfg.center = false;
             }
+            #[cfg(not(windows))]
+            let show_after_build = {
+                let show = cfg.visible;
+                // Keep unrealized while tao attaches its Wayland CSD headerbar for decorations=false,
+                // and request an RGBA visual so "Transparency effects" can toggle window alpha live.
+                cfg.visible = false;
+                cfg.transparent = true;
+                cfg.additional_browser_args = None;
+                show
+            };
             let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
                 .maximizable(false)
@@ -389,6 +399,10 @@ pub fn run() {
                 let _ = window.set_position(tauri::Position::Physical(
                     tauri::PhysicalPosition::new(p.x as i32, p.y as i32),
                 ));
+            }
+            #[cfg(not(windows))]
+            if show_after_build {
+                let _ = window.show();
             }
 
             let app_handle = app.handle().clone();

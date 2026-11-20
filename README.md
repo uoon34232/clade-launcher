@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/uoon34232/clade-launcher/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/uoon34232/clade-launcher/actions/workflows/ci.yml)
 
-Clade is a clean, portable launcher for **Minecraft: Java Edition** on Windows. It is about Minecraft itself: installing versions, keeping separate profiles and starting the game. It has no store, no feeds and no built-in content marketplace.
+Clade is a clean, portable launcher for **Minecraft: Java Edition** on Windows and Linux. It is about Minecraft itself: installing versions, keeping separate profiles and starting the game. It has no store, no feeds and no built-in content marketplace.
 
 <p align="center"><img src="docs/media/hero-interaction.gif" alt="The Clade home screen: clicking the headline shows a different phrase" width="720"></p>
 
@@ -46,13 +46,13 @@ Your saved sign-ins are encrypted with a passphrase you choose, and it cannot be
 
 ## Truly portable
 
-Download Clade, extract it and run it. Everything it manages, from your profiles and accounts to the Java it downloads, stays in its own folder. Move that folder to another drive, a USB stick or another compatible Windows PC and carry on where you stopped.
+Download Clade, extract it and run it. Everything it manages, from your profiles and accounts to the Java it downloads, stays in its own folder. Move that folder to another drive, a USB stick or another compatible Windows or Linux PC and carry on where you stopped.
 
 There is no installer, and Clade does not need Java, a global `.minecraft` folder or administrator rights.
 
 ## English & Русский
 
-Clade speaks English and Russian. Change the language in Settings and the whole window switches at once. On first start it follows your Windows language.
+Clade speaks English and Russian. Change the language in Settings and the whole window switches at once. On first start it follows your system language.
 
 <p align="center"><img src="docs/media/settings-language.gif" alt="Switching Clade between English and Russian in Settings" width="720"></p>
 
@@ -66,7 +66,7 @@ Sign-in, Java provisioning, launching and zero-footprint portability have been v
 
 ## Download
 
-Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
+Download **`Clade-Launcher-Portable.zip`** for Windows from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`. Linux x64 builds can be built from source and packaged with `scripts/release/package-linux.mjs` (`Clade-Launcher-Linux-x64.tar.gz`) using the exact same `data/` and `instances/` layout (even side-by-side in one folder when dual-booting).
 
 To verify the download in PowerShell against the `.sha256` file published next to the ZIP:
 
@@ -77,9 +77,9 @@ Get-Content .\Clade-Launcher-Portable.zip.sha256
 
 ## Requirements
 
-- **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`).**
-- Nothing to install: extract the ZIP to a normal folder and run `Clade.exe`. No administrator rights are needed.
+- **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`):** extract the ZIP to a normal folder and run `Clade.exe`. No administrator rights are needed.
 - **Windows 10 notes:** on an NTFS folder, Clade automatically grants the AppContainer read-and-execute permissions its bundled WebView2 runtime needs on `runtimes/webview2/` (using Win32 security APIs, without administrator rights). FAT32 and exFAT drives cannot store those permissions, so on Windows 10 Clade falls back to the PC's installed Evergreen WebView2 runtime on those drives; prefer NTFS for a removable drive meant for a clean Windows 10 PC that might not have WebView2 installed. Where Windows 11 uses the DWM Mica window backdrop, Windows 10 uses Clade's warm opaque paper window look.
+- **Linux (`x86_64`):** active Wayland or X11 desktop session, OpenGL graphics drivers for Minecraft, and system GTK 3 + WebKitGTK 4.1 libraries (`libwebkit2gtk-4.1-0` on Debian/Ubuntu, `webkit2gtk-4.1` on Arch/Fedora). Run `./Clade` without root permissions or global `.minecraft` folders.
 
 ## The Preview is not code-signed
 
@@ -92,7 +92,7 @@ Please do not disable or bypass Smart App Control, Defender or any other Windows
 
 ## Reporting bugs
 
-[Report a bug](https://github.com/uoon34232/clade-launcher/issues/new/choose) in GitHub Issues. Say which Clade and Windows version you use, what happened and how to reproduce it. Never post passwords, Microsoft sign-in codes, tokens, callback addresses or vault files. Security problems go through [SECURITY.md](SECURITY.md) instead.
+[Report a bug](https://github.com/uoon34232/clade-launcher/issues/new/choose) in GitHub Issues. Say which Clade and Windows/Linux version you use, what happened and how to reproduce it. Never post passwords, Microsoft sign-in codes, tokens, callback addresses or vault files. Security problems go through [SECURITY.md](SECURITY.md) instead.
 
 ## Documentation
 

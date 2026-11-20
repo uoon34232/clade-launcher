@@ -70,13 +70,54 @@ pub fn unbiased_ms() -> u64 {
 #[cfg(windows)]
 pub(crate) struct LiveProcess(std::os::windows::io::OwnedHandle);
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) struct LiveProcess {
+    pid: u32,
+    started_at: i64,
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) struct LiveProcess;
 
+#[cfg(target_os = "linux")]
+fn linux_boot_time_secs() -> Option<u64> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    for line in stat.lines() {
+        if let Some(rest) = line.strip_prefix("btime ") {
+            if let Ok(btime) = rest.trim().parse::<u64>() {
+                return Some(btime);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_start_and_alive(pid: u32) -> Option<(i64, bool)> {
+    let raw_pid = i32::try_from(pid).ok()?;
+    if raw_pid <= 0 {
+        return None;
+    }
+    let btime = linux_boot_time_secs()?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rparen = stat.rfind(')')?;
+    let mut fields = stat[rparen + 1..].split_whitespace();
+    let state = fields.next()?;
+    let starttime_ticks: u64 = fields.nth(18)?.parse().ok()?;
+    // SAFETY: `sysconf(_SC_CLK_TCK)` is thread-safe and reads the kernel USER_HZ constant.
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let clk_tck = u64::try_from(clk_tck).ok().filter(|&v| v > 0)?;
+    let created_unix = i64::try_from(btime.saturating_add(starttime_ticks / clk_tck)).ok()?;
+    // SAFETY: `kill(pid, 0)` only checks process existence/permission without sending a signal.
+    let exists = unsafe { libc::kill(raw_pid, 0) == 0 }
+        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    let alive = exists && !matches!(state, "Z" | "X" | "x");
+    Some((created_unix, alive))
+}
+
 impl LiveProcess {
-    /// Opens `pid` with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE` and verifies its
-    /// OS creation timestamp is within 120 seconds of `started_at` (defending against PID reuse).
-    /// Returns `(handle, still_running)`.
+    /// Opens `pid` and verifies its OS creation timestamp is within 120 seconds of `started_at`
+    /// (defending against PID reuse). Returns `(handle, still_running)`.
     pub(crate) fn open_matching(pid: u32, started_at: i64) -> Option<(Self, bool)> {
         #[cfg(windows)]
         {
@@ -141,7 +182,15 @@ impl LiveProcess {
             let alive = unsafe { WaitForSingleObject(h, 0) } == WAIT_TIMEOUT;
             Some((Self(owned), alive))
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let (created_unix, alive) = linux_process_start_and_alive(pid)?;
+            if created_unix.abs_diff(started_at) > 120 {
+                return None;
+            }
+            Some((Self { pid, started_at }, alive))
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (pid, started_at);
             None
@@ -152,7 +201,7 @@ impl LiveProcess {
         Self::open_matching(pid, started_at).and_then(|(p, alive)| alive.then_some(p))
     }
 
-    /// Blocks until the process terminates and returns its raw OS exit code.
+    /// Blocks until the process terminates and returns its raw OS exit code when observable.
     pub(crate) fn wait_blocking(self) -> Option<u32> {
         #[cfg(windows)]
         {
@@ -169,7 +218,17 @@ impl LiveProcess {
                 (GetExitCodeProcess(h, &mut code) != 0).then_some(code)
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            while matches!(
+                Self::open_matching(self.pid, self.started_at),
+                Some((_, true))
+            ) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Some(0)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             None
         }
@@ -883,8 +942,16 @@ mod tests {
         let (_d, root, id) = setup();
         let store = PlaytimeStore::new(&root);
 
-        let mut child = std::process::Command::new("cmd")
-            .args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"])
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("/bin/sh");
+            c.args(["-c", "sleep 2"]);
+            c
+        };
+        let mut child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

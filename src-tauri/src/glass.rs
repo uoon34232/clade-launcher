@@ -3,15 +3,15 @@
 //! Glass is purely cosmetic and must never get in the way: when anything about it is unavailable
 //! or fails, Clade silently stays on the opaque warm treatment it has always had.
 //!
-//! **Technique (Windows 11):** the window keeps its normal, opaque WebView background. Turning
-//! glass on asks the desktop window manager for its documented *Mica* system backdrop
-//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing the
-//! light variant with `DWMWA_USE_IMMERSIVE_DARK_MODE = 0`) and makes the WebView's own background
-//! transparent (`set_background_color` with alpha 0), so the page's translucent surfaces sit over
-//! the cached desktop material without per-frame live-blur GPU overhead. Turning it off clears the
-//! backdrop and restores the opaque background, so nothing of the desktop can show through. Both
-//! directions are applied to the running window, deduplicated so repeated focus events never poke
-//! DWM when nothing changed, and suspended while the window is hidden.
+//! **Technique:**
+//! - **Windows 11:** the window keeps its normal, opaque WebView background. Turning glass on asks
+//!   the desktop window manager for its documented *Mica* system backdrop (`DwmSetWindowAttribute`
+//!   with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing light mode) and makes the WebView
+//!   background transparent (`set_background_color` with alpha 0).
+//! - **Linux (Wayland / X11):** the window requests an RGBA visual (`transparent = true`), and
+//!   turning glass on sets the window and WebKitGTK background alpha to 0 so the compositor
+//!   (Hyprland, KWin, Sway, Mutter, picom) blends desktop blur/translucency behind translucent UI
+//!   surfaces. Turning it off restores `OPAQUE_BACKGROUND`.
 //!
 //! **What decides it** (`wanted`): High Contrast always wins and means opaque. Otherwise the
 //! person's choice (`ui.transparency`): `off` is opaque, `on` asks for glass, and `system` follows
@@ -136,6 +136,7 @@ impl GlassState {
         changed
     }
 
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub(crate) fn set_system_effects(&self, enabled: Option<bool>) {
         let encoded = match enabled {
             None => EFFECTS_UNKNOWN,
@@ -329,7 +330,22 @@ pub fn watch_system_preference(app: AppHandle) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn watch_system_preference(app: AppHandle) {
+    let session = crate::loader_install::SystemEnv::from_process().session_env;
+    let has_composited_session = session
+        .get("WAYLAND_DISPLAY")
+        .is_some_and(|v| !v.is_empty())
+        || session
+            .get("XDG_SESSION_TYPE")
+            .is_some_and(|v| v.eq_ignore_ascii_case("wayland"))
+        || session.get("DISPLAY").is_some_and(|v| !v.is_empty());
+    app.state::<GlassState>()
+        .set_system_effects(Some(has_composited_session));
+    refresh(&app);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn watch_system_preference(_app: AppHandle) {}
 
 /// Applies the material to the real window.

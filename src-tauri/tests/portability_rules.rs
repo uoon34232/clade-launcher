@@ -222,8 +222,9 @@ fn every_exception_is_listed_so_new_ones_get_reviewed() {
         found,
         [
             "launch_args.rs=1", // the one place the game process is created (scrubbed environment)
-            "loader_install.rs=5", // stage-local .minecraft stand-in, SystemRoot lookup (+fallback), the one scrubbed spawn site, the read-only tripwire
-            "webview.rs=2", // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER pointing at the bundled runtime
+            "loader_install.rs=7", // stage-local .minecraft stand-in, SystemRoot lookup (+fallback), Linux session allowlist (+XAUTHORITY fallback), the one scrubbed spawn site, the read-only tripwire
+            "system.rs=1", // read-only POSIX locale lookup for the first-run language default
+            "webview.rs=3", // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER overrides/bundled runtime + Linux NVIDIA WebKitGTK Wayland startup guard
         ],
         "the set of portability exceptions changed"
     );

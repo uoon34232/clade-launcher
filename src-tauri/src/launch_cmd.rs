@@ -353,6 +353,10 @@ pub async fn plan_launch<T: Transport>(
         temp.clone(),
         dirs.home_dir().join("AppData").join("Roaming"),
         dirs.home_dir().join("AppData").join("Local"),
+        dirs.home_dir().join(".local").join("share"),
+        dirs.home_dir().join(".local").join("state"),
+        dirs.home_dir().join(".config"),
+        dirs.home_dir().join(".cache"),
     ] {
         std::fs::create_dir_all(&d).map_err(|e| {
             fail(
@@ -741,7 +745,12 @@ pub fn reattach_live_sessions(app: &AppHandle) {
                 use std::os::windows::process::ExitStatusExt;
                 std::process::ExitStatus::from_raw(c)
             });
-            #[cfg(not(windows))]
+            #[cfg(unix)]
+            let status = raw_exit.map(|c| {
+                use std::os::unix::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(((c & 0xff) as i32) << 8)
+            });
+            #[cfg(not(any(windows, unix)))]
             let status: Option<std::process::ExitStatus> = {
                 let _ = raw_exit;
                 None

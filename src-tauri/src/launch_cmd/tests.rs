@@ -757,7 +757,11 @@ fn close_requested_and_finish_session_are_atomic_and_eliminate_the_zombie_race()
 async fn semicolons_in_the_clade_folder_map_to_unsupported_folder_path() {
     let mut w = world("1.21.4", Era::Modern);
     let semi_dir = tempfile::tempdir().unwrap();
-    w.root = PortableRoot::at(semi_dir.path().join("Clade;Folder"));
+    w.root = PortableRoot::at(
+        semi_dir
+            .path()
+            .join(format!("Clade{}Folder", crate::launch_args::CP_SEP)),
+    );
     w.root.ensure_layout().unwrap();
     let id = create(&w, NewInstance::vanilla("Profile", "1.21.4").unwrap());
     prepare_instance(&ctx(&w), &id).await.unwrap();

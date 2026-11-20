@@ -239,6 +239,7 @@ function install(cfg: BackendConfig): void {
     // The same decision the real backend makes (src-tauri/src/glass.rs): High Contrast is always opaque,
     // "on" and "off" are explicit, "system" follows the Windows preference.
     const glassStatus = () => {
+      if (!state.ui.transparencySupported) return { active: false, live: false };
       const { transparencyEffects, highContrast } = cfg.windows;
       const active =
         !highContrast &&

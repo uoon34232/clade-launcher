@@ -16,8 +16,8 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Clade is a Windows application and the interface checks (layout, fonts) are verified on Windows,
-# so every job runs on a Windows runner.
+# Frontend checks, Windows Rust tests, and Playwright E2E run on Windows runners, while `rust-linux`
+# validates native Linux x64 compilation and tests on Ubuntu.
 # Every action is pinned to the full commit SHA of a reviewed release (the tag is in the comment), so a moved
 # or compromised tag cannot change what runs here. Update them deliberately, not automatically.
 jobs:
@@ -40,6 +40,8 @@ jobs:
       - run: node scripts/release/check-versions.mjs
       - shell: pwsh
         run: node scripts/release/generate-notices.mjs --out "$env:RUNNER_TEMP/THIRD-PARTY-NOTICES.txt" --strict
+      - shell: pwsh
+        run: node scripts/release/generate-notices.mjs --target x86_64-unknown-linux-gnu --out "$env:RUNNER_TEMP/THIRD-PARTY-NOTICES-linux.txt" --strict
       - run: pnpm check
       - run: pnpm build
 
@@ -69,6 +71,33 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+
+  rust-linux:
+    name: Rust Linux (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - working-directory: src-tauri
+        run: cargo fmt --check
+      - working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - working-directory: src-tauri
+        run: cargo test --locked
 
   e2e:
     name: E2E (Playwright, Chromium)

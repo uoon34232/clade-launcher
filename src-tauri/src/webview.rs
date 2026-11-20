@@ -390,8 +390,35 @@ fn select_runtime_with(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+const LINUX_NVIDIA_WEBKIT_ENV: &[(&str, &str)] = &[("__NV_DISABLE_EXPLICIT_SYNC", "1")];
+
+#[cfg(any(target_os = "linux", test))]
+fn apply_linux_webkit_env_with(nvidia_present: bool) {
+    if !nvidia_present {
+        return;
+    }
+    for &(key, val) in LINUX_NVIDIA_WEBKIT_ENV {
+        // Called once at startup while single-threaded, before GTK/WebKitGTK initializes.
+        // Respects any explicit value the user set in their environment, leaving DMA-BUF enabled.
+        // portability-allow: guards WebKitGTK against Wayland protocol error 71 on NVIDIA drivers
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, val);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_webkit_env() {
+    let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists()
+        || std::path::Path::new("/dev/nvidiactl").exists();
+    apply_linux_webkit_env_with(nvidia);
+}
+
 /// Must run before any WebView is created.
 pub fn select_runtime(root: &PortableRoot) -> RuntimeSource {
+    #[cfg(target_os = "linux")]
+    apply_linux_webkit_env();
     select_runtime_with(
         root,
         crate::system::is_windows_10(),
@@ -409,7 +436,7 @@ pub fn runtime_version() -> Result<String, String> {
 
 #[cfg(not(windows))]
 pub fn runtime_version() -> Result<String, String> {
-    Ok("n/a".into())
+    tauri::webview_version().map_err(|e| e.to_string())
 }
 
 /// Suspends the hidden WebView2 instance so Chromium drops its working set and stops timers/GPU
@@ -1062,5 +1089,59 @@ mod tests {
         assert!(shaders.join("data_1").is_file());
         assert!(default_profile.join("Preferences").is_file());
         assert!(eb.join("Local State").is_file());
+    }
+
+    #[test]
+    fn linux_nvidia_webkit_guards_apply_only_when_nvidia_present_and_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = LINUX_NVIDIA_WEBKIT_ENV
+            .iter()
+            .map(|&(k, _)| (k, std::env::var_os(k)))
+            .collect();
+        let dmabuf_saved = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
+        for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+
+        apply_linux_webkit_env_with(false);
+        for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
+            assert!(
+                std::env::var_os(k).is_none(),
+                "{k} should remain unset without NVIDIA"
+            );
+        }
+
+        std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "0");
+        apply_linux_webkit_env_with(true);
+        assert_eq!(
+            std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
+            Ok("0"),
+            "explicit user override must be preserved"
+        );
+
+        std::env::remove_var("__NV_DISABLE_EXPLICIT_SYNC");
+        apply_linux_webkit_env_with(true);
+        assert_eq!(
+            std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
+            Ok("1")
+        );
+        assert!(
+            std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none(),
+            "GPU DMA-BUF acceleration must stay enabled by default"
+        );
+
+        for (k, prev) in saved {
+            if let Some(v) = prev {
+                std::env::set_var(k, v);
+            } else {
+                std::env::remove_var(k);
+            }
+        }
+        if let Some(v) = dmabuf_saved {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", v);
+        } else {
+            std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+        }
     }
 }

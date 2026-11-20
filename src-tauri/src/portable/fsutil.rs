@@ -241,7 +241,40 @@ pub fn cluster_size_bytes(path: &Path) -> u64 {
         }
         4096
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut dir = path;
+        while !dir.exists() {
+            let Some(p) = dir.parent() else {
+                return 4096;
+            };
+            dir = p;
+        }
+        let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) else {
+            return 4096;
+        };
+        // SAFETY: `libc::statvfs` expects an initialized/zeroed `statvfs` buffer and a valid
+        // NUL-terminated path pointer.
+        unsafe {
+            let mut vfs: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut vfs) == 0 {
+                #[allow(clippy::unnecessary_cast)]
+                let unit = if vfs.f_frsize > 0 {
+                    vfs.f_frsize as u64
+                } else {
+                    vfs.f_bsize as u64
+                };
+                if unit > 0 {
+                    return unit.clamp(4096, 1024 * 1024);
+                }
+            }
+        }
+        4096
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = path;
         4096
