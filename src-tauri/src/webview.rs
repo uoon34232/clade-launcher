@@ -397,7 +397,14 @@ fn apply_linux_webkit_env_with(
     has_x11_display: bool,
     dmabuf_disabled: bool,
 ) {
-    let mut vars: Vec<(&'static str, &'static str, bool)> = Vec::new();
+    // Isolate WebKitGTK's UI and Web processes from system D-Bus power-saver notifications so
+    // desktop "power-saver" / ECO profiles do not trigger LowPowerModeNotifier and halve UI
+    // animations from 60 FPS (16 ms) down to 30 FPS (32 ms). Child game/installer processes
+    // build scrubbed environments from `SystemEnv` and never inherit these variables.
+    let mut vars: Vec<(&'static str, &'static str, bool)> = vec![
+        ("GIO_USE_POWER_PROFILE_MONITOR", "dbus", false),
+        ("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null", false),
+    ];
     if nvidia_present {
         vars.push(("__NV_DISABLE_EXPLICIT_SYNC", "1", false));
     }
@@ -1113,6 +1120,14 @@ mod tests {
     fn linux_nvidia_webkit_guards_apply_only_when_nvidia_present_and_unset() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let keys = [
+            "GIO_USE_POWER_PROFILE_MONITOR",
+            "DBUS_SYSTEM_BUS_ADDRESS",
+            "__NV_DISABLE_EXPLICIT_SYNC",
+            "GDK_BACKEND",
+            "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+        ];
+        let nv_keys = [
             "__NV_DISABLE_EXPLICIT_SYNC",
             "GDK_BACKEND",
             "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
@@ -1124,20 +1139,40 @@ mod tests {
             std::env::remove_var(k);
         }
 
-        // Without NVIDIA and without x11 embed, nothing is modified.
+        // Without NVIDIA and without x11 embed, only power-saver isolation applies and NVIDIA/X11 keys stay unset.
         apply_linux_webkit_env_with(false, false, true, false);
-        for k in keys {
+        assert_eq!(
+            std::env::var("GIO_USE_POWER_PROFILE_MONITOR").as_deref(),
+            Ok("dbus")
+        );
+        assert_eq!(
+            std::env::var("DBUS_SYSTEM_BUS_ADDRESS").as_deref(),
+            Ok("unix:path=/dev/null")
+        );
+        for k in nv_keys {
             assert!(
                 std::env::var_os(k).is_none(),
                 "{k} should remain unset without NVIDIA"
             );
         }
 
-        // Explicit NVIDIA override survives while session GDK_BACKEND ("wayland,x11,*") is forced
+        // Explicit user overrides survive while session GDK_BACKEND ("wayland,x11,*") is forced
         // to X11 so desktop defaults do not break framed game embedding.
+        std::env::set_var("GIO_USE_POWER_PROFILE_MONITOR", "portal");
+        std::env::set_var("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/custom/bus");
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "0");
         std::env::set_var("GDK_BACKEND", "wayland,x11,*");
         apply_linux_webkit_env_with(true, true, true, false);
+        assert_eq!(
+            std::env::var("GIO_USE_POWER_PROFILE_MONITOR").as_deref(),
+            Ok("portal"),
+            "explicit user override must be preserved"
+        );
+        assert_eq!(
+            std::env::var("DBUS_SYSTEM_BUS_ADDRESS").as_deref(),
+            Ok("unix:path=/custom/bus"),
+            "explicit user override must be preserved"
+        );
         assert_eq!(
             std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
             Ok("0"),
