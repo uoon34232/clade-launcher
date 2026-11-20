@@ -2,6 +2,8 @@
 
 Clade Launcher is in pre-release development and its source code is public. Contributions are welcome when they fit the product direction below.
 
+Participation in this project follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Ways to help
 
 - report reproducible launcher bugs;
@@ -18,7 +20,7 @@ The prerequisites and build steps are in the [technical documentation](docs/TECH
 Run these before opening a pull request, and make sure they pass. The same checks run automatically in CI on every pull request.
 
 ```bash
-pnpm check                              # typecheck + eslint + vitest
+pnpm check                              # prettier + typecheck + eslint + vitest
 pnpm build                              # production build of the frontend
 pnpm test:e2e                           # browser end-to-end tests
 cd src-tauri

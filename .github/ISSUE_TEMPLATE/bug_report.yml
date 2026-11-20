@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a bug. Clade Preview supports Windows 11 x64 only.
+        Thank you for reporting a bug. Clade Preview supports 64-bit Windows 10 and Windows 11 (x64).
 
         **Do not paste** passwords, Microsoft sign-in codes, access or refresh tokens, callback addresses that contain a code, or vault files. For a security problem, follow [SECURITY.md](https://github.com/uoon34232/clade-launcher/blob/main/SECURITY.md) instead of opening a public issue.
   - type: input
@@ -20,7 +20,7 @@ body:
     id: windows-version
     attributes:
       label: Windows version
-      placeholder: Windows 11 23H2, 64-bit
+      placeholder: Windows 11 24H2 or Windows 10 22H2 (64-bit)
     validations:
       required: true
   - type: textarea

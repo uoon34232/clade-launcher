@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/uoon34232/clade-launcher.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,9 +16,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "check": "pnpm typecheck && pnpm lint && pnpm test"
+    "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
