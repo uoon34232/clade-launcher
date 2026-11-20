@@ -411,6 +411,8 @@ pub struct BuildInput<'a> {
     pub sys: &'a SystemEnv,
     /// Where the game's temporary files go (inside the Clade folder).
     pub temp_dir: &'a Path,
+    /// Forces Linux game windows onto X11/XWayland when embedding inside Clade's frame.
+    pub force_x11: bool,
 }
 
 fn substitute(template: &str, vars: &BTreeMap<&str, String>, unknown: &mut Vec<String>) -> String {
@@ -821,6 +823,20 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
             ("XDG_CACHE_HOME", utf8(&home.join(".cache"))?),
         ] {
             env.insert(k.to_owned(), v);
+        }
+        if i.force_x11
+            && i.sys
+                .session_env
+                .get("DISPLAY")
+                .is_some_and(|d| !d.is_empty())
+        {
+            // Point WAYLAND_DISPLAY at a nonexistent socket name rather than unsetting it, because
+            // libwayland-client's `wl_display_connect(NULL)` falls back to "wayland-0" when unset.
+            env.insert("WAYLAND_DISPLAY".to_owned(), "clade-x11-embed".to_owned());
+            env.insert("XDG_SESSION_TYPE".to_owned(), "x11".to_owned());
+            env.insert("GDK_BACKEND".to_owned(), "x11".to_owned());
+            env.insert("SDL_VIDEODRIVER".to_owned(), "x11".to_owned());
+            env.insert("SDL_VIDEO_DRIVER".to_owned(), "x11".to_owned());
         }
     }
 

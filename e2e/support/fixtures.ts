@@ -44,7 +44,7 @@ export interface FixtureUiSettings {
   memoryMb: number | null;
   /** What the (synthetic) computer allows, in MiB. */
   memory: { min: number; max: number; auto: number; total: number | null };
-  onLaunch: "keep_open" | "hide";
+  onLaunch: "embed" | "keep_open" | "hide";
   onExit: "show" | "stay_hidden";
   version: string;
 }
@@ -89,6 +89,8 @@ export interface BackendConfig {
   loaders: Record<string, FixtureLoaderOption[]>;
   /** Games that are already running when the window opens. */
   runs: Record<string, "launching" | "playing">;
+  /** Optional initial framed-game attachment state. */
+  embed?: { active: boolean; instanceId: string | null; maximized: boolean };
   /** The (synthetic) Windows "Transparency effects" preference, and whether High Contrast is on. */
   windows: { transparencyEffects: boolean; highContrast: boolean };
 }
@@ -230,7 +232,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     onboardingDone: true,
     memoryMb: null,
     memory: { min: 1024, max: 12288, auto: 4096, total: 16384 },
-    onLaunch: "hide",
+    onLaunch: "embed",
     onExit: "show",
     version: "0.1.0",
   },

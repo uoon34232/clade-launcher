@@ -71,7 +71,7 @@ pub struct UiSettingsDto {
     pub memory_mb: Option<u32>,
     /// What this machine allows, and what "Automatic" means here, so the UI never guesses.
     pub memory: MemoryInfo,
-    /// `keep_open` or `hide`.
+    /// `embed`, `keep_open` or `hide`.
     pub on_launch: String,
     /// `show` or `stay_hidden`.
     pub on_exit: String,
@@ -444,7 +444,7 @@ mod tests {
                 onboarding_done: false,
                 memory_mb: None,
                 memory: dto.memory.clone(),
-                on_launch: "hide".into(),
+                on_launch: "embed".into(),
                 on_exit: "show".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             }

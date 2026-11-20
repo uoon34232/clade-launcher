@@ -182,6 +182,7 @@ fn build_for(
         extra_jvm_args: extra,
         sys: &sys,
         temp_dir: &temp,
+        force_x11: false,
     })
 }
 
@@ -810,11 +811,56 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
             extra_jvm_args: &[],
             sys: &dirty_sys,
             temp_dir: &temp,
+            force_x11: false,
         })
         .unwrap();
         assert!(!checked.env.contains_key("LD_PRELOAD"));
         assert!(!checked.env.contains_key("JAVA_TOOL_OPTIONS"));
         assert!(Path::new(&checked.env["HOME"]).starts_with(e.root.path()));
+
+        let mut x11_sys = dirty_sys.clone();
+        x11_sys.session_env.insert("DISPLAY".into(), ":0".into());
+        x11_sys
+            .session_env
+            .insert("WAYLAND_DISPLAY".into(), "wayland-1".into());
+        x11_sys
+            .session_env
+            .insert("XDG_SESSION_TYPE".into(), "wayland".into());
+        let x11_cmd = build(&BuildInput {
+            root: &e.root,
+            dirs: &dirs,
+            resolved: &resolved,
+            java: &java_for(&e.root, 21),
+            identity: &identity(),
+            memory_mb: 2048,
+            resolution: None,
+            extra_jvm_args: &[],
+            sys: &x11_sys,
+            temp_dir: &temp,
+            force_x11: true,
+        })
+        .unwrap();
+        assert_eq!(x11_cmd.env.get("DISPLAY").map(String::as_str), Some(":0"));
+        assert_eq!(
+            x11_cmd.env.get("WAYLAND_DISPLAY").map(String::as_str),
+            Some("clade-x11-embed")
+        );
+        assert_eq!(
+            x11_cmd.env.get("XDG_SESSION_TYPE").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            x11_cmd.env.get("GDK_BACKEND").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            x11_cmd.env.get("SDL_VIDEODRIVER").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            x11_cmd.env.get("SDL_VIDEO_DRIVER").map(String::as_str),
+            Some("x11")
+        );
     }
     let process = cmd.to_process();
     assert_eq!(process.get_program(), cmd.program.as_os_str());
@@ -956,6 +1002,7 @@ fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &bad_temp,
+            force_x11: false,
         }),
         Err(LaunchError::UnsupportedFolderPath)
     ));
@@ -1232,6 +1279,7 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &temp,
+            force_x11: false,
         })
         .unwrap_or_else(|e| panic!("{}: {e}", inst.name));
         let cp_count = cmd
@@ -1349,6 +1397,7 @@ fn custom_resolution_activates_mojang_feature_rule_and_substitutes_dimensions() 
         extra_jvm_args: &["-XX:+UseStringDeduplication".to_owned()],
         sys: &sys,
         temp_dir: &temp,
+        force_x11: false,
     })
     .unwrap();
     assert_eq!(after(&cmd.args, "--width"), "1280");

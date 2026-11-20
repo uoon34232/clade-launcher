@@ -17,6 +17,18 @@ export default defineConfig(() => ({
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
   },
+  // Pre-bundle UI primitives imported dynamically by lazy modal chunks so Vite
+  // never triggers an on-demand re-optimization race when opening dialogs in dev.
+  optimizeDeps: {
+    include: [
+      "@base-ui/react/button",
+      "@base-ui/react/dialog",
+      "@base-ui/react/menu",
+      "@base-ui/react/select",
+      "@base-ui/react/tooltip",
+      "lucide-react",
+    ],
+  },
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],

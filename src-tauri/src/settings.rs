@@ -40,7 +40,7 @@ pub const TRANSPARENCY_MODES: [&str; 3] = ["system", "on", "off"];
 /// options (`advanced`).
 pub const UI_MODES: [&str; 2] = ["simple", "advanced"];
 /// What Clade does with its window when Minecraft starts.
-pub const ON_LAUNCH_MODES: [&str; 2] = ["keep_open", "hide"];
+pub const ON_LAUNCH_MODES: [&str; 3] = ["embed", "keep_open", "hide"];
 /// What Clade does with its window when Minecraft closes.
 pub const ON_EXIT_MODES: [&str; 2] = ["show", "stay_hidden"];
 
@@ -103,7 +103,7 @@ impl MinecraftPrefs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BehaviorPrefs {
-    /// `keep_open` or `hide`.
+    /// `embed`, `keep_open` or `hide`.
     pub on_launch: String,
     /// `show` or `stay_hidden`.
     pub on_exit: String,
@@ -112,7 +112,7 @@ pub struct BehaviorPrefs {
 impl Default for BehaviorPrefs {
     fn default() -> Self {
         Self {
-            on_launch: "hide".to_owned(),
+            on_launch: "embed".to_owned(),
             on_exit: "show".to_owned(),
         }
     }
@@ -126,6 +126,10 @@ impl BehaviorPrefs {
         if !ON_EXIT_MODES.contains(&self.on_exit.as_str()) {
             self.on_exit = Self::default().on_exit;
         }
+    }
+
+    pub fn embeds_on_launch(&self) -> bool {
+        self.on_launch == "embed"
     }
 
     pub fn hides_on_launch(&self) -> bool {
@@ -745,7 +749,7 @@ mod tests {
             "an old folder shows the introduction once"
         );
         assert_eq!(s.minecraft, MinecraftPrefs { memory_mb: None });
-        assert_eq!(s.behavior.on_launch, "hide");
+        assert_eq!(s.behavior.on_launch, "embed");
         assert_eq!(s.behavior.on_exit, "show");
         // what was there is untouched
         assert!(!s.ui.sound.enabled && s.ui.language.as_deref() == Some("ru"));
@@ -891,13 +895,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("settings.json");
         fs::write(&p, r#"{"behavior":{"on_launch":"explode","on_exit":"stay_hidden"},"ui":{"reduced_motion":"maybe"}}"#).unwrap();
-        let s = LauncherSettings::load_or_default(&p).unwrap();
+        let mut s = LauncherSettings::load_or_default(&p).unwrap();
         assert_eq!(
-            s.behavior.on_launch, "hide",
+            s.behavior.on_launch, "embed",
             "only the bad value is repaired"
         );
+        assert!(s.behavior.embeds_on_launch());
         assert_eq!(s.behavior.on_exit, "stay_hidden");
         assert_eq!(s.ui.reduced_motion, "system");
+        assert!(s.set_behavior(Some("hide"), None));
+        assert!(s.behavior.hides_on_launch());
+        assert!(s.set_behavior(Some("embed"), None));
+        assert!(s.behavior.embeds_on_launch());
     }
 
     #[test]
@@ -1215,7 +1224,7 @@ mod tests {
             match name {
                 "ui.reduced_motion" => assert_eq!(s.ui.reduced_motion, "system", "{bad}"),
                 "ui.transparency" => assert_eq!(s.ui.transparency, "system", "{bad}"),
-                "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "hide", "{bad}"),
+                "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "embed", "{bad}"),
                 "behavior.on_exit" => assert_eq!(s.behavior.on_exit, "show", "{bad}"),
                 "minecraft.memory_mb" => {
                     let m = s.minecraft.memory_mb;

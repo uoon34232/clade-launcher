@@ -21,6 +21,8 @@ export const ru: Record<MessageKey, Message> = {
 
   // ---- window chrome
   "window.minimize": "Свернуть",
+  "window.maximize": "Увеличить",
+  "window.restore": "Восстановить",
   "window.close": "Закрыть",
   "window.wordmark": "Показать девиз Clade",
 
@@ -321,6 +323,7 @@ export const ru: Record<MessageKey, Message> = {
   "settings.memory.slider": "Память для Minecraft",
   "settings.memory.gb": "{value} ГБ",
   "settings.onLaunch": "Когда Minecraft запускается",
+  "settings.onLaunch.embed": "Внутри Clade",
   "settings.onLaunch.keep": "Оставить Clade открытым",
   "settings.onLaunch.hide": "Скрыть Clade",
   "settings.onExit": "Когда Minecraft закрывается",

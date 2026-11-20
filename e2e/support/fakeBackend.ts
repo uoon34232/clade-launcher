@@ -28,8 +28,10 @@ interface Control {
     vault: BackendConfig["vault"];
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
+    embed: { active: boolean; instanceId: string | null; maximized: boolean };
   };
   emit: (event: string, payload: unknown) => void;
+  setEmbedded: (instanceId: string | null, active: boolean, maximized?: boolean) => void;
   finishPrepare: () => boolean;
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
   refuseNextLaunch: (code: string, accountId?: string | null) => void;
@@ -60,6 +62,7 @@ function install(cfg: BackendConfig): void {
     vault: clone(cfg.vault),
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
+    embed: clone(cfg.embed ?? { active: false, instanceId: null, maximized: false }),
   };
   const calls: Control["calls"] = [];
 
@@ -71,8 +74,17 @@ function install(cfg: BackendConfig): void {
     // Keep the fake's own idea of who is running in step with what it announces.
     if (event === "launch-state") {
       const ev = payload as { instanceId: string; state: "launching" | "playing" | "stopped" };
-      if (ev.state === "stopped") delete state.runs[ev.instanceId];
-      else state.runs[ev.instanceId] = ev.state;
+      if (ev.state === "stopped") {
+        delete state.runs[ev.instanceId];
+        if (state.embed.active && state.embed.instanceId === ev.instanceId) {
+          state.embed = { active: false, instanceId: null, maximized: false };
+          for (const id of [...(listeners.get("game-embed-state") ?? [])]) {
+            callbacks.get(id)?.({ event: "game-embed-state", id, payload: clone(state.embed) });
+          }
+        }
+      } else {
+        state.runs[ev.instanceId] = ev.state;
+      }
     }
     for (const id of [...(listeners.get(event) ?? [])]) callbacks.get(id)?.({ event, id, payload });
   };
@@ -296,7 +308,7 @@ function install(cfg: BackendConfig): void {
         return null;
       }
       case "set_behavior":
-        if (args.onLaunch) state.ui.onLaunch = args.onLaunch as "keep_open" | "hide";
+        if (args.onLaunch) state.ui.onLaunch = args.onLaunch as "embed" | "keep_open" | "hide";
         if (args.onExit) state.ui.onExit = args.onExit as "show" | "stay_hidden";
         announce();
         return null;
@@ -313,7 +325,7 @@ function install(cfg: BackendConfig): void {
         state.ui.reducedMotion = "system";
         state.ui.transparency = "system";
         state.ui.memoryMb = null;
-        state.ui.onLaunch = "hide";
+        state.ui.onLaunch = "embed";
         state.ui.onExit = "show";
         announce();
         announceGlass();
@@ -593,6 +605,15 @@ function install(cfg: BackendConfig): void {
         return Object.entries(state.runs).map(([instanceId, s]) => ({ instanceId, state: s }));
       case "open_game_logs":
         return null;
+      case "get_game_embed_status":
+        return clone(state.embed);
+      case "set_game_stage_bounds":
+        return null;
+      case "toggle_game_maximize":
+        if (!state.embed.active) return clone(state.embed);
+        state.embed.maximized = !state.embed.maximized;
+        emit("game-embed-state", clone(state.embed));
+        return clone(state.embed);
 
       // ---- accounts (no Microsoft flow is ever started here)
       case "list_accounts":
@@ -707,6 +728,12 @@ function install(cfg: BackendConfig): void {
     calls,
     state,
     emit,
+    setEmbedded: (instanceId, active, maximized = false) => {
+      state.embed = active
+        ? { active: true, instanceId, maximized }
+        : { active: false, instanceId: null, maximized: false };
+      emit("game-embed-state", clone(state.embed));
+    },
     hasPendingPrepare: () => pendingPrepare !== null,
     finishPrepare: () => {
       if (!pendingPrepare) return false;
@@ -834,6 +861,14 @@ export class Backend {
   /** The game process is alive (`launch-state`: playing). */
   playing(instanceId: string): Promise<void> {
     return this.emit("launch-state", { instanceId, state: "playing" });
+  }
+
+  /** Simulates native framed-game attachment (`game-embed-state`). */
+  async embedded(instanceId: string, active = true, maximized = false): Promise<void> {
+    await this.page.evaluate(
+      ([id, a, m]) => (window as unknown as { __e2e: Control }).__e2e.setEmbedded(id, a, m),
+      [active ? instanceId : null, active, maximized] as const,
+    );
   }
 
   /** The game ended (`launch-state`: stopped), cleanly or with a reason code. */

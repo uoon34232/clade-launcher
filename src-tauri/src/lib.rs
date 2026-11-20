@@ -6,6 +6,7 @@ pub mod coded_error;
 pub mod diagnostics;
 pub mod download;
 pub mod download_policy;
+pub mod game_embed;
 pub mod game_session;
 pub mod glass;
 pub mod instances;
@@ -90,9 +91,6 @@ pub fn run() {
     });
     startup::preview_requested(root.path());
 
-    // Before any WebView exists: choose the bundled runtime if present (unless on a UNC share).
-    let webview_source = webview::select_runtime(&root);
-
     root.ensure_data_dir().unwrap_or_else(|e| {
         let id = match e {
             portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
@@ -128,6 +126,24 @@ pub fn run() {
     });
     startup::init_logging(&root);
 
+    let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
+        .unwrap_or_else(|e| {
+            let id = match e {
+                settings::SettingsError::FolderTooNew { .. } => StartupMessage::FolderTooNew,
+                _ => StartupMessage::StartupFailed,
+            };
+            startup::fail(id, Some(root.path()), Some(&e.to_string()))
+        });
+
+    // Before any WebView or thread pool exists: choose the bundled runtime if present and configure
+    // Linux X11/NVIDIA WebKitGTK startup overrides while single-threaded so framed game embedding
+    // works immediately even if toggled on in Settings during the session.
+    #[cfg(target_os = "linux")]
+    let x11_host = game_embed::x11::is_available();
+    #[cfg(not(target_os = "linux"))]
+    let x11_host = false;
+    let webview_source = webview::select_runtime(&root, x11_host);
+
     let workers = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(2)
@@ -145,15 +161,6 @@ pub fn run() {
             )
         });
     tauri::async_runtime::set(rt.handle().clone());
-
-    let launcher_settings = settings::LauncherSettings::load_or_recover(&root.settings_file())
-        .unwrap_or_else(|e| {
-            let id = match e {
-                settings::SettingsError::FolderTooNew { .. } => StartupMessage::FolderTooNew,
-                _ => StartupMessage::StartupFailed,
-            };
-            startup::fail(id, Some(root.path()), Some(&e.to_string()))
-        });
     // Scratch space a crashed preparation may have left (verified files and partial downloads stay).
     if let Err(e) = prepare_cmd::sweep_scratch(&root) {
         tracing::warn!(error = %e, "could not clean scratch space");
@@ -257,6 +264,7 @@ pub fn run() {
                     .set_exit_when_idle(false);
                 webview::resume_window(window.app_handle());
                 glass::resume(window.app_handle());
+                game_embed::on_host_focused(window.app_handle());
             }
             tauri::WindowEvent::Focused(false) => {
                 if window
@@ -268,13 +276,20 @@ pub fn run() {
                     webview::throttle_unfocused_window(window.app_handle());
                 }
             }
-            // Clade is a windowed launcher: if the window ever ends up maximized or fullscreen
-            // (a shortcut, a snap gesture), put it back to a normal window without querying on
-            // minimized (0x0) or small sizes.
+            // Clade is a windowed launcher: outside framed game mode, keep the menu window non-maximized
+            // and non-fullscreen. While a game is framed inside Clade, allow resizing and maximizing.
             tauri::WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                keep_windowed(window, size.width, size.height);
+                if game_embed::is_active(window.app_handle()) {
+                    game_embed::on_host_resized(window.app_handle());
+                } else {
+                    keep_windowed(window, size.width, size.height);
+                }
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if game_embed::request_close_or_detach(window.app_handle()) {
+                    api.prevent_close();
+                    return;
+                }
                 let launch = window.app_handle().state::<launch_cmd::LaunchState>();
                 if launch.close_requested() {
                     api.prevent_close();
@@ -298,6 +313,7 @@ pub fn run() {
         .manage(auth_state)
         .manage(prepare_state)
         .manage(launch_state)
+        .manage(game_embed::EmbedState::new())
         .invoke_handler(tauri::generate_handler![
             portable_status,
             ui_settings::get_ui_settings,
@@ -348,7 +364,10 @@ pub fn run() {
             prepare_cmd::prepare_status,
             launch_cmd::launch_profile,
             launch_cmd::launch_status,
-            launch_cmd::open_game_logs
+            launch_cmd::open_game_logs,
+            game_embed::get_game_embed_status,
+            game_embed::set_game_stage_bounds,
+            game_embed::toggle_game_maximize
         ])
         .setup(move |app| {
             // The window is created here, not from tauri.conf.json, because only the builder

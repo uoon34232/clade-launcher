@@ -238,3 +238,51 @@ test.describe("a profile's files and its game exclude each other", () => {
     await expect(playButton(page)).toHaveText(text("play.play"));
   });
 });
+
+test.describe("framed game mode (inside Clade)", () => {
+  test("hides the main menu, shows the framed stage with Maximize/Restore, and restores on exit", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await expect(playButton(page)).toBeVisible();
+    await expect(page.getByRole("button", { name: text("window.maximize") })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: text("window.restore") })).toHaveCount(0);
+    await expect
+      .poll(async () => (await backend.calls("set_game_stage_bounds")).length)
+      .toBeGreaterThan(0);
+    const bounds = (await backend.calls("set_game_stage_bounds"))[0]?.args as {
+      width: number;
+      height: number;
+      radius: number;
+    };
+    expect(bounds.width).toBeGreaterThan(0);
+    expect(bounds.height).toBeGreaterThan(0);
+    expect(bounds.radius).toBeGreaterThan(0);
+
+    await playButton(page).click();
+    await backend.playing("survival");
+    await backend.embedded("survival", true);
+
+    await expect(playButton(page)).toHaveCount(0);
+    await expect(page.getByTestId("game-stage")).toHaveAttribute("aria-hidden", "false");
+    await expect(page.getByRole("button", { name: text("window.minimize") })).toBeVisible();
+    await expect(page.getByRole("button", { name: text("window.maximize") })).toBeVisible();
+    await expect(page.getByRole("button", { name: text("window.close") })).toBeVisible();
+
+    await page.getByRole("button", { name: text("window.maximize") }).click();
+    await expect.poll(async () => (await backend.calls("toggle_game_maximize")).length).toBe(1);
+    await expect(page.getByRole("button", { name: text("window.restore") })).toBeVisible();
+
+    await page.getByRole("button", { name: text("window.restore") }).click();
+    await expect.poll(async () => (await backend.calls("toggle_game_maximize")).length).toBe(2);
+    await expect(page.getByRole("button", { name: text("window.maximize") })).toBeVisible();
+
+    await backend.stopped("survival", { kind: "normal", reason: "normal", code: 0 });
+    await expect(page.getByRole("button", { name: text("window.maximize") })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: text("window.restore") })).toHaveCount(0);
+    await expect(playButton(page)).toHaveText(text("play.play"));
+    await expect(playButton(page)).toBeEnabled();
+  });
+});
