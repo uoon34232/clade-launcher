@@ -10,17 +10,6 @@
       "verification": "The repository file at the commit recorded in the published crate (.cargo_vcs_info.json). The crate declares BSD-3-Clause."
     },
     {
-      "file": "dlopen2-MIT.txt",
-      "sha256": "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
-      "license": "MIT",
-      "appliesTo": [
-        { "crate": "dlopen2", "version": "0.8.2" },
-        { "crate": "dlopen2_derive", "version": "0.4.3" }
-      ],
-      "origin": "https://github.com/OpenByteDev/dlopen2/blob/cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE",
-      "verification": "The repository LICENSE at the commit recorded in the published crates (.cargo_vcs_info.json, cc80e4a0a90d499b677fdf7743699b4b3a43a989). Both crates declare MIT OR Apache-2.0 without an inline LICENSE file."
-    },
-    {
       "file": "webview2-rs-MIT.txt",
       "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
       "license": "MIT",

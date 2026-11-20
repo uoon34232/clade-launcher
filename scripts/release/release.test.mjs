@@ -3,7 +3,6 @@
 // executable, a fake WebView2 folder, synthetic cargo metadata) and need no network, no account and no
 // real runtime.
 
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,13 +27,6 @@ import {
   rustRuntimePackages,
 } from "./generate-notices.mjs";
 import { buildPackage, checkSha256File, portableReadme, stage } from "./package.mjs";
-import {
-  buildLinuxPackage,
-  LINUX_ARCHIVE_NAME,
-  portableReadmeLinux,
-  stageLinux,
-  validateLinuxArchive,
-} from "./package-linux.mjs";
 import {
   executableVersion,
   scanExecutable,
@@ -650,61 +642,6 @@ describe("building the package", () => {
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
   });
-
-  function linuxInputs() {
-    const bin = put("in/clade-bin", "\x7fELFmock-linux-binary");
-    const license = put("in/LICENSE", "Apache License text");
-    const notices = put("in/notices.txt", "notices");
-    return {
-      bin,
-      license,
-      notices,
-      version: "0.1.0",
-      out: join(tmp, "out-linux"),
-    };
-  }
-
-  it("fills the version into the Linux portable README and keeps it factual", () => {
-    const text = portableReadmeLinux("0.1.0");
-    expect(text).toContain("Clade Launcher 0.1.0 (portable, Linux x64)");
-    expect(text).toContain("./Clade");
-    expect(text).toContain("WebKitGTK 4.1");
-    expect(text).not.toContain("{{VERSION}}");
-    expect(scanText("README.txt", text)).toEqual([]);
-  });
-
-  it("stages only the allowed Linux files and refuses missing inputs", () => {
-    const i = linuxInputs();
-    const dir = stageLinux(i);
-    expect(dir).toContain("Clade-Launcher");
-    put("out-linux/Clade-Launcher/stray.txt", "left over");
-    put("out-linux/Clade-Launcher/data/settings.json", "{}");
-    stageLinux(i);
-    expect(scanText("README.txt", readFileSync(join(dir, "README.txt"), "utf8"))).toEqual([]);
-    expect(() => stageLinux({ ...i, bin: join(tmp, "no-bin") })).toThrow(/Clade binary/);
-    expect(() => stageLinux({ ...i, license: join(tmp, "no-lic") })).toThrow(
-      /missing input: LICENSE/,
-    );
-    expect(() => stageLinux({ ...i, notices: join(tmp, "no-not") })).toThrow(/THIRD-PARTY-NOTICES/);
-  });
-
-  it.runIf(process.platform === "linux")(
-    "builds a deterministic Linux tar.gz with executable permissions and a matching .sha256 file",
-    () => {
-      const r = buildLinuxPackage(linuxInputs());
-      expect(r.archiveName).toBe(LINUX_ARCHIVE_NAME);
-      expect(r.files).toEqual(["Clade", "LICENSE", "README.txt", "THIRD-PARTY-NOTICES.txt"]);
-      validateLinuxArchive(r.archivePath);
-      const listing = execFileSync("tar", ["-tzvf", r.archivePath], { encoding: "utf8" });
-      expect(listing).toMatch(/^-rwxr-xr-x 0\/0 .* Clade-Launcher\/Clade$/m);
-      expect(checkSha256File(r.archivePath)).toEqual({ ok: true, hex: r.sha256 });
-      expect(readFileSync(`${r.archivePath}.sha256`, "utf8")).toBe(
-        sha256Line(r.sha256, LINUX_ARCHIVE_NAME),
-      );
-      const second = buildLinuxPackage(linuxInputs()).sha256;
-      expect(second).toBe(r.sha256);
-    },
-  );
 });
 
 // ------------------------------------------------------------------------------ WebView2 input
@@ -977,14 +914,7 @@ describe("third-party notices", () => {
     const sources = loadLicenseSources();
     expect(sources.length).toBeGreaterThan(0);
     const names = sources.flatMap((x) => (x.appliesTo ?? []).map((a) => a.crate));
-    for (const crate of [
-      "alloc-stdlib",
-      "dlopen2",
-      "dlopen2_derive",
-      "webview2-com",
-      "webview2-com-sys",
-      "webview2-com-macros",
-    ])
+    for (const crate of ["alloc-stdlib", "webview2-com", "webview2-com-sys", "webview2-com-macros"])
       expect(names).toContain(crate);
     mkdirSync(join(tmp, "texts"), { recursive: true });
     writeFileSync(join(tmp, "texts", "x.txt"), "tampered");
@@ -993,53 +923,6 @@ describe("third-party notices", () => {
       JSON.stringify({ sources: [{ file: "x.txt", sha256: "0".repeat(64), appliesTo: [] }] }),
     );
     expect(() => loadLicenseSources(join(tmp, "m.json"), join(tmp, "texts"))).toThrow(/SHA-256/);
-  });
-
-  it("tailors notices for Linux targets and omits Windows-only linked components", () => {
-    put("a/LICENSE-MIT", "MIT License\n\nCopyright (c) Alpha authors");
-    put(
-      "b/LICENSE",
-      "Apache License\n   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n...",
-    );
-    put(
-      "package.json",
-      JSON.stringify({ name: "clade-launcher", version: "0.1.0", dependencies: {} }),
-    );
-    put("src/main.ts", "export const ok = true;\n");
-    put(
-      "node_modules/vite/package.json",
-      JSON.stringify({ name: "vite", version: "6.0.0", license: "MIT" }),
-    );
-    put("node_modules/vite/LICENSE", "MIT License\n\nCopyright (c) Vite");
-
-    const sources = [
-      {
-        component: "Microsoft WebView2 SDK (WebView2 Loader)",
-        license: "BSD-3-Clause-style",
-        text: "Microsoft WebView2 SDK terms",
-        origin: "https://aka.ms/webview",
-      },
-    ];
-    const winResult = generate(tmp, {
-      cargoMetadata: metadata(),
-      licenseSources: sources,
-      target: "x86_64-pc-windows-msvc",
-    });
-    expect(winResult.counts.components).toBe(1);
-    expect(winResult.text).toContain("Rust crates linked into Clade.exe: 2");
-    expect(winResult.text).toContain("WebView2");
-
-    const linuxResult = generate(tmp, {
-      cargoMetadata: metadata(),
-      licenseSources: sources,
-      target: "x86_64-unknown-linux-gnu",
-    });
-    expect(linuxResult.counts.components).toBe(0);
-    expect(linuxResult.text).toContain("Rust crates linked into Clade: 2");
-    expect(linuxResult.text).toContain("System WebKitGTK 4.1");
-    expect(linuxResult.text).not.toContain("Clade.exe");
-    expect(linuxResult.text).not.toContain("WebView2");
-    expect(linuxResult.text).not.toContain("Microsoft Visual C++");
   });
 
   it("flags dependencies it could not find instead of pretending", () => {

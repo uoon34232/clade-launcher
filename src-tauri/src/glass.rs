@@ -3,15 +3,15 @@
 //! Glass is purely cosmetic and must never get in the way: when anything about it is unavailable
 //! or fails, Clade silently stays on the opaque warm treatment it has always had.
 //!
-//! **Technique:**
-//! - **Windows 11:** the window keeps its normal, opaque WebView background. Turning glass on asks
-//!   the desktop window manager for its documented *Mica* system backdrop (`DwmSetWindowAttribute`
-//!   with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing light mode) and makes the WebView
-//!   background transparent (`set_background_color` with alpha 0).
-//! - **Linux (Wayland / X11):** the window requests an RGBA visual (`transparent = true`), and
-//!   turning glass on sets the window and WebKitGTK background alpha to 0 so the compositor
-//!   (Hyprland, KWin, Sway, Mutter, picom) blends desktop blur/translucency behind translucent UI
-//!   surfaces. Turning it off restores `OPAQUE_BACKGROUND`.
+//! **Technique (Windows 11):** the window keeps its normal, opaque WebView background. Turning
+//! glass on asks the desktop window manager for its documented *Mica* system backdrop
+//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing the
+//! light variant with `DWMWA_USE_IMMERSIVE_DARK_MODE = 0`) and makes the WebView's own background
+//! transparent (`set_background_color` with alpha 0), so the page's translucent surfaces sit over
+//! the cached desktop material without per-frame live-blur GPU overhead. Turning it off clears the
+//! backdrop and restores the opaque background, so nothing of the desktop can show through. Both
+//! directions are applied to the running window, deduplicated so repeated focus events never poke
+//! DWM when nothing changed, and suspended while the window is hidden.
 //!
 //! **What decides it** (`wanted`): High Contrast always wins and means opaque. Otherwise the
 //! person's choice (`ui.transparency`): `off` is opaque, `on` asks for glass, and `system` follows
@@ -136,7 +136,6 @@ impl GlassState {
         changed
     }
 
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub(crate) fn set_system_effects(&self, enabled: Option<bool>) {
         let encoded = match enabled {
             None => EFFECTS_UNKNOWN,
@@ -330,22 +329,7 @@ pub fn watch_system_preference(app: AppHandle) {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub fn watch_system_preference(app: AppHandle) {
-    let session = crate::loader_install::SystemEnv::from_process().session_env;
-    let has_composited_session = session
-        .get("WAYLAND_DISPLAY")
-        .is_some_and(|v| !v.is_empty())
-        || session
-            .get("XDG_SESSION_TYPE")
-            .is_some_and(|v| v.eq_ignore_ascii_case("wayland"))
-        || session.get("DISPLAY").is_some_and(|v| !v.is_empty());
-    app.state::<GlassState>()
-        .set_system_effects(Some(has_composited_session));
-    refresh(&app);
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(windows))]
 pub fn watch_system_preference(_app: AppHandle) {}
 
 /// Applies the material to the real window.
@@ -354,9 +338,7 @@ struct WindowBackdrop<'a> {
 }
 
 /// The warm paper colour of the opaque look (the same as `backgroundColor` in tauri.conf.json).
-#[cfg(windows)]
 const OPAQUE_BACKGROUND: tauri::window::Color = tauri::window::Color(0xF3, 0xED, 0xE3, 0xFF);
-#[cfg(windows)]
 const CLEAR_BACKGROUND: tauri::window::Color = tauri::window::Color(0, 0, 0, 0);
 
 impl Backdrop for WindowBackdrop<'_> {
@@ -369,23 +351,14 @@ impl Backdrop for WindowBackdrop<'_> {
         {
             let hwnd = window.hwnd().map_err(|e| e.to_string())?;
             native::set_backdrop(hwnd.0 as isize, on)?;
-            window
-                .set_background_color(Some(if on {
-                    CLEAR_BACKGROUND
-                } else {
-                    OPAQUE_BACKGROUND
-                }))
-                .map_err(|e| e.to_string())?;
         }
-        // On Linux (GTK/WebKitGTK under XWayland with SHM), calling
-        // `set_background_color` at runtime clears the cairo/X11 surface without
-        // invalidating clean WebKit tiles. `wry` already initializes RGBA(0,0,0,0)
-        // once from `transparent: true`, and CSS `html[data-glass]` controls opacity.
-        #[cfg(not(windows))]
-        {
-            let _ = (&window, on);
-        }
-        Ok(())
+        window
+            .set_background_color(Some(if on {
+                CLEAR_BACKGROUND
+            } else {
+                OPAQUE_BACKGROUND
+            }))
+            .map_err(|e| e.to_string())
     }
 }
 

@@ -243,13 +243,9 @@ describe("outside the launcher (plain browser, tests)", () => {
 });
 
 describe("the transparency preference", () => {
-  it("defaults to following system and supported=true, also for an older backend that does not send it", () => {
+  it("defaults to following Windows, also for an older backend that does not send it", () => {
     expect(DEFAULT_UI_SETTINGS.transparency).toBe("system");
-    expect(DEFAULT_UI_SETTINGS.transparencySupported).toBe(true);
     expect(parseUiSettings({}).transparency).toBe("system");
-    expect(parseUiSettings({}).transparencySupported).toBe(true);
-    expect(parseUiSettings({ transparencySupported: false }).transparencySupported).toBe(false);
-    expect(parseUiSettings({ transparencySupported: "nope" }).transparencySupported).toBe(true);
     expect(parseUiSettings({ reducedMotion: "on" }).transparency).toBe("system");
   });
 

@@ -33,15 +33,13 @@ use crate::instances::{InstanceDirs, Resolution};
 use crate::loader_install::SystemEnv;
 use crate::mc_meta::{
     parse_asset_index, parse_version, Arg, AssetIndexRef, JavaRequirement, LaunchFeatures, Library,
-    LogConfig, MetaError, Role, VersionPlan, HOST_TARGET,
+    LogConfig, MetaError, Role, VersionPlan, WINDOWS_X64,
 };
 use crate::ms_auth::Secret;
 use crate::portable::PortableRoot;
 use crate::runtimes::ManagedJava;
 
 pub const LAUNCHER_NAME: &str = "Clade";
-pub const CP_SEP: char = if cfg!(windows) { ';' } else { ':' };
-pub const CP_SEP_STR: &str = if cfg!(windows) { ";" } else { ":" };
 /// Above this UTF-16 length, `-cp` entries under the Clade folder are rewritten relative to `cwd`.
 const COMPACT_CP_CHARS: usize = 20_000;
 /// Above this UTF-16 length on Java 9+, `-cp` spills to `instances/<id>/.clade-jvm.args`.
@@ -127,7 +125,7 @@ fn load_chain(root: &PortableRoot, id: &str) -> Result<Vec<VersionPlan>, LaunchE
                     LaunchError::BadVersion(e.to_string())
                 }
             })?;
-        let plan = parse_version(&bytes, &HOST_TARGET)?;
+        let plan = parse_version(&bytes, &WINDOWS_X64)?;
         if plan.id != cur {
             return Err(LaunchError::BadVersion(format!(
                 "version metadata for {cur} declares id {}",
@@ -411,8 +409,6 @@ pub struct BuildInput<'a> {
     pub sys: &'a SystemEnv,
     /// Where the game's temporary files go (inside the Clade folder).
     pub temp_dir: &'a Path,
-    /// Forces Linux game windows onto X11/XWayland when embedding inside Clade's frame.
-    pub force_x11: bool,
 }
 
 fn substitute(template: &str, vars: &BTreeMap<&str, String>, unknown: &mut Vec<String>) -> String {
@@ -478,14 +474,14 @@ fn compact_classpath_relative(
         up.push("..");
     }
     let mut rewritten = Vec::new();
-    for entry in jvm_args[cp_idx + 1].split(CP_SEP) {
+    for entry in jvm_args[cp_idx + 1].split(';') {
         if let Some(rel) = crate::portable::fsutil::strip_prefix_portable(Path::new(entry), root) {
             rewritten.push(utf8(&up.join(rel))?);
         } else {
             rewritten.push(entry.to_owned());
         }
     }
-    jvm_args[cp_idx + 1] = rewritten.join(CP_SEP_STR);
+    jvm_args[cp_idx + 1] = rewritten.join(";");
     Ok(())
 }
 
@@ -525,9 +521,9 @@ fn maybe_spill_classpath_argfile(
 }
 
 pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
-    if utf8(i.root.path())?.contains(CP_SEP)
-        || utf8(i.dirs.root())?.contains(CP_SEP)
-        || utf8(i.temp_dir)?.contains(CP_SEP)
+    if utf8(i.root.path())?.contains(';')
+        || utf8(i.dirs.root())?.contains(';')
+        || utf8(i.temp_dir)?.contains(';')
     {
         return Err(LaunchError::UnsupportedFolderPath);
     }
@@ -612,8 +608,8 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         ("natives_directory", utf8(&i.dirs.natives_dir())?),
         ("launcher_name", LAUNCHER_NAME.to_owned()),
         ("launcher_version", env!("CARGO_PKG_VERSION").to_owned()),
-        ("classpath", cp.join(CP_SEP_STR)),
-        ("classpath_separator", CP_SEP_STR.to_owned()),
+        ("classpath", cp.join(";")),
+        ("classpath_separator", ";".to_owned()),
         ("library_directory", utf8(&libdir)?),
     ] {
         vars.insert(k, v);
@@ -630,12 +626,12 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
     let mut jvm_template: Vec<String> = r
         .jvm
         .iter()
-        .flat_map(|a| a.values_with_features(&HOST_TARGET, &features))
+        .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
         .collect();
     if !jvm_template.iter().any(|a| a.contains("${classpath}")) {
         jvm_template = default_jvm()
             .iter()
-            .flat_map(|a| a.values_with_features(&HOST_TARGET, &features))
+            .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
             .chain(jvm_template)
             .collect();
     }
@@ -643,7 +639,7 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         (_, false) => r
             .game
             .iter()
-            .flat_map(|a| a.values_with_features(&HOST_TARGET, &features))
+            .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
             .collect(),
         (Some(s), true) => s.split_whitespace().map(str::to_owned).collect(),
         (None, true) => return Err(LaunchError::Incomplete("no game arguments")),
@@ -753,91 +749,37 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         return Err(LaunchError::TooLong);
     }
 
-    let (tmp, userprofile) = (utf8(i.temp_dir)?, utf8(&home)?);
+    let (sys_root, tmp, userprofile) = (utf8(&i.sys.system_root)?, utf8(i.temp_dir)?, utf8(&home)?);
+    let sys_drive = if sys_root
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && sys_root.as_bytes().get(1) == Some(&b':')
+    {
+        &sys_root[..2]
+    } else {
+        "C:"
+    };
     let mut env = BTreeMap::new();
-    #[cfg(windows)]
-    {
-        let sys_root = utf8(&i.sys.system_root)?;
-        let sys_drive = if sys_root
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic)
-            && sys_root.as_bytes().get(1) == Some(&b':')
-        {
-            &sys_root[..2]
-        } else {
-            "C:"
-        };
-        for (k, v) in [
-            ("SystemDrive", sys_drive.to_owned()),
-            ("SystemRoot", sys_root.clone()),
-            ("windir", sys_root.clone()),
-            (
-                "PATH",
-                format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
-            ),
-            ("COMSPEC", format!(r"{sys_root}\System32\cmd.exe")),
-            ("PATHEXT", ".COM;.EXE;.BAT;.CMD".to_owned()),
-            ("TEMP", tmp.clone()),
-            ("TMP", tmp.clone()),
-            ("TMPDIR", tmp),
-            ("USERPROFILE", userprofile.clone()),
-            ("HOME", userprofile),
-            ("APPDATA", utf8(&home.join("AppData").join("Roaming"))?),
-            ("LOCALAPPDATA", utf8(&home.join("AppData").join("Local"))?),
-        ] {
-            env.insert(k.to_owned(), v);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        for (k, v) in &i.sys.session_env {
-            let deny = [
-                "JAVA_HOME",
-                "JAVA_TOOL_OPTIONS",
-                "_JAVA_OPTIONS",
-                "JDK_JAVA_OPTIONS",
-                "CLASSPATH",
-                "JAVA_OPTS",
-                "LD_PRELOAD",
-                "LD_LIBRARY_PATH",
-            ]
-            .iter()
-            .any(|b| b.eq_ignore_ascii_case(k));
-            if !deny {
-                env.insert(k.clone(), v.clone());
-            }
-        }
-        for (k, v) in [
-            ("PATH", "/usr/bin:/bin".to_owned()),
-            ("TEMP", tmp.clone()),
-            ("TMP", tmp.clone()),
-            ("TMPDIR", tmp),
-            ("USERPROFILE", userprofile.clone()),
-            ("HOME", userprofile),
-            ("APPDATA", utf8(&home.join("AppData").join("Roaming"))?),
-            ("LOCALAPPDATA", utf8(&home.join("AppData").join("Local"))?),
-            ("XDG_DATA_HOME", utf8(&home.join(".local").join("share"))?),
-            ("XDG_STATE_HOME", utf8(&home.join(".local").join("state"))?),
-            ("XDG_CONFIG_HOME", utf8(&home.join(".config"))?),
-            ("XDG_CACHE_HOME", utf8(&home.join(".cache"))?),
-        ] {
-            env.insert(k.to_owned(), v);
-        }
-        if i.force_x11
-            && i.sys
-                .session_env
-                .get("DISPLAY")
-                .is_some_and(|d| !d.is_empty())
-        {
-            // Point WAYLAND_DISPLAY at a nonexistent socket name rather than unsetting it, because
-            // libwayland-client's `wl_display_connect(NULL)` falls back to "wayland-0" when unset.
-            env.insert("WAYLAND_DISPLAY".to_owned(), "clade-x11-embed".to_owned());
-            env.insert("XDG_SESSION_TYPE".to_owned(), "x11".to_owned());
-            env.insert("GDK_BACKEND".to_owned(), "x11".to_owned());
-            env.insert("SDL_VIDEODRIVER".to_owned(), "x11".to_owned());
-            env.insert("SDL_VIDEO_DRIVER".to_owned(), "x11".to_owned());
-        }
+    for (k, v) in [
+        ("SystemDrive", sys_drive.to_owned()),
+        ("SystemRoot", sys_root.clone()),
+        ("windir", sys_root.clone()),
+        (
+            "PATH",
+            format!(r"{sys_root}\System32;{sys_root};{sys_root}\System32\Wbem"),
+        ),
+        ("COMSPEC", format!(r"{sys_root}\System32\cmd.exe")),
+        ("PATHEXT", ".COM;.EXE;.BAT;.CMD".to_owned()),
+        ("TEMP", tmp.clone()),
+        ("TMP", tmp.clone()),
+        ("TMPDIR", tmp),
+        ("USERPROFILE", userprofile.clone()),
+        ("HOME", userprofile),
+        ("APPDATA", utf8(&home.join("AppData").join("Roaming"))?),
+        ("LOCALAPPDATA", utf8(&home.join("AppData").join("Local"))?),
+    ] {
+        env.insert(k.to_owned(), v);
     }
 
     Ok(GameCommand {

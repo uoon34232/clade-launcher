@@ -158,10 +158,6 @@ impl StageSession {
             s.minecraft_dir(),
             s.appdata_dir(),
             s.localappdata_dir(),
-            s.xdg_data_dir(),
-            s.xdg_state_dir(),
-            s.xdg_config_dir(),
-            s.xdg_cache_dir(),
             s.tmp_dir(),
         ] {
             fs::create_dir_all(d)?;
@@ -177,15 +173,10 @@ impl StageSession {
     pub fn base(&self) -> &Path {
         &self.base
     }
-    /// The installer's target: stage-local inside the staging directory, never the host's folder.
+    /// The installer's target: stage-local under `%APPDATA%`, never the host's folder.
     pub fn minecraft_dir(&self) -> PathBuf {
-        let base = if cfg!(windows) {
-            self.appdata_dir()
-        } else {
-            self.home_dir()
-        };
         // portability-allow: stage-local stand-in under cache/loader-install, never the host's .minecraft
-        base.join(".minecraft")
+        self.appdata_dir().join(".minecraft")
     }
     /// Stands in for the user profile (`USERPROFILE`, `HOME`, `user.home`).
     pub fn home_dir(&self) -> PathBuf {
@@ -196,18 +187,6 @@ impl StageSession {
     }
     pub fn localappdata_dir(&self) -> PathBuf {
         self.base.join("home").join("AppData").join("Local")
-    }
-    pub fn xdg_data_dir(&self) -> PathBuf {
-        self.home_dir().join(".local").join("share")
-    }
-    pub fn xdg_state_dir(&self) -> PathBuf {
-        self.home_dir().join(".local").join("state")
-    }
-    pub fn xdg_config_dir(&self) -> PathBuf {
-        self.home_dir().join(".config")
-    }
-    pub fn xdg_cache_dir(&self) -> PathBuf {
-        self.home_dir().join(".cache")
     }
     /// Stands in for the system TEMP directory.
     pub fn tmp_dir(&self) -> PathBuf {
@@ -286,87 +265,21 @@ pub fn sweep_stale(root: &PortableRoot) -> io::Result<usize> {
 // The sanitized installer command
 // ---------------------------------------------------------------------------------------
 
-/// Safe read-only OS/session values the game or installer processes may see. Passed in so tests are deterministic.
-#[derive(Debug, Clone, Default)]
+/// The only machine-specific value the installer process may see: the read-only Windows
+/// system directory (Java needs it to load system DLLs). Passed in so tests are deterministic.
+#[derive(Debug, Clone)]
 pub struct SystemEnv {
     pub system_root: PathBuf,
-    pub session_env: BTreeMap<String, String>,
 }
-
-#[cfg(not(windows))]
-const LINUX_SESSION_VARS: &[&str] = &[
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "XDG_RUNTIME_DIR",
-    "XDG_SESSION_TYPE",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_SESSION_DESKTOP",
-    "DESKTOP_SESSION",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XAUTHORITY",
-    "PULSE_SERVER",
-    "PULSE_COOKIE",
-    "PIPEWIRE_RUNTIME_DIR",
-    "PIPEWIRE_REMOTE",
-    "ALSA_CONFIG_PATH",
-    "DRI_PRIME",
-    "__NV_PRIME_RENDER_OFFLOAD",
-    "__NV_PRIME_RENDER_OFFLOAD_PROVIDER",
-    "__GLX_VENDOR_LIBRARY_NAME",
-    "__VK_LAYER_NV_optimus",
-    "MESA_LOADER_DRIVER_OVERRIDE",
-    "LIBGL_DRIVERS_PATH",
-    "VK_ICD_FILENAMES",
-    "VK_DRIVER_FILES",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "XMODIFIERS",
-    "GTK_IM_MODULE",
-    "QT_IM_MODULE",
-];
 
 impl SystemEnv {
     pub fn from_process() -> Self {
-        #[cfg(windows)]
-        {
-            // portability-allow: read-only lookup of the Windows system directory, never persisted
-            let root = std::env::var_os("SystemRoot")
-                .map(PathBuf::from)
-                // portability-allow: fallback for the read-only Windows system directory
-                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-            Self {
-                system_root: root,
-                session_env: BTreeMap::new(),
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let mut session_env = BTreeMap::new();
-            for &key in LINUX_SESSION_VARS {
-                // portability-allow: read-only Linux display, audio and GPU session variables for the game process
-                if let Ok(val) = std::env::var(key) {
-                    if !val.is_empty() {
-                        session_env.insert(key.to_owned(), val);
-                    }
-                }
-            }
-            if !session_env.contains_key("XAUTHORITY") {
-                // portability-allow: read-only lookup of ~/.Xauthority when HOME is redirected for X11/XWayland
-                if let Some(real_home) = std::env::var_os("HOME") {
-                    let xauth = PathBuf::from(real_home).join(".Xauthority");
-                    if xauth.is_file() {
-                        if let Some(s) = xauth.to_str() {
-                            session_env.insert("XAUTHORITY".to_owned(), s.to_owned());
-                        }
-                    }
-                }
-            }
-            Self {
-                system_root: PathBuf::from("/usr"),
-                session_env,
-            }
-        }
+        // portability-allow: read-only lookup of the Windows system directory, never persisted
+        let root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            // portability-allow: fallback for the read-only Windows system directory
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        Self { system_root: root }
     }
 }
 
@@ -436,7 +349,6 @@ pub fn build_installer_command(
     args.extend(flags);
 
     let mut env = BTreeMap::new();
-    #[cfg(windows)]
     for (k, v) in [
         ("SystemRoot", sys_root.clone()),
         ("windir", sys_root.clone()),
@@ -450,26 +362,6 @@ pub fn build_installer_command(
         ("LOCALAPPDATA", path_str(&session.localappdata_dir())?),
     ] {
         env.insert(k.to_owned(), v);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = sys_root;
-        for (k, v) in [
-            ("PATH", "/usr/bin:/bin".to_owned()),
-            ("TEMP", tmp.clone()),
-            ("TMP", tmp.clone()),
-            ("TMPDIR", tmp),
-            ("USERPROFILE", home.clone()),
-            ("HOME", home),
-            ("APPDATA", path_str(&session.appdata_dir())?),
-            ("LOCALAPPDATA", path_str(&session.localappdata_dir())?),
-            ("XDG_DATA_HOME", path_str(&session.xdg_data_dir())?),
-            ("XDG_STATE_HOME", path_str(&session.xdg_state_dir())?),
-            ("XDG_CONFIG_HOME", path_str(&session.xdg_config_dir())?),
-            ("XDG_CACHE_HOME", path_str(&session.xdg_cache_dir())?),
-        ] {
-            env.insert(k.to_owned(), v);
-        }
     }
 
     let cmd = InstallerCommand {
@@ -527,15 +419,8 @@ pub fn verify_command(
         }
         if looks_absolute(v) {
             let allowed = if SYSTEM_ENV_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
-                if cfg!(windows) {
-                    // PATH may hold only the system directory, with no extra entries.
-                    is_inside(&sys.system_root, Path::new(v)) && !v.contains(';')
-                } else {
-                    k.eq_ignore_ascii_case("PATH")
-                        && !v.is_empty()
-                        && !v.contains(';')
-                        && v.split(':').all(|p| matches!(p, "/usr/bin" | "/bin"))
-                }
+                // PATH may hold only the system directory, with no extra entries.
+                is_inside(&sys.system_root, Path::new(v)) && !v.contains(';')
             } else {
                 is_inside(r, Path::new(v))
             };
@@ -553,23 +438,14 @@ pub fn verify_command(
         }
     }
     // The redirections that make the scrubbed environment meaningful must all be present.
-    let mut required_keys = vec![
+    for needed in [
         "TEMP",
         "TMP",
         "USERPROFILE",
         "HOME",
         "APPDATA",
         "LOCALAPPDATA",
-    ];
-    if !cfg!(windows) {
-        required_keys.extend([
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-        ]);
-    }
-    for needed in required_keys {
+    ] {
         if !cmd.env.contains_key(needed) {
             return Err(violation(format!(
                 "environment variable {needed} must be redirected"
@@ -665,15 +541,12 @@ impl Tripwire {
     /// false-trip an installation and snapshots stay fast.
     pub fn global_minecraft_dirs() -> Vec<PathBuf> {
         let mut v = Vec::new();
-        for var in ["APPDATA", "USERPROFILE", "HOME"] {
+        for var in ["APPDATA", "USERPROFILE"] {
             // portability-allow: read-only tripwire; these paths are never written, stored or used
             if let Some(base) = std::env::var_os(var) {
                 let mc = PathBuf::from(base).join(".minecraft");
-                for p in [mc.join("versions"), mc.join("launcher_profiles.json")] {
-                    if !v.contains(&p) {
-                        v.push(p);
-                    }
-                }
+                v.push(mc.join("versions"));
+                v.push(mc.join("launcher_profiles.json"));
             }
         }
         v
@@ -926,9 +799,9 @@ mod tests {
         let root = PortableRoot::at(d.path().join("Launcher"));
         root.ensure_layout().unwrap();
         let home = root.java_runtimes_dir().join("jre-test");
-        let exe = home.join(crate::java_install::JAVA_EXE);
-        fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        fs::write(&exe, b"java").unwrap();
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let exe = home.join("bin").join("java.exe");
+        fs::write(&exe, b"MZ").unwrap();
         let java = ManagedJava {
             id: "jre-test".into(),
             java_major: 21,
@@ -936,12 +809,7 @@ mod tests {
             home,
         };
         let sys = SystemEnv {
-            system_root: if cfg!(windows) {
-                PathBuf::from(r"C:\Windows")
-            } else {
-                PathBuf::from("/usr")
-            },
-            ..Default::default()
+            system_root: PathBuf::from(r"C:\Windows"),
         };
         (d, root, java, sys)
     }
@@ -976,15 +844,10 @@ mod tests {
                 p.display()
             );
         }
-        let expected_mc = if cfg!(windows) {
-            s.appdata_dir().join(".minecraft")
-        } else {
-            s.home_dir().join(".minecraft")
-        };
         assert_eq!(
             s.minecraft_dir(),
-            expected_mc,
-            "stage target and home/.minecraft are unified"
+            s.appdata_dir().join(".minecraft"),
+            "stage target and APPDATA/.minecraft are unified"
         );
         assert!(s.minecraft_dir().join("launcher_profiles.json").is_file());
         // Two sessions never share a directory.
@@ -1025,15 +888,10 @@ mod tests {
                 cmd.args.last().unwrap(),
                 &session.minecraft_dir().display().to_string()
             );
-            let mc_base = if cfg!(windows) {
-                Path::new(&cmd.env["APPDATA"])
-            } else {
-                Path::new(&cmd.env["HOME"])
-            };
             assert_eq!(
-                mc_base.join(".minecraft"),
+                Path::new(&cmd.env["APPDATA"]).join(".minecraft"),
                 session.minecraft_dir(),
-                "processors reading .minecraft hit the exact same stage folder"
+                "processors reading %APPDATA%\\.minecraft hit the exact same stage folder"
             );
             assert!(cmd.args.iter().any(|a| a == "--installClient"));
             assert!(!cmd.args.iter().any(|a| a.contains("--mirror")));
@@ -1079,62 +937,28 @@ mod tests {
             verify_command(&c, &root, &sys).is_err()
         };
         // A system Java instead of the managed one.
-        let sys_java = if cfg!(windows) {
-            r"C:\Program Files\Java\bin\java.exe"
-        } else {
-            "/usr/bin/java"
-        };
-        assert!(mutate(&|c| c.program = PathBuf::from(sys_java)));
+        assert!(mutate(
+            &|c| c.program = PathBuf::from(r"C:\Program Files\Java\bin\java.exe")
+        ));
         // System TEMP, the global .minecraft, the real user profile, a stray PATH entry.
         assert!(mutate(&|c| {
-            c.env.insert(
-                "TEMP".into(),
-                if cfg!(windows) {
-                    r"C:\Users\someone\AppData\Local\Temp".into()
-                } else {
-                    "/tmp".into()
-                },
-            );
+            c.env
+                .insert("TEMP".into(), r"C:\Users\someone\AppData\Local\Temp".into());
         }));
         assert!(mutate(&|c| {
-            c.env.insert(
-                "APPDATA".into(),
-                if cfg!(windows) {
-                    r"C:\Users\someone\AppData\Roaming".into()
-                } else {
-                    "/home/someone/.local/share".into()
-                },
-            );
+            c.env
+                .insert("APPDATA".into(), r"C:\Users\someone\AppData\Roaming".into());
         }));
         assert!(mutate(&|c| {
-            c.env.insert(
-                "USERPROFILE".into(),
-                if cfg!(windows) {
-                    r"C:\Users\someone".into()
-                } else {
-                    "/home/someone".into()
-                },
-            );
+            c.env
+                .insert("USERPROFILE".into(), r"C:\Users\someone".into());
         }));
         assert!(mutate(&|c| {
-            c.env.insert(
-                "PATH".into(),
-                if cfg!(windows) {
-                    r"C:\Windows\System32;C:\Tools".into()
-                } else {
-                    "/usr/bin:/tmp".into()
-                },
-            );
+            c.env
+                .insert("PATH".into(), r"C:\Windows\System32;C:\Tools".into());
         }));
         assert!(mutate(&|c| {
-            c.env.insert(
-                "PATH".into(),
-                if cfg!(windows) {
-                    r"C:\Tools".into()
-                } else {
-                    "/opt/bin".into()
-                },
-            );
+            c.env.insert("PATH".into(), r"C:\Tools".into());
         }));
         // Variables that inject JVM options or point at a system Java.
         for k in [
@@ -1151,20 +975,9 @@ mod tests {
             );
         }
         // Targets outside the root, drive-relative / root-relative tricks, parent-directory tricks, mirrors, wrong working directory.
-        assert!(mutate(&|c| {
-            *c.args.last_mut().unwrap() = if cfg!(windows) {
-                r"C:\Users\someone\AppData\Roaming\.minecraft".into()
-            } else {
-                "/home/someone/.minecraft".into()
-            };
-        }));
-        assert!(mutate(&|c| {
-            c.args.push(if cfg!(windows) {
-                r"-Dsome.dir=D:\elsewhere".into()
-            } else {
-                "-Dsome.dir=/etc".into()
-            });
-        }));
+        assert!(mutate(&|c| *c.args.last_mut().unwrap() =
+            r"C:\Users\someone\AppData\Roaming\.minecraft".into()));
+        assert!(mutate(&|c| c.args.push(r"-Dsome.dir=D:\elsewhere".into())));
         assert!(mutate(&|c| c.args.push("D:outside".into())));
         assert!(mutate(&|c| c.args.push("D:".into())));
         assert!(mutate(&|c| c.args.push("C:outside".into())));
@@ -1184,22 +997,11 @@ mod tests {
         assert!(mutate(&|c| c.args.push("../../escape".into())));
         assert!(mutate(&|c| c.args.push("..".into())));
         assert!(mutate(&|c| c.cwd = root.path().to_path_buf()));
-        assert!(mutate(&|c| {
-            c.cwd = PathBuf::from(if cfg!(windows) {
-                r"C:\Windows\System32"
-            } else {
-                "/usr/bin"
-            });
-        }));
+        assert!(mutate(&|c| c.cwd = PathBuf::from(r"C:\Windows\System32")));
         // Dropping a redirection is also a failure.
         assert!(mutate(&|c| {
             c.env.remove("LOCALAPPDATA");
         }));
-        if !cfg!(windows) {
-            assert!(mutate(&|c| {
-                c.env.remove("XDG_CONFIG_HOME");
-            }));
-        }
         assert!(mutate(&|c| c
             .args
             .retain(|a| !a.starts_with("-Duser.home="))));
@@ -1210,58 +1012,17 @@ mod tests {
 
     #[test]
     fn containment_check_is_lexical_case_insensitive_on_windows_and_rejects_dotdot() {
-        #[cfg(windows)]
-        {
-            let base = Path::new(r"F:\Launcher");
-            assert!(is_inside(base, Path::new(r"F:\Launcher\cache\tmp")));
-            assert!(
-                !is_inside(base, Path::new(r"F:\LauncherEvil\x")),
-                "prefix of a name is not containment"
-            );
-            assert!(!is_inside(base, Path::new(r"F:\Launcher\..\Other")));
-            assert!(!is_inside(base, Path::new(r"E:\Launcher\x")));
+        let base = Path::new(r"F:\Launcher");
+        assert!(is_inside(base, Path::new(r"F:\Launcher\cache\tmp")));
+        assert!(
+            !is_inside(base, Path::new(r"F:\LauncherEvil\x")),
+            "prefix of a name is not containment"
+        );
+        assert!(!is_inside(base, Path::new(r"F:\Launcher\..\Other")));
+        assert!(!is_inside(base, Path::new(r"E:\Launcher\x")));
+        if cfg!(windows) {
             assert!(is_inside(base, Path::new(r"f:\launcher\CACHE")));
         }
-        #[cfg(not(windows))]
-        {
-            let base = Path::new("/mnt/Launcher");
-            assert!(is_inside(base, Path::new("/mnt/Launcher/cache/tmp")));
-            assert!(
-                !is_inside(base, Path::new("/mnt/LauncherEvil/x")),
-                "prefix of a name is not containment"
-            );
-            assert!(!is_inside(base, Path::new("/mnt/Launcher/../Other")));
-            assert!(!is_inside(base, Path::new("/opt/Launcher/x")));
-            assert!(!is_inside(base, Path::new("/mnt/launcher/CACHE")));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_real_child_process_sees_only_the_scrubbed_environment() {
-        let (_d, root, _j, _s) = setup();
-        let session = StageSession::create(&root).unwrap();
-        let cmd = InstallerCommand {
-            program: PathBuf::from("/usr/bin/env"),
-            args: Vec::new(),
-            cwd: session.base().to_path_buf(),
-            env: BTreeMap::from([
-                (
-                    "APPDATA".to_owned(),
-                    session.appdata_dir().display().to_string(),
-                ),
-                ("TEMP".to_owned(), session.tmp_dir().display().to_string()),
-                ("HOME".to_owned(), session.home_dir().display().to_string()),
-            ]),
-        };
-        let out = cmd.to_process().output().unwrap();
-        assert!(out.status.success());
-        let text = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 3, "unexpected inherited vars: {lines:?}");
-        assert!(lines.iter().any(|l| l.starts_with("HOME=")));
-        assert!(lines.iter().any(|l| l.starts_with("TEMP=")));
-        assert!(lines.iter().any(|l| l.starts_with("APPDATA=")));
     }
 
     #[cfg(windows)]
@@ -1560,45 +1321,33 @@ mod tests {
         use sha2::{Digest, Sha256};
 
         let (_d, root, _j, sys) = setup();
-        let id = format!(
-            "java-runtime-delta--21.0.7--{}",
-            crate::java_install::RUNTIME_SUFFIX
-        );
-        let home = root.java_runtimes_dir().join(&id);
+        let id = "java-runtime-delta--21.0.7--windows-x64";
+        let home = root.java_runtimes_dir().join(id);
         fs::create_dir_all(home.join("bin")).unwrap();
-        let primary_rel = crate::java_install::JAVAW_EXE.unwrap_or(crate::java_install::JAVA_EXE);
-        let cli_rel = crate::java_install::JAVA_EXE;
-        let primary_bytes = b"primary java";
-        let cli_bytes = b"cli java";
-        fs::write(
-            RelPath::new(primary_rel).unwrap().to_path(&home),
-            primary_bytes,
-        )
-        .unwrap();
-        if primary_rel != cli_rel {
-            fs::write(RelPath::new(cli_rel).unwrap().to_path(&home), cli_bytes).unwrap();
-        }
+        let javaw_bytes = b"MZ gui javaw";
+        let java_cli_bytes = b"MZ cli java";
+        fs::write(home.join("bin").join("javaw.exe"), javaw_bytes).unwrap();
+        fs::write(home.join("bin").join("java.exe"), java_cli_bytes).unwrap();
         crate::runtimes::write_manifest(
             &root,
             &crate::runtimes::RuntimeManifest {
                 schema: 1,
-                id: id.clone(),
+                id: id.into(),
                 vendor: "mojang".into(),
                 java_major: 21,
                 arch: "x64".into(),
-                java_exe: RelPath::new(primary_rel).unwrap(),
-                java_exe_sha256: hex::encode(Sha256::digest(primary_bytes)),
-                java_cli_exe: (primary_rel != cli_rel).then(|| RelPath::new(cli_rel).unwrap()),
-                java_cli_exe_sha256: (primary_rel != cli_rel)
-                    .then(|| hex::encode(Sha256::digest(cli_bytes))),
+                java_exe: RelPath::new("bin/javaw.exe").unwrap(),
+                java_exe_sha256: hex::encode(Sha256::digest(javaw_bytes)),
+                java_cli_exe: Some(RelPath::new("bin/java.exe").unwrap()),
+                java_cli_exe_sha256: Some(hex::encode(Sha256::digest(java_cli_bytes))),
             },
         )
         .unwrap();
-        let managed = crate::runtimes::resolve_java(&root, &id).unwrap();
-        let expected_cli = RelPath::new(cli_rel).unwrap().to_path(&home);
+        let managed = crate::runtimes::resolve_java(&root, id).unwrap();
+        assert!(managed.exe.ends_with("javaw.exe"));
 
         let (_session, cmd) = build(&root, &managed, &sys, LoaderKind::Forge);
-        assert_eq!(cmd.program, expected_cli);
+        assert_eq!(cmd.program, home.join("bin").join("java.exe"));
     }
 
     #[test]

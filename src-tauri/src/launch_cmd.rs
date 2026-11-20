@@ -279,8 +279,6 @@ pub struct LaunchEnv<'a> {
     pub default_memory_mb: Option<u32>,
     /// Live physical + commit memory availability (`None` in purely static planning tests).
     pub memory_snapshot: Option<crate::system::MemorySnapshot>,
-    /// Forces Linux game windows onto X11/XWayland when embedding inside Clade's frame.
-    pub force_x11: bool,
 }
 
 /// Everything that must be true before the game may start, ending in the ready-to-run command.
@@ -355,10 +353,6 @@ pub async fn plan_launch<T: Transport>(
         temp.clone(),
         dirs.home_dir().join("AppData").join("Roaming"),
         dirs.home_dir().join("AppData").join("Local"),
-        dirs.home_dir().join(".local").join("share"),
-        dirs.home_dir().join(".local").join("state"),
-        dirs.home_dir().join(".config"),
-        dirs.home_dir().join(".cache"),
     ] {
         std::fs::create_dir_all(&d).map_err(|e| {
             fail(
@@ -404,7 +398,6 @@ pub async fn plan_launch<T: Transport>(
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,
-        force_x11: env.force_x11,
     })
     .map_err(|e| match e {
         LaunchError::MissingFile(what) => needs_repair(&what),
@@ -532,7 +525,6 @@ async fn start(
             total_memory_mb: crate::system::total_memory_mb(),
             default_memory_mb: app.state::<SettingsState>().default_memory_mb(),
             memory_snapshot: crate::system::memory_snapshot(),
-            force_x11: cfg!(target_os = "linux") && wants_embed,
         },
     )
     .await?;
@@ -759,12 +751,7 @@ pub fn reattach_live_sessions(app: &AppHandle) {
                 use std::os::windows::process::ExitStatusExt;
                 std::process::ExitStatus::from_raw(c)
             });
-            #[cfg(unix)]
-            let status = raw_exit.map(|c| {
-                use std::os::unix::process::ExitStatusExt;
-                std::process::ExitStatus::from_raw(((c & 0xff) as i32) << 8)
-            });
-            #[cfg(not(any(windows, unix)))]
+            #[cfg(not(windows))]
             let status: Option<std::process::ExitStatus> = {
                 let _ = raw_exit;
                 None

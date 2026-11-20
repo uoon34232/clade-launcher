@@ -565,7 +565,7 @@ describe("Profile settings dialog", () => {
 
     api.openFolder.mockRejectedValueOnce(new BackendError("explorer failed", "open_failed"));
     fireEvent.click(d.getByRole("button", { name: "Open profile folder" }));
-    expect((await d.findByRole("alert")).textContent).toBe("Could not open that folder.");
+    expect((await d.findByRole("alert")).textContent).toBe("Windows couldn't open that folder.");
 
     // Verify files delegates to PrepareDialog ({ verify: true })
     fireEvent.click(d.getByRole("button", { name: "Verify files" }));
@@ -711,7 +711,7 @@ describe("Profile settings and unreadable notice in Russian", () => {
     fireEvent.click(d.getByRole("button", { name: "Открыть папку профиля" }));
     await waitFor(() =>
       expect(
-        d.getAllByRole("alert").some((a) => a.textContent === "Не удалось открыть эту папку."),
+        d.getAllByRole("alert").some((a) => a.textContent === "Windows не смог открыть эту папку."),
       ).toBe(true),
     );
   });

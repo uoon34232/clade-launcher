@@ -33,67 +33,7 @@ pub fn memory_snapshot() -> Option<MemorySnapshot> {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_meminfo(text: &str) -> Option<MemorySnapshot> {
-    let mut mem_total_kb = None;
-    let mut mem_available_kb = None;
-    let mut mem_free_kb = None;
-    let mut buffers_kb = None;
-    let mut cached_kb = None;
-    let mut commit_limit_kb = None;
-    let mut committed_as_kb = None;
-    let mut swap_free_kb = None;
-
-    for line in text.lines() {
-        let Some((key, rest)) = line.split_once(':') else {
-            continue;
-        };
-        let Some(kb) = rest
-            .split_whitespace()
-            .next()
-            .and_then(|v| v.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        match key {
-            "MemTotal" => mem_total_kb = Some(kb),
-            "MemAvailable" => mem_available_kb = Some(kb),
-            "MemFree" => mem_free_kb = Some(kb),
-            "Buffers" => buffers_kb = Some(kb),
-            "Cached" => cached_kb = Some(kb),
-            "CommitLimit" => commit_limit_kb = Some(kb),
-            "Committed_AS" => committed_as_kb = Some(kb),
-            "SwapFree" => swap_free_kb = Some(kb),
-            _ => {}
-        }
-    }
-
-    let total_mb = mem_total_kb? / 1024;
-    if total_mb == 0 {
-        return None;
-    }
-    let avail_phys_kb = mem_available_kb.unwrap_or_else(|| {
-        mem_free_kb.unwrap_or(0) + buffers_kb.unwrap_or(0) + cached_kb.unwrap_or(0)
-    });
-    let avail_commit_kb = match (commit_limit_kb, committed_as_kb) {
-        (Some(limit), Some(used)) if limit > 0 => limit.saturating_sub(used).max(avail_phys_kb),
-        _ => avail_phys_kb.saturating_add(swap_free_kb.unwrap_or(0)),
-    };
-    Some(MemorySnapshot {
-        total_mb,
-        avail_phys_mb: avail_phys_kb / 1024,
-        avail_commit_mb: avail_commit_kb / 1024,
-    })
-}
-
-#[cfg(target_os = "linux")]
-pub fn memory_snapshot() -> Option<MemorySnapshot> {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|t| parse_proc_meminfo(&t))
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(windows))]
 pub fn memory_snapshot() -> Option<MemorySnapshot> {
     None
 }
@@ -122,57 +62,8 @@ pub fn system_locale() -> Option<String> {
     }
 }
 
-#[cfg(any(not(windows), test))]
-fn normalize_posix_locale(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_matches(['"', '\'']).trim();
-    let without_mod = trimmed.split('@').next().unwrap_or("");
-    let base = without_mod.split('.').next().unwrap_or("").trim();
-    if base.is_empty() || base.eq_ignore_ascii_case("C") || base.eq_ignore_ascii_case("POSIX") {
-        return None;
-    }
-    let bcp = base.replace('_', "-");
-    if !(2..=35).contains(&bcp.len())
-        || !bcp.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return None;
-    }
-    Some(bcp)
-}
-
 #[cfg(not(windows))]
 pub fn system_locale() -> Option<String> {
-    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        // portability-allow: read-only lookup of the OS display locale for the first-run language default
-        if let Ok(val) = std::env::var(key) {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let base = trimmed
-                .split('@')
-                .next()
-                .unwrap_or("")
-                .split('.')
-                .next()
-                .unwrap_or("")
-                .trim();
-            if base.eq_ignore_ascii_case("C") || base.eq_ignore_ascii_case("POSIX") {
-                break;
-            }
-            if let Some(norm) = normalize_posix_locale(trimmed) {
-                return Some(norm);
-            }
-        }
-    }
-    let conf = std::fs::read_to_string("/etc/locale.conf").ok()?;
-    for line in conf.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("LANG=") {
-            if let Some(norm) = normalize_posix_locale(val) {
-                return Some(norm);
-            }
-        }
-    }
     None
 }
 
@@ -323,30 +214,7 @@ pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-#[cfg(unix)]
-pub fn free_disk_bytes(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut dir: &Path = &abs;
-    while !dir.exists() {
-        dir = dir.parent()?;
-    }
-    let c_path = CString::new(dir.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `libc::statvfs` expects an initialized or zeroed `statvfs` buffer and a valid
-    // NUL-terminated path pointer for the duration of the call.
-    unsafe {
-        let mut vfs: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c_path.as_ptr(), &mut vfs) != 0 {
-            return None;
-        }
-        #[allow(clippy::unnecessary_cast)]
-        Some((vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64))
-    }
-}
-
-#[cfg(not(any(windows, unix)))]
+#[cfg(not(windows))]
 pub fn free_disk_bytes(_path: &Path) -> Option<u64> {
     None
 }
@@ -728,53 +596,6 @@ mod tests {
             assert!(snap.total_mb >= 512);
             assert!(snap.avail_phys_mb > 0 && snap.avail_commit_mb > 0);
         }
-        #[cfg(target_os = "linux")]
-        {
-            let snap = memory_snapshot().expect("Linux memory snapshot");
-            assert!(snap.total_mb >= 512);
-            assert!(snap.avail_phys_mb > 0 && snap.avail_commit_mb > 0);
-        }
         assert!(total_memory_mb().is_some_and(|m| m >= 512));
-    }
-
-    #[test]
-    fn proc_meminfo_and_posix_locale_parsers_handle_real_formats() {
-        let sample = "\
-MemTotal:       16384000 kB
-MemFree:         2048000 kB
-MemAvailable:    8192000 kB
-Buffers:          512000 kB
-Cached:          4096000 kB
-SwapFree:        4096000 kB
-CommitLimit:    20480000 kB
-Committed_AS:   10240000 kB
-";
-        let snap = parse_proc_meminfo(sample).unwrap();
-        assert_eq!(snap.total_mb, 16000);
-        assert_eq!(snap.avail_phys_mb, 8000);
-        assert_eq!(snap.avail_commit_mb, 10000);
-
-        // Overcommit kernels can have CommitLimit == 0; falls back to avail_phys + SwapFree.
-        let no_strict_commit = "MemTotal: 8388608 kB\nMemAvailable: 4194304 kB\nSwapFree: 2097152 kB\nCommitLimit: 0 kB\nCommitted_AS: 5000000 kB\n";
-        let snap2 = parse_proc_meminfo(no_strict_commit).unwrap();
-        assert_eq!(snap2.total_mb, 8192);
-        assert_eq!(snap2.avail_phys_mb, 4096);
-        assert_eq!(snap2.avail_commit_mb, 6144);
-
-        assert_eq!(
-            normalize_posix_locale("ru_RU.UTF-8").as_deref(),
-            Some("ru-RU")
-        );
-        assert_eq!(
-            normalize_posix_locale("\"en_US.utf8\"").as_deref(),
-            Some("en-US")
-        );
-        assert_eq!(
-            normalize_posix_locale("sr_RS@latin").as_deref(),
-            Some("sr-RS")
-        );
-        assert_eq!(normalize_posix_locale("C.UTF-8"), None);
-        assert_eq!(normalize_posix_locale("POSIX"), None);
-        assert_eq!(normalize_posix_locale(""), None);
     }
 }

@@ -43,7 +43,7 @@ use crate::loader_prepare::{self, InstallerRunner};
 use crate::loaders::LoaderKind;
 use crate::mc_catalog::{self, CatalogError, Origin};
 use crate::mc_meta::{
-    parse_asset_index, parse_version, AssetIndex, Library, MetaError, VersionPlan, HOST_TARGET,
+    parse_asset_index, parse_version, AssetIndex, Library, MetaError, VersionPlan, WINDOWS_X64,
 };
 use crate::natives::extract_natives;
 use crate::net::{FetchError, Fetcher, Streamer};
@@ -527,7 +527,7 @@ pub fn check_files(
     let mc = inst.minecraft.as_str();
     let bytes = fsutil::read_bounded(&version_json_path(root, mc), MAX_VERSION_JSON as u64)
         .map_err(|_| "the Minecraft version information".to_owned())?;
-    let plan = parse_version(&bytes, &HOST_TARGET).map_err(|e| e.to_string())?;
+    let plan = parse_version(&bytes, &WINDOWS_X64).map_err(|e| e.to_string())?;
 
     let client = plan.client.as_ref().ok_or("the client download")?;
     let jar = client_jar_path(root, mc);
@@ -667,7 +667,7 @@ async fn ensure_version_json<F: Fetcher, S: Streamer, R: InstallerRunner>(
         let expected_id = mc.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
             let b = fsutil::read_bounded(&local_path, MAX_VERSION_JSON as u64).ok()?;
-            let plan = parse_version(&b, &HOST_TARGET).ok()?;
+            let plan = parse_version(&b, &WINDOWS_X64).ok()?;
             (plan.id == expected_id).then_some(b)
         })
         .await
@@ -725,7 +725,7 @@ async fn ensure_version_json<F: Fetcher, S: Streamer, R: InstallerRunner>(
     if !hex::encode(Sha1::digest(&body)).eq_ignore_ascii_case(&sha1) {
         return Err(PrepareError::Verification("version information".into()));
     }
-    let parsed = parse_version(&body, &HOST_TARGET)?;
+    let parsed = parse_version(&body, &WINDOWS_X64)?;
     if parsed.id != mc.as_str() {
         return Err(PrepareError::Metadata(
             "the version metadata is for a different Minecraft version".into(),
@@ -1199,7 +1199,7 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
 
     // ---- 1. read the metadata (everything is planned before anything big is downloaded)
     let vjson = ensure_version_json(ctx, &mc).await?;
-    let plan = parse_version(&vjson, &HOST_TARGET)?;
+    let plan = parse_version(&vjson, &WINDOWS_X64)?;
     let client = plan.client.clone().ok_or_else(|| {
         PrepareError::Unsupported("Mojang publishes no client download for it".into())
     })?;
@@ -1427,14 +1427,6 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
             ctx.concurrency,
         )
         .await?;
-        let root_reapply = ctx.root.clone();
-        let java_reapply = installed.clone();
-        let files_reapply = files.clone();
-        tokio::task::spawn_blocking(move || {
-            java_install::reapply_runtime_metadata(&root_reapply, &java_reapply, &files_reapply)
-        })
-        .await
-        .map_err(storage)??;
         ctx.check_cancel()?;
     }
     let installer_java = if needs_installer_java {
