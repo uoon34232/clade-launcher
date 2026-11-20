@@ -223,3 +223,103 @@ fn retiring_cleans_disposable_natives_while_preserving_all_user_files_byte_for_b
     }
     let _ = &d;
 }
+
+#[test]
+fn retained_profiles_can_be_listed_and_restored_with_all_files_intact() {
+    let (_d, root) = setup();
+    let store = InstanceStore::new(&root);
+    assert!(store.list_retained().unwrap().is_empty());
+
+    let inst = store.create(vanilla("Survival"), 100).unwrap();
+    let orig_dirs = store.dirs(&inst.id);
+    let save_file = orig_dirs.game_dir().join("saves/World/level.dat");
+    fs::create_dir_all(save_file.parent().unwrap()).unwrap();
+    fs::write(&save_file, b"world-bytes").unwrap();
+    fs::write(
+        orig_dirs.root().join("playtime.json"),
+        br#"{"schema":1,"total_seconds":180,"sessions":2,"last_played_at":null,"applied":[]}"#,
+    )
+    .unwrap();
+
+    let retired_path = store.retire(&inst.id).unwrap();
+    let folder = retired_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let retained = store.list_retained().unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].folder, folder);
+    assert_eq!(retained[0].instance.name, "Survival");
+    assert!(retained[0].removed_at.is_some());
+
+    let restored = store.restore(&folder, "Survival").unwrap();
+    assert_eq!(restored.id, inst.id);
+    assert_eq!(restored.name, "Survival");
+    assert!(store.list_retained().unwrap().is_empty());
+    assert!(!root.instances_dir().join(RETAINED_DIR).exists());
+    assert_eq!(fs::read(&save_file).unwrap(), b"world-bytes");
+    assert_eq!(
+        crate::playtime::PlaytimeStore::new(&root)
+            .instance_total(&restored.id)
+            .unwrap()
+            .total_seconds,
+        180
+    );
+}
+
+#[test]
+fn restore_resolves_folder_collisions_and_rejects_traversal_and_links() {
+    let (d, root) = setup();
+    let store = InstanceStore::new(&root);
+
+    let first = store.create(vanilla("Survival"), 100).unwrap();
+    let retired_path = store.retire(&first.id).unwrap();
+    let folder = retired_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // Another active profile now occupies `instances/survival`.
+    let replacement = store.create(vanilla("Survival"), 200).unwrap();
+    assert_eq!(replacement.id, first.id);
+
+    let restored = store.restore(&folder, "Survival (2)").unwrap();
+    assert_ne!(restored.id, first.id);
+    assert_eq!(restored.name, "Survival (2)");
+    assert_eq!(store.list().unwrap().instances.len(), 2);
+
+    // Traversal and bad names are refused.
+    assert!(matches!(
+        store.read_retained("../survival"),
+        Err(InstanceError::BadId(_))
+    ));
+    assert!(matches!(
+        store.restore("missing-folder", "X"),
+        Err(InstanceError::NotFound(_))
+    ));
+
+    // A symlink/junction inside .removed is skipped by list_retained and refused by read_retained/restore.
+    let outside = d.path().join("outside-retained");
+    fs::create_dir_all(&outside).unwrap();
+    let retained_dir = root.instances_dir().join(RETAINED_DIR);
+    fs::create_dir_all(&retained_dir).unwrap();
+    let linked = retained_dir.join("linked-entry");
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&linked)
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(store.list_retained().unwrap().is_empty());
+    assert!(matches!(
+        store.read_retained("linked-entry"),
+        Err(InstanceError::Link(_))
+    ));
+    fs::remove_dir(&linked).unwrap();
+}

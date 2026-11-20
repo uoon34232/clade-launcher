@@ -109,11 +109,25 @@ pub struct ProfileDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemovedProfileDto {
+    pub folder: String,
+    pub name: String,
+    pub minecraft: String,
+    pub kind: &'static str,
+    pub loader: Option<LoaderKind>,
+    pub loader_version: Option<String>,
+    pub playtime_seconds: u64,
+    pub removed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfilesDto {
     pub profiles: Vec<ProfileDto>,
     pub selected: Option<String>,
     pub total_playtime_seconds: u64,
     pub unreadable: Vec<String>,
+    pub removed: Vec<RemovedProfileDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,6 +343,30 @@ pub fn snapshot(root: &PortableRoot, selected: Option<InstanceId>) -> std::io::R
         .map(|(folder, _)| folder)
         .collect();
     unreadable.sort();
+    let retained_dir = root.instances_dir().join(crate::instances::RETAINED_DIR);
+    let removed: Vec<RemovedProfileDto> = store_list_retained(root)
+        .into_iter()
+        .map(|r| {
+            let (loader_version, _) = label(&r.instance);
+            let playtime_seconds = PlaytimeStore::dir_total(&retained_dir.join(&r.folder))
+                .map(|t| t.total_seconds)
+                .unwrap_or(0);
+            RemovedProfileDto {
+                folder: r.folder,
+                name: r.instance.name.clone(),
+                minecraft: r.instance.minecraft.to_string(),
+                kind: if r.instance.is_vanilla() {
+                    "vanilla"
+                } else {
+                    "modded"
+                },
+                loader: r.instance.loader(),
+                loader_version,
+                playtime_seconds,
+                removed_at: r.removed_at,
+            }
+        })
+        .collect();
     // A selection that no longer exists (deleted, or a folder from another launcher) falls back to the first profile.
     let selected = selected
         .map(|s| s.to_string())
@@ -342,7 +380,18 @@ pub fn snapshot(root: &PortableRoot, selected: Option<InstanceId>) -> std::io::R
             .map(|t| t.total_seconds)
             .unwrap_or(0),
         unreadable,
+        removed,
     })
+}
+
+fn store_list_retained(root: &PortableRoot) -> Vec<crate::instances::RetainedInstance> {
+    match InstanceStore::new(root).list_retained() {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list retained profiles");
+            Vec::new()
+        }
+    }
 }
 
 pub async fn version_catalog<F: Fetcher>(
@@ -711,6 +760,65 @@ pub(crate) fn resolve_instances_dir(root: &PortableRoot) -> Result<PathBuf, Code
     Ok(dir)
 }
 
+pub(crate) fn resolve_removed_profiles_dir(root: &PortableRoot) -> Result<PathBuf, CodedError> {
+    let inst = resolve_instances_dir(root)?;
+    let dir = inst.join(crate::instances::RETAINED_DIR);
+    std::fs::create_dir_all(&dir).map_err(CodedError::storage)?;
+    crate::portable::fsutil::reject_links_between(root.path(), &dir)
+        .map_err(CodedError::storage)?;
+    if crate::portable::fsutil::is_link(&dir).map_err(CodedError::storage)? {
+        return Err(CodedError::storage("removed profiles folder is a link"));
+    }
+    Ok(dir)
+}
+
+pub(crate) async fn restore_profile_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    folder: &str,
+) -> Result<ProfilesDto, CodedError> {
+    let _guard = state.create_lock.lock().await;
+    let root = state.root.clone();
+    let folder = folder.to_owned();
+    let settings_for_restore = settings.clone();
+    tokio::task::spawn_blocking(move || {
+        let store = InstanceStore::new(&root);
+        let retained = store.read_retained(&folder).map_err(|e| match e {
+            InstanceError::NotFound(_) | InstanceError::BadId(_) => {
+                CodedError::new("not_found", e.to_string())
+            }
+            _ => CodedError::new("restore_failed", e.to_string()),
+        })?;
+        let listing = store.list().map_err(CodedError::storage)?;
+        let final_name = if listing.instances.iter().any(|i| {
+            i.name
+                .trim()
+                .eq_ignore_ascii_case(retained.instance.name.trim())
+        }) {
+            next_duplicate_name(&retained.instance.name, &listing)
+        } else {
+            retained.instance.name.clone()
+        };
+        let restored = store.restore(&folder, &final_name).map_err(|e| match e {
+            InstanceError::NotFound(_) | InstanceError::BadId(_) => {
+                CodedError::new("not_found", e.to_string())
+            }
+            _ => CodedError::new("restore_failed", e.to_string()),
+        })?;
+        if let Err(e) = settings_for_restore.set_last_instance(Some(restored.id.clone())) {
+            tracing::warn!(error = %e, "could not remember the restored profile as selected");
+        }
+        snapshot(&root, Some(restored.id)).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| {
+        CodedError::new(
+            "restore_failed",
+            format!("profile restore task failed: {e}"),
+        )
+    })?
+}
+
 pub(crate) async fn rename_profile_inner(
     state: &ProfilesState,
     settings: &SettingsState,
@@ -1013,6 +1121,31 @@ pub async fn open_instances_folder(
     let root = state.root.clone();
     tokio::task::spawn_blocking(move || {
         let dir = resolve_instances_dir(&root)?;
+        app.opener()
+            .open_path(dir.to_string_lossy(), None::<&str>)
+            .map_err(|e| CodedError::new("open_failed", e.to_string()))
+    })
+    .await
+    .map_err(|e| CodedError::new("open_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn restore_profile(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    folder: String,
+) -> Result<ProfilesDto, CodedError> {
+    restore_profile_inner(&state, &settings, &folder).await
+}
+
+#[tauri::command]
+pub async fn open_removed_profiles_folder(
+    app: tauri::AppHandle,
+    state: State<'_, ProfilesState>,
+) -> Result<(), CodedError> {
+    let root = state.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let dir = resolve_removed_profiles_dir(&root)?;
         app.opener()
             .open_path(dir.to_string_lossy(), None::<&str>)
             .map_err(|e| CodedError::new("open_failed", e.to_string()))
@@ -2073,5 +2206,65 @@ mod tests {
             .unwrap();
         assert!(copy_long.name.chars().count() <= 64);
         assert!(copy_long.name.ends_with(" (2)"));
+    }
+
+    #[tokio::test]
+    async fn restore_profile_returns_profile_to_list_and_resolves_name_collisions() {
+        let e = env();
+        let state = ProfilesState::new(e.root.clone(), Err("unused".into()), Err("unused".into()));
+        let store = InstanceStore::new(&e.root);
+        let orig = store
+            .create(NewInstance::vanilla("Survival", "1.21.4").unwrap(), 100)
+            .unwrap();
+        let saved = store.dirs(&orig.id).game_dir().join("options.txt");
+        fs::write(&saved, b"gamma:0.8").unwrap();
+        let retired = store.retire(&orig.id).unwrap();
+        let folder = retired.file_name().unwrap().to_str().unwrap().to_owned();
+
+        let snap_before = snapshot(&e.root, None).unwrap();
+        assert!(snap_before.profiles.is_empty());
+        assert_eq!(snap_before.removed.len(), 1);
+        assert_eq!(snap_before.removed[0].folder, folder);
+        assert_eq!(snap_before.removed[0].name, "Survival");
+
+        let restored_snap = restore_profile_inner(&state, &e.settings, &folder)
+            .await
+            .unwrap();
+        assert_eq!(restored_snap.profiles.len(), 1);
+        assert_eq!(restored_snap.selected.as_deref(), Some(orig.id.as_str()));
+        assert!(restored_snap.removed.is_empty());
+        assert_eq!(fs::read(&saved).unwrap(), b"gamma:0.8");
+
+        // Remove again, create an active profile with the same name, then restore -> "Survival (2)".
+        let retired2 = store.retire(&orig.id).unwrap();
+        let folder2 = retired2.file_name().unwrap().to_str().unwrap().to_owned();
+        store
+            .create(NewInstance::vanilla("Survival", "1.21.4").unwrap(), 200)
+            .unwrap();
+
+        let collision_snap = restore_profile_inner(&state, &e.settings, &folder2)
+            .await
+            .unwrap();
+        assert_eq!(collision_snap.profiles.len(), 2);
+        assert!(collision_snap.removed.is_empty());
+        let restored2 = collision_snap
+            .profiles
+            .iter()
+            .find(|p| p.name == "Survival (2)")
+            .unwrap();
+        assert_eq!(
+            collision_snap.selected.as_deref(),
+            Some(restored2.id.as_str())
+        );
+
+        // Missing or traversal folders fail with `not_found`.
+        let err_missing = restore_profile_inner(&state, &e.settings, "does-not-exist")
+            .await
+            .unwrap_err();
+        assert_eq!(err_missing.code, "not_found");
+        let err_bad = restore_profile_inner(&state, &e.settings, "../survival")
+            .await
+            .unwrap_err();
+        assert_eq!(err_bad.code, "not_found");
     }
 }

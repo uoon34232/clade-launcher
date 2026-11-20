@@ -297,6 +297,11 @@ impl<'a> PlaytimeStore<'a> {
         read_json(&self.instance_file(id))
     }
 
+    /// Reads `playtime.json` from an arbitrary instance folder (such as a retained `.removed/` folder).
+    pub fn dir_total(dir: &Path) -> io::Result<InstancePlaytime> {
+        read_json(&dir.join("playtime.json"))
+    }
+
     pub fn lifetime_total(&self) -> io::Result<LifetimePlaytime> {
         read_json(&self.lifetime_file())
     }

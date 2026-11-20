@@ -71,11 +71,18 @@ export interface FixtureCatalog {
   networkError: string | null;
 }
 
+export interface FixtureRemovedProfile extends FixtureProfile {
+  folder: string;
+  removedAt?: number | null;
+}
+
 export interface BackendConfig {
   profiles: FixtureProfile[];
   selected: string | null;
   /** Folder names in `instances/` that could not be read and were left untouched. */
   unreadable: string[];
+  /** Profiles retained in `instances/.removed/` that can be restored in one click. */
+  removed?: FixtureRemovedProfile[];
   accounts: FixtureAccount[];
   active: string | null;
   /** The encrypted sign-in store: does the file exist, and is it open this session. */

@@ -28,6 +28,10 @@ interface Props {
   onRemove: () => void;
   /** Its game is starting or running: it cannot be moved now. (An account is not needed to remove it.) */
   removeDisabled?: boolean;
+  /** Number of retained profiles in `instances/.removed/`. */
+  removedCount?: number;
+  /** Opens the dialog to restore retained profiles or open their folder. */
+  onOpenRemoved?: () => void;
 }
 
 const TRIGGER =
@@ -49,6 +53,8 @@ export function ProfileSelector({
   verifyDisabled = false,
   onRemove,
   removeDisabled = false,
+  removedCount = 0,
+  onOpenRemoved,
 }: Props) {
   const t = useT();
   const current = profiles.find((p) => p.id === selectedId) ?? profiles[0];
@@ -158,6 +164,17 @@ export function ProfileSelector({
         >
           {t("profile.verify")}
         </DropdownMenuItem>
+        {removedCount > 0 && onOpenRemoved && (
+          <DropdownMenuItem
+            className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
+            onClick={() => {
+              playSound("click");
+              window.setTimeout(onOpenRemoved, 0);
+            }}
+          >
+            {t("profile.removedMenu", { count: removedCount })}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator className="bg-cream/[0.08] my-1 shrink-0" />
         <DropdownMenuItem
           disabled={removeDisabled}

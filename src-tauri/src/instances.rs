@@ -34,7 +34,7 @@ pub use crate::versions::{LoaderVersion, McVersion, VersionId};
 
 use crate::portable::fsutil::{
     atomic_write, is_link, move_new_no_replace, read_bounded, reject_links_between,
-    remove_dir_all_with_retry,
+    remove_dir_all_with_retry, rename_with_retry,
 };
 use crate::portable::{PortableRoot, RelPath};
 use crate::versions::InvalidToken;
@@ -314,6 +314,48 @@ impl NewInstance {
 /// not a valid instance id (ids cannot start with a dot), so it can never be an instance, and
 /// [`InstanceStore::list`] skips it.
 pub const RETAINED_DIR: &str = ".removed";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedInstance {
+    pub folder: String,
+    pub instance: Instance,
+    pub removed_at: Option<i64>,
+}
+
+fn validate_retained_folder(folder: &str) -> Result<(), InstanceError> {
+    let ok = !folder.is_empty()
+        && folder.len() <= 128
+        && folder != "."
+        && folder != ".."
+        && folder
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(InstanceError::BadId(folder.to_owned()))
+    }
+}
+
+fn parse_removed_at(folder: &str, dir: &Path) -> Option<i64> {
+    let (head, nonce) = folder.rsplit_once('-')?;
+    let from_name = (nonce.len() == 8
+        && nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| head.rsplit_once('-').map(|(_, ts)| ts))
+    .flatten()
+    .and_then(|ts| ts.parse::<i64>().ok())
+    .filter(|&ts| ts > 0);
+    from_name.or_else(|| {
+        fs::metadata(dir)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .filter(|&ts| ts > 0)
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct Listing {
@@ -976,6 +1018,175 @@ impl<'a> InstanceStore<'a> {
             }
         }
         Err(io::Error::other("no free name in the retained folder").into())
+    }
+
+    fn read_retained_dir(&self, folder: &str, dir: &Path) -> Result<Instance, InstanceError> {
+        match is_link(dir) {
+            Ok(true) => return Err(InstanceError::Link(dir.display().to_string())),
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(InstanceError::NotFound(folder.to_owned()));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let manifest_path = dir.join(MANIFEST);
+        reject_links_between(self.root.path(), &manifest_path).map_err(map_link_err)?;
+        let game_dir = dir.join("game");
+        if matches!(is_link(&game_dir), Ok(true)) {
+            return Err(InstanceError::Link(game_dir.display().to_string()));
+        }
+        let bytes = match read_bounded(&manifest_path, MAX_MANIFEST_BYTES) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(InstanceError::NotFound(folder.to_owned()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let inst: Instance = serde_json::from_slice(&bytes)?;
+        if inst.schema > SCHEMA {
+            return Err(InstanceError::TooNew(inst.schema));
+        }
+        validate_name(&inst.name)?;
+        validate_jvm_args(&inst.extra_jvm_args)?;
+        validate_resolution(inst.resolution)?;
+        validate_consistency(&inst)?;
+        Ok(inst)
+    }
+
+    /// Lists valid profiles retained under `instances/.removed/`, newest removal first.
+    pub fn list_retained(&self) -> io::Result<Vec<RetainedInstance>> {
+        let retained_dir = self.root.instances_dir().join(RETAINED_DIR);
+        if !retained_dir.exists() {
+            return Ok(Vec::new());
+        }
+        if is_link(&retained_dir)? || !retained_dir.is_dir() {
+            return Err(io::Error::other(format!(
+                "refusing to read retained link directory {}",
+                retained_dir.display()
+            )));
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&retained_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let folder = entry.file_name().to_string_lossy().into_owned();
+            if validate_retained_folder(&folder).is_err() {
+                continue;
+            }
+            let dir = entry.path();
+            match self.read_retained_dir(&folder, &dir) {
+                Ok(instance) => out.push(RetainedInstance {
+                    removed_at: parse_removed_at(&folder, &dir),
+                    folder,
+                    instance,
+                }),
+                Err(e) => {
+                    tracing::warn!(folder = %folder, error = %e, "skipping unreadable retained profile");
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            b.removed_at
+                .unwrap_or(0)
+                .cmp(&a.removed_at.unwrap_or(0))
+                .then_with(|| a.folder.cmp(&b.folder))
+        });
+        Ok(out)
+    }
+
+    /// Reads one retained profile folder from `instances/.removed/<folder>`.
+    pub fn read_retained(&self, folder: &str) -> Result<RetainedInstance, InstanceError> {
+        validate_retained_folder(folder)?;
+        let retained_dir = self.root.instances_dir().join(RETAINED_DIR);
+        reject_links_between(self.root.path(), &retained_dir).map_err(map_link_err)?;
+        match is_link(&retained_dir) {
+            Ok(true) => return Err(InstanceError::Link(retained_dir.display().to_string())),
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(InstanceError::NotFound(folder.to_owned()));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let dir = retained_dir.join(folder);
+        let instance = self.read_retained_dir(folder, &dir)?;
+        Ok(RetainedInstance {
+            removed_at: parse_removed_at(folder, &dir),
+            folder: folder.to_owned(),
+            instance,
+        })
+    }
+
+    /// Restores a retained profile from `instances/.removed/<folder>` back into `instances/` as
+    /// `final_name`, preserving all user files (`game/`, `home/`, `playtime.json`) and updating
+    /// `instance.json` only when its `id` or `name` had to change to resolve a collision.
+    pub fn restore(&self, folder: &str, final_name: &str) -> Result<Instance, InstanceError> {
+        validate_retained_folder(folder)?;
+        let name = validate_name(final_name)?;
+        let retained = self.read_retained(folder)?;
+        let mut inst = retained.instance;
+
+        fs::create_dir_all(self.root.instances_dir())?;
+        reject_links_between(self.root.path(), &self.root.instances_dir()).map_err(map_link_err)?;
+        let retained_dir = self.root.instances_dir().join(RETAINED_DIR);
+        let src_dir = retained_dir.join(folder);
+
+        if name == inst.name {
+            let orig_dirs = self.dirs(&inst.id);
+            if !orig_dirs.root().exists() {
+                match move_new_no_replace(&src_dir, orig_dirs.root()) {
+                    Ok(()) => {
+                        if fs::read_dir(&retained_dir).is_ok_and(|mut it| it.next().is_none()) {
+                            let _ = fs::remove_dir(&retained_dir);
+                        }
+                        return Ok(inst);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+
+        let base = if name.eq_ignore_ascii_case(&inst.name) {
+            inst.id.clone()
+        } else {
+            slugify(&name)
+        };
+        let mut n = 1u32;
+        let (target_id, target_dirs) = loop {
+            let candidate = if n == 1 {
+                base.clone()
+            } else {
+                InstanceId::new(&format!("{}-{n}", base.as_str()))?
+            };
+            let dirs = self.dirs(&candidate);
+            if dirs.root().exists() {
+                n += 1;
+                continue;
+            }
+            match move_new_no_replace(&src_dir, dirs.root()) {
+                Ok(()) => break (candidate, dirs),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    n += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        inst.id = target_id;
+        inst.name = name;
+        if let Err(e) = atomic_write(
+            &target_dirs.manifest_file(),
+            &serde_json::to_vec_pretty(&inst)?,
+        ) {
+            let _ = rename_with_retry(target_dirs.root(), &src_dir);
+            return Err(e.into());
+        }
+        if fs::read_dir(&retained_dir).is_ok_and(|mut it| it.next().is_none()) {
+            let _ = fs::remove_dir(&retained_dir);
+        }
+        Ok(inst)
     }
 
     /// Deletes one instance and everything in it (saves included). Not part of the product: no

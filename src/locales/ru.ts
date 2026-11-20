@@ -82,12 +82,28 @@ export const ru: Record<MessageKey, Message> = {
     other: "Не удалось прочитать {count} папки профилей ({folders}). Файлы не затронуты.",
   },
   "profile.verify": "Проверить файлы",
+  "profile.removedMenu": "Убранные профили ({count})…",
   "profile.remove": "Убрать из Clade…",
   "removeProfile.title": "Убрать «{profile}» из Clade?",
   "removeProfile.body":
     "Профиль исчезнет из Clade, но его миры, моды, настройки, скриншоты и другие файлы останутся сохранены в папке Clade. Ничего не будет удалено безвозвратно.",
   "removeProfile.confirm": "Убрать из Clade",
   "removeProfile.working": "Убираем…",
+  "removedProfiles.emptyNotice": {
+    by: "count",
+    one: "В папке Clade сохранён {count} убранный профиль.",
+    few: "В папке Clade сохранены {count} убранных профиля.",
+    many: "В папке Clade сохранено {count} убранных профилей.",
+    other: "В папке Clade сохранено {count} убранных профиля.",
+  },
+  "removedProfiles.openAction": "Восстановить…",
+  "removedProfiles.title": "Убранные профили",
+  "removedProfiles.description":
+    "Миры, моды и настройки нетронутыми хранятся в папке Clade. Восстановление вернёт профиль в список; открой папку, если хочешь удалить файлы вручную.",
+  "removedProfiles.restore": "Восстановить",
+  "removedProfiles.restoring": "Восстанавливаем…",
+  "removedProfiles.openFolder": "Открыть папку",
+  "removedProfiles.empty": "Убранных профилей нет.",
   "profile.vanilla": "Ванильный",
   "profile.modded": "С модами",
 
@@ -505,6 +521,8 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.invalid_jvm_args":
     "Разрешены только безопасные флаги JVM (-XX:, -D, -Xss, -Xmn, --add-opens=); памятью и путями управляет Clade.",
   "error.profile.not_found": "Этого профиля больше нет.",
+  "error.profile.restore_failed":
+    "Не удалось восстановить профиль. Проверь, не открыты ли его файлы в другой программе.",
   "error.profile.duplicate_failed":
     "Не удалось дублировать профиль. Проверь свободное место на диске и закрой всё, что использует его папку.",
   "error.profile.open_failed": "Windows не смог открыть эту папку.",
