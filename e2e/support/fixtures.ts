@@ -87,6 +87,8 @@ export interface BackendConfig {
   active: string | null;
   /** The encrypted sign-in store: does the file exist, and is it open this session. */
   vault: { exists: boolean; unlocked: boolean };
+  /** Archived sign-in vault folders present in `data/retired-vaults/`. */
+  retiredVaults?: number;
   /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
   appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;

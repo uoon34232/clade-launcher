@@ -27,6 +27,7 @@ interface Control {
     active: string | null;
     appearance: BackendConfig["appearance"];
     vault: BackendConfig["vault"];
+    retiredVaults: number;
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
     embed: { active: boolean; instanceId: string | null; maximized: boolean };
@@ -62,6 +63,7 @@ function install(cfg: BackendConfig): void {
     active: cfg.active,
     appearance: clone(cfg.appearance),
     vault: clone(cfg.vault),
+    retiredVaults: cfg.retiredVaults ?? 0,
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
     embed: clone(cfg.embed ?? { active: false, instanceId: null, maximized: false }),
@@ -348,6 +350,13 @@ function install(cfg: BackendConfig): void {
         return null;
       case "export_diagnostics":
         return { name: "Clade-Diagnostics-20261004-120000.zip" };
+      case "retired_vaults_count":
+        return state.retiredVaults;
+      case "clear_retired_vaults": {
+        const removed = state.retiredVaults;
+        state.retiredVaults = 0;
+        return removed;
+      }
 
       // ---- profiles and the version catalog
       case "list_profiles":
@@ -735,6 +744,7 @@ function install(cfg: BackendConfig): void {
       // "Start fresh": like the backend, only for a vault that is not open; every account signs in again.
       case "reset_vault":
         if (state.vault.unlocked) return fail("vault_unlocked", "The vault is open.");
+        if (state.vault.exists) state.retiredVaults += 1;
         state.vault = { exists: false, unlocked: false };
         for (const a of state.accounts) a.needsSignIn = true;
         emit("accounts-changed", null);

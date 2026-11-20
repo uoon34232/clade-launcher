@@ -26,6 +26,7 @@ import { Modal, ModalHeader, ModalSection } from "./Modal";
 import {
   BUTTON_PRIMARY,
   BUTTON_QUIET,
+  BUTTON_SMALL_PRIMARY,
   BUTTON_SMALL_QUIET,
   BUTTON_SMALL_SOFT,
   BUTTON_SOFT,
@@ -39,6 +40,8 @@ interface Props {
   support?: SupportApi;
 }
 
+type ConfirmAction = "reset" | "retired-vaults" | null;
+
 /**
  * Launcher settings: global launcher behaviour only, and intentionally short. Anything that belongs
  * to one profile lives in that profile's settings; anything about a player lives in the account's.
@@ -47,22 +50,24 @@ interface Props {
 export function SettingsDialog({ open, onOpenChange, support = supportApi }: Props) {
   const t = useT();
   const ui = useUiSettings();
-  // A pending "Reset settings?" confirmation must not be dismissed by a stray click or Escape.
-  const [confirming, setConfirming] = useState(false);
+  // A pending confirmation ("Reset settings?" or "Clear archived vaults?") must not be dismissed
+  // by a stray click or Escape.
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const locked = confirmAction !== null;
   const close = (next: boolean) => {
-    if (!next) setConfirming(false);
+    if (!next) setConfirmAction(null);
     onOpenChange(next);
   };
 
   return (
-    <Modal open={open} onOpenChange={close} size="xl" locked={confirming}>
+    <Modal open={open} onOpenChange={close} size="xl" locked={locked}>
       <div className="mb-1 flex flex-wrap items-center justify-between gap-4">
         <div className="-mb-5">
           <ModalHeader title={t("settings.title")} />
         </div>
         <Segmented<UiMode>
           compact
-          disabled={confirming}
+          disabled={locked}
           label={t("settings.mode")}
           value={ui.uiMode}
           onChange={(mode) => {
@@ -76,9 +81,10 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
         />
       </div>
       <SettingsBody
+        open={open}
         support={support}
-        confirming={confirming}
-        setConfirming={setConfirming}
+        confirmAction={confirmAction}
+        setConfirmAction={setConfirmAction}
         onDone={() => close(false)}
       />
     </Modal>
@@ -86,14 +92,16 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
 }
 
 function SettingsBody({
+  open,
   support,
-  confirming,
-  setConfirming,
+  confirmAction,
+  setConfirmAction,
   onDone,
 }: {
+  open: boolean;
   support: SupportApi;
-  confirming: boolean;
-  setConfirming: (v: boolean) => void;
+  confirmAction: ConfirmAction;
+  setConfirmAction: (v: ConfirmAction) => void;
   onDone: () => void;
 }) {
   const t = useT();
@@ -110,10 +118,11 @@ function SettingsBody({
         <div className="flex min-w-0 flex-col">
           {isAdvanced && <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} />}
           <SupportSection
+            open={open}
             support={support}
             isAdvanced={isAdvanced}
-            confirming={confirming}
-            setConfirming={setConfirming}
+            confirmAction={confirmAction}
+            setConfirmAction={setConfirmAction}
           />
         </div>
       </div>
@@ -129,7 +138,7 @@ function SettingsBody({
         <button
           type="button"
           className={BUTTON_SOFT}
-          disabled={confirming}
+          disabled={confirmAction !== null}
           onClick={() => {
             playSound("click");
             onDone();
@@ -394,28 +403,55 @@ function BehaviorSection({ onLaunch, onExit }: { onLaunch: OnLaunch; onExit: OnE
 type Notice = { kind: "ok" | "error"; text: string } | null;
 
 function SupportSection({
+  open,
   support,
   isAdvanced,
-  confirming,
-  setConfirming,
+  confirmAction,
+  setConfirmAction,
 }: {
+  open: boolean;
   support: SupportApi;
   isAdvanced: boolean;
-  confirming: boolean;
-  setConfirming: (v: boolean) => void;
+  confirmAction: ConfirmAction;
+  setConfirmAction: (v: ConfirmAction) => void;
 }) {
   const t = useT();
   const [notice, setNotice] = useState<Notice>(null);
   const [exporting, setExporting] = useState(false);
+  const [retiredCount, setRetiredCount] = useState(0);
+  const [clearingVaults, setClearingVaults] = useState(false);
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
   const restoreResetFocus = useRef(false);
+  const retiredTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreRetiredFocus = useRef(false);
 
   useEffect(() => {
-    if (!confirming && restoreResetFocus.current) {
+    if (!open || !support.retiredVaultsCount) return;
+    let cancelled = false;
+    support.retiredVaultsCount().then(
+      (n) => {
+        if (!cancelled) setRetiredCount(n);
+      },
+      () => {
+        if (!cancelled) setRetiredCount(0);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [open, support]);
+
+  useEffect(() => {
+    if (confirmAction !== null) return;
+    if (restoreResetFocus.current) {
       restoreResetFocus.current = false;
       resetTriggerRef.current?.focus();
     }
-  }, [confirming]);
+    if (restoreRetiredFocus.current) {
+      restoreRetiredFocus.current = false;
+      retiredTriggerRef.current?.focus();
+    }
+  }, [confirmAction]);
 
   const fail = (e: unknown) => setNotice({ kind: "error", text: describeError("settings", e) });
   const run = (action: () => Promise<void>) => {
@@ -442,14 +478,34 @@ function SupportSection({
 
   const reset = () => {
     void resetUiSettings().then((r) => {
-      setConfirming(false);
+      setConfirmAction(null);
       if (!r.ok) fail(r.error);
     });
   };
 
+  const clearRetiredVaults = () => {
+    if (!support.clearRetiredVaults || clearingVaults) return;
+    playSound("click");
+    setClearingVaults(true);
+    support.clearRetiredVaults().then(
+      (removed) => {
+        setClearingVaults(false);
+        const deleted = removed > 0 ? removed : retiredCount;
+        setRetiredCount(0);
+        setConfirmAction(null);
+        setNotice({ kind: "ok", text: t("settings.retiredVaultsCleared", { count: deleted }) });
+      },
+      (e: unknown) => {
+        setClearingVaults(false);
+        setConfirmAction(null);
+        fail(e);
+      },
+    );
+  };
+
   return (
     <ModalSection title={t("settings.support")} compact>
-      {confirming ? (
+      {confirmAction === "reset" ? (
         <div className="flex flex-col gap-3">
           <p role="alert" className="text-graphite text-[0.9375rem]">
             {t("settings.resetConfirm")}
@@ -462,13 +518,44 @@ function SupportSection({
               onClick={() => {
                 playSound("click");
                 restoreResetFocus.current = true;
-                setConfirming(false);
+                setConfirmAction(null);
               }}
             >
               {t("settings.resetKeep")}
             </button>
             <button type="button" className={BUTTON_PRIMARY} onClick={reset}>
               {t("settings.resetDo")}
+            </button>
+          </div>
+        </div>
+      ) : confirmAction === "retired-vaults" ? (
+        <div className="flex flex-col gap-2.5">
+          <p role="alert" className="text-graphite text-[0.875rem] leading-snug">
+            {t("settings.clearRetiredVaultsConfirm", { count: retiredCount })}
+          </p>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              autoFocus
+              disabled={clearingVaults}
+              className={BUTTON_SMALL_QUIET}
+              onClick={() => {
+                playSound("click");
+                restoreRetiredFocus.current = true;
+                setConfirmAction(null);
+              }}
+            >
+              {t("settings.clearRetiredVaultsKeep")}
+            </button>
+            <button
+              type="button"
+              disabled={clearingVaults}
+              className={BUTTON_SMALL_PRIMARY}
+              onClick={clearRetiredVaults}
+            >
+              {clearingVaults
+                ? t("settings.clearingRetiredVaults")
+                : t("settings.clearRetiredVaultsDo")}
             </button>
           </div>
         </div>
@@ -508,11 +595,25 @@ function SupportSection({
               onClick={() => {
                 playSound("click");
                 setNotice(null);
-                setConfirming(true);
+                setConfirmAction("reset");
               }}
             >
               {t("settings.reset")}
             </button>
+            {retiredCount > 0 && support.clearRetiredVaults && (
+              <button
+                ref={retiredTriggerRef}
+                type="button"
+                className={`${BUTTON_SMALL_QUIET} col-span-2 min-w-0 truncate px-2.5`}
+                onClick={() => {
+                  playSound("click");
+                  setNotice(null);
+                  setConfirmAction("retired-vaults");
+                }}
+              >
+                {t("settings.clearRetiredVaults", { count: retiredCount })}
+              </button>
+            )}
           </div>
           {isAdvanced && (
             <p className="text-ink-muted text-[0.8125rem]">{t("settings.diagnosticsNote")}</p>

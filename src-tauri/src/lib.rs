@@ -328,6 +328,8 @@ pub fn run() {
             support_cmd::open_clade_folder,
             support_cmd::open_logs_folder,
             support_cmd::export_diagnostics,
+            support_cmd::retired_vaults_count,
+            support_cmd::clear_retired_vaults,
             profiles::list_profiles,
             profiles::select_profile,
             profiles::get_version_catalog,

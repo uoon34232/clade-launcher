@@ -357,6 +357,24 @@ export const ru: Record<MessageKey, Message> = {
     "Сбросить настройки по умолчанию? Профили, миры, аккаунты и время в игре останутся как есть.",
   "settings.resetKeep": "Оставить",
   "settings.resetDo": "Сбросить",
+  "settings.clearRetiredVaults": "Удалить архивные хранилища ({count})",
+  "settings.clearingRetiredVaults": "Удаление…",
+  "settings.clearRetiredVaultsConfirm": {
+    by: "count",
+    one: "Удалить {count} архивное хранилище? Аккаунты, профили и миры не затронутся.",
+    few: "Удалить {count} архивных хранилища? Аккаунты, профили и миры не затронутся.",
+    many: "Удалить {count} архивных хранилищ? Аккаунты, профили и миры не затронутся.",
+    other: "Удалить {count} архивного хранилища? Аккаунты, профили и миры не затронутся.",
+  },
+  "settings.clearRetiredVaultsKeep": "Оставить",
+  "settings.clearRetiredVaultsDo": "Удалить",
+  "settings.retiredVaultsCleared": {
+    by: "count",
+    one: "Удалено {count} архивное хранилище.",
+    few: "Удалено {count} архивных хранилища.",
+    many: "Удалено {count} архивных хранилищ.",
+    other: "Удалено {count} архивного хранилища.",
+  },
   "settings.cat": "Кот",
   "onboarding.step": "Шаг {current} из {total}",
   "onboarding.skip": "Пропустить",
@@ -376,6 +394,8 @@ export const ru: Record<MessageKey, Message> = {
   "error.settings.unknown": "Не получилось.",
   "error.settings.diagnostics_failed":
     "Не удалось создать файл диагностики. Проверь, что на диске есть место и он не защищён от записи.",
+  "error.settings.retired_vaults_clear_failed":
+    "Не удалось удалить архивные хранилища. Проверь, что папка Clade не защищена от записи и не занята.",
   "error.settings.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
   "error.settings.unsupported_value": "Такая настройка не поддерживается.",
