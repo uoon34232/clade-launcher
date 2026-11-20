@@ -53,6 +53,11 @@ pub const LOADER_HOSTS: &[&str] = &[
     "neoforged.net",
 ];
 
+/// Host allowed ONLY for the explicit user-initiated "Check for updates" command in Settings
+/// (`update_check.rs`). Kept separate from [`DEFAULT_ALLOWED_HOSTS`] so game or loader manifests
+/// can never fetch anything from GitHub.
+pub const UPDATE_CHECK_HOSTS: &[&str] = &["api.github.com"];
+
 impl DownloadPolicy {
     pub const fn new(allowed: &'static [&'static str]) -> Self {
         Self { allowed }

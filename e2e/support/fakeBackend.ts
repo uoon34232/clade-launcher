@@ -28,6 +28,7 @@ interface Control {
     appearance: BackendConfig["appearance"];
     vault: BackendConfig["vault"];
     retiredVaults: number;
+    latestRelease: string | null;
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
     embed: { active: boolean; instanceId: string | null; maximized: boolean };
@@ -64,6 +65,7 @@ function install(cfg: BackendConfig): void {
     appearance: clone(cfg.appearance),
     vault: clone(cfg.vault),
     retiredVaults: cfg.retiredVaults ?? 0,
+    latestRelease: cfg.latestRelease ?? null,
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
     embed: clone(cfg.embed ?? { active: false, instanceId: null, maximized: false }),
@@ -357,6 +359,23 @@ function install(cfg: BackendConfig): void {
         state.retiredVaults = 0;
         return removed;
       }
+      case "check_for_updates": {
+        const currentVersion = `v${state.ui.version}`;
+        if (state.latestRelease && state.latestRelease !== currentVersion) {
+          return {
+            status: "update_available",
+            currentVersion,
+            latestVersion: state.latestRelease,
+          };
+        }
+        return {
+          status: "up_to_date",
+          currentVersion,
+          latestVersion: currentVersion,
+        };
+      }
+      case "open_release_page":
+        return null;
 
       // ---- profiles and the version catalog
       case "list_profiles":

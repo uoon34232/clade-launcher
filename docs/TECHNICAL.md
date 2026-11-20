@@ -90,7 +90,7 @@ scripts/          release packaging
 | Area               | Modules                                                                                                                                              |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Storage and safety | `portable/` (root discovery, validated relative paths, atomic writes, hashing, folder lock), `safe_archive`, `download_policy`, `net`, `coded_error` |
-| Settings and state | `settings`, `ui_settings`, `startup`, `startup_text`, `webview`, `glass`, `support_cmd`                                                              |
+| Settings and state | `settings`, `ui_settings`, `startup`, `startup_text`, `webview`, `glass`, `support_cmd`, `update_check`                                              |
 | Profiles           | `instances`, `versions`, `profiles`, `mc_catalog`, `loader_options`, `loaders`                                                                       |
 | Preparation        | `prepare`, `prepare_cmd`, `download`, `mc_meta`, `java_install`, `runtimes`, `natives`, `loader_prepare`, `loader_install`                           |
 | Accounts           | `vault`, `accounts`, `accounts_api`, `auth`, `ms_auth`, `profile_service`                                                                            |
@@ -203,7 +203,7 @@ Clade may download and install **only the loader the user selected, from that lo
 
 ## 9. Downloads, verification and repair
 
-- **HTTPS only**, through the allow-list in `download_policy`: Mojang, Microsoft sign-in, and loader hosts. Content platforms are never on it, and tests assert that.
+- **HTTPS only**, through the allow-list in `download_policy`: Mojang, Microsoft sign-in, and loader hosts. Content platforms are never on it, and tests assert that. A separate single-host policy (`UPDATE_CHECK_HOSTS = ["api.github.com"]`, no redirects, never used for game or loader downloads and never called in the background) is used only when the player clicks **Check for updates** in Settings (`update_check.rs`), and **Open release** constructs only canonical `https://github.com/uoon34232/clade-launcher/releases` URLs in Rust.
 - Every job carries a mandatory SHA-1 or SHA-256 and usually a size. Existing verified files are reused with no network.
 - Bytes stream into a `.part` file and resume with `Range` where the server supports it. A part is never trusted until it verifies in full. When the size is known it is a hard ceiling for the whole part (bytes kept from an earlier attempt count): a server that announces more, or keeps sending past it, is stopped at once and the part is discarded. Finalisation is an atomic rename.
 - Transient failures are retried with backoff; `404` and similar fail at once; a good file is never replaced by an unverified one. Concurrency is bounded (default 8).

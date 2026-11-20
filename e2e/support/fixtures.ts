@@ -89,6 +89,8 @@ export interface BackendConfig {
   vault: { exists: boolean; unlocked: boolean };
   /** Archived sign-in vault folders present in `data/retired-vaults/`. */
   retiredVaults?: number;
+  /** Optional synthetic latest GitHub release tag reported by `check_for_updates`. */
+  latestRelease?: string | null;
   /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
   appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;

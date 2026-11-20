@@ -3,6 +3,7 @@ fn main() {
     // the window and taskbar icon. It does not tell Cargo to watch that file, so a changed icon silently
     // stayed old in the executable. (The other files in icons/ are bundle-only and never consumed here.)
     println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-env-changed=CLADE_RELEASE_TAG");
     let attrs = tauri_build::Attributes::new().windows_attributes(
         tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows-app.manifest")),
     );

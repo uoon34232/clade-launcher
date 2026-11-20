@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use clade_launcher_lib::download_policy::DEFAULT_ALLOWED_HOSTS;
+use clade_launcher_lib::download_policy::{DEFAULT_ALLOWED_HOSTS, UPDATE_CHECK_HOSTS};
 
 /// Third-party content platforms and content-browsing features that must never appear. Built
 /// from parts so this file never matches itself.
@@ -100,6 +100,13 @@ fn network_allow_list_is_exactly_minecraft_microsoft_sign_in_and_loader_runtimes
     actual.sort_unstable();
     expected.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn update_check_allow_list_is_isolated_from_game_downloads() {
+    assert_eq!(UPDATE_CHECK_HOSTS, ["api.github.com"]);
+    assert!(!DEFAULT_ALLOWED_HOSTS.contains(&"api.github.com"));
+    assert!(!DEFAULT_ALLOWED_HOSTS.contains(&"github.com"));
 }
 
 #[test]

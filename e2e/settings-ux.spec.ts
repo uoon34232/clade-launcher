@@ -955,3 +955,100 @@ test.describe("clearing archived vaults", () => {
     });
   });
 });
+
+test.describe("manual update check", () => {
+  test("never checks automatically, reports Up to date on click, and fits 960x600", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+    const dialog = await openSettings(page);
+
+    expect(await backend.calls("check_for_updates")).toHaveLength(0);
+    await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+    await expect(dialog.getByRole("status")).toHaveText(text("settings.updatesUpToDate"));
+    await expect(
+      dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }),
+    ).toBeVisible();
+    expect(await backend.calls("check_for_updates")).toHaveLength(1);
+    expect(
+      await dialog.evaluate((el) => ({
+        vertical: el.scrollHeight <= el.clientHeight + 1,
+        horizontal: el.scrollWidth <= el.clientWidth + 1,
+      })),
+    ).toEqual({ vertical: true, horizontal: true });
+  });
+
+  test.describe("when a newer release exists", () => {
+    test.use({
+      backendConfig: {
+        ...DEFAULT_CONFIG,
+        latestRelease: "v0.2.0",
+        ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      },
+    });
+
+    test("handles offline errors, shows available version in EN and RU at 960x600, and opens the release", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      // Offline error fits 960x600 in EN and RU, then retry recovers cleanly.
+      await backend.failNext("check_for_updates", "offline");
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(text("error.settings.offline"));
+      expect(
+        await dialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+
+      await dialog.getByRole("radio", { name: "Русский" }).click();
+      const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+      await expect(ruDialog.getByRole("alert")).toHaveText(textRu("error.settings.offline"));
+      expect(
+        await ruDialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+
+      await ruDialog.getByRole("button", { name: textRu("settings.checkUpdatesAgain") }).click();
+      await expect(ruDialog.getByRole("status")).toHaveText(
+        textRu("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+      await expect(
+        ruDialog.getByRole("button", { name: textRu("settings.openRelease") }),
+      ).toBeVisible();
+      expect(
+        await ruDialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+
+      await ruDialog.getByRole("radio", { name: "English" }).click();
+      await expect(dialog.getByRole("status")).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+      expect(
+        await dialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+
+      await dialog.getByRole("button", { name: text("settings.openRelease") }).click();
+      await expect
+        .poll(async () => (await backend.calls("open_release_page")).map((c) => c.args))
+        .toEqual([{ tag: "v0.2.0" }]);
+    });
+  });
+});
