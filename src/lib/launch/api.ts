@@ -56,6 +56,27 @@ export function parseLaunchEvent(raw: unknown): LaunchEvent | null {
   return { instanceId: raw.instanceId, state: "stopped", exit };
 }
 
+export interface GameEmbedStatus {
+  active: boolean;
+  instanceId: string | null;
+  maximized: boolean;
+}
+
+export const NO_EMBED: GameEmbedStatus = {
+  active: false,
+  instanceId: null,
+  maximized: false,
+};
+
+export function parseGameEmbedStatus(raw: unknown): GameEmbedStatus {
+  if (!isObj(raw) || raw.active !== true) return NO_EMBED;
+  return {
+    active: true,
+    instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
+    maximized: raw.maximized === true,
+  };
+}
+
 export const launchApi = {
   /** Starts the game. Resolves once the process is running; rejects with `LaunchRefused`. */
   launch: async (id: string): Promise<void> => {
@@ -99,6 +120,31 @@ export const launchApi = {
       if (ev) callback(ev);
     });
   },
+  embedStatus: async (): Promise<GameEmbedStatus> => {
+    const raw = await call("get_game_embed_status");
+    return parseGameEmbedStatus(raw);
+  },
+  setStageBounds: async (bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    radius: number;
+  }): Promise<void> => {
+    await call("set_game_stage_bounds", bounds);
+  },
+  toggleMaximize: async (): Promise<GameEmbedStatus> => {
+    const raw = await call("toggle_game_maximize");
+    return parseGameEmbedStatus(raw);
+  },
+  onEmbedState: async (callback: (s: GameEmbedStatus) => void): Promise<() => void> => {
+    if (!inTauri()) return () => undefined;
+    return listen<unknown>("game-embed-state", (e) => {
+      callback(parseGameEmbedStatus(e.payload));
+    });
+  },
 };
 
-export type LaunchApi = typeof launchApi;
+type EmbedClientMethods = "embedStatus" | "setStageBounds" | "toggleMaximize" | "onEmbedState";
+export type LaunchApi = Omit<typeof launchApi, EmbedClientMethods> &
+  Partial<Pick<typeof launchApi, EmbedClientMethods>>;

@@ -23,6 +23,8 @@ export const en = {
 
   // ---- window chrome
   "window.minimize": "Minimize",
+  "window.maximize": "Maximize",
+  "window.restore": "Restore",
   "window.close": "Close",
   "window.wordmark": "Show the Clade tagline",
 
@@ -316,6 +318,7 @@ export const en = {
   "settings.memory.slider": "Memory for Minecraft",
   "settings.memory.gb": "{value} GB",
   "settings.onLaunch": "When Minecraft starts",
+  "settings.onLaunch.embed": "Inside Clade",
   "settings.onLaunch.keep": "Keep Clade open",
   "settings.onLaunch.hide": "Hide Clade",
   "settings.onExit": "When Minecraft closes",

@@ -1,13 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { MinusIcon, XIcon } from "lucide-react";
+import { Maximize2Icon, Minimize2Icon, MinusIcon, XIcon } from "lucide-react";
 import type { Window } from "@tauri-apps/api/window";
 import { useT } from "@/lib/i18n";
 import { inTauri } from "@/lib/settings/uiSettings";
 import { TitleWordmark } from "./TitleWordmark";
 
+interface Props {
+  framed?: boolean;
+  maximized?: boolean;
+  onToggleMaximize?: () => void;
+}
+
 // Frameless window: a drag strip with the quiet product name centred in it, plus the window controls.
-// Renders nothing in a plain browser.
-export function WindowChrome() {
+// Renders nothing in a plain browser. Maximize/Restore is available only while a game is framed
+// inside Clade (`framed = true`).
+export function WindowChrome({ framed = false, maximized = false, onToggleMaximize }: Props) {
   const t = useT();
   const [win, setWin] = useState<Window | null>(null);
   const strip = useRef<HTMLDivElement>(null);
@@ -20,22 +27,25 @@ export function WindowChrome() {
       .catch(() => undefined);
   }, [tauri]);
 
-  // Clade is never maximized. Tauri's injected drag script turns a double click on the strip into a
-  // toggle-maximize command, which the window refuses (the capability denies it); swallow the second
-  // press before it gets there so nothing is invoked and nothing is rejected. Dragging (the first
+  // Tauri's injected drag script turns a double click on the strip into the denied JS toggle-maximize
+  // capability. Swallow the second press before it gets there so nothing is invoked and nothing is
+  // rejected; when a framed game is open, trigger the Rust-gated toggle instead. Dragging (the first
   // press) is untouched.
   useEffect(() => {
     const el = strip.current;
     if (!el) return;
-    const ignoreDoubleClick = (e: MouseEvent) => {
+    const handleDoubleClick = (e: MouseEvent) => {
       if (e.button === 0 && e.detail >= 2) {
         e.preventDefault();
         e.stopPropagation();
+        if (framed && !(e.target as Element | null)?.closest("button")) {
+          onToggleMaximize?.();
+        }
       }
     };
-    el.addEventListener("mousedown", ignoreDoubleClick);
-    return () => el.removeEventListener("mousedown", ignoreDoubleClick);
-  }, [tauri]);
+    el.addEventListener("mousedown", handleDoubleClick);
+    return () => el.removeEventListener("mousedown", handleDoubleClick);
+  }, [tauri, framed, onToggleMaximize]);
 
   if (!tauri) return null;
 
@@ -68,6 +78,20 @@ export function WindowChrome() {
       >
         <MinusIcon aria-hidden className="size-4" />
       </button>
+      {framed && (
+        <button
+          type="button"
+          aria-label={maximized ? t("window.restore") : t("window.maximize")}
+          className={btn}
+          onClick={() => onToggleMaximize?.()}
+        >
+          {maximized ? (
+            <Minimize2Icon aria-hidden className="size-3.5" />
+          ) : (
+            <Maximize2Icon aria-hidden className="size-3.5" />
+          )}
+        </button>
+      )}
       <button
         type="button"
         aria-label={t("window.close")}

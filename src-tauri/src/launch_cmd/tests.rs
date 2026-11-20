@@ -114,6 +114,7 @@ async fn plan(
             total_memory_mb: Some(16_384),
             default_memory_mb: None,
             memory_snapshot: None,
+            force_x11: false,
         },
     )
     .await
@@ -796,6 +797,7 @@ async fn memory_snapshot_clamps_heap_down_when_commit_or_physical_ram_is_tight()
                 avail_phys_mb: 10_240,
                 avail_commit_mb: 12_288,
             }),
+            force_x11: false,
         },
     )
     .await
@@ -819,6 +821,7 @@ async fn memory_snapshot_clamps_heap_down_when_commit_or_physical_ram_is_tight()
                 avail_phys_mb: 2_048,
                 avail_commit_mb: 1_920,
             }),
+            force_x11: false,
         },
     )
     .await

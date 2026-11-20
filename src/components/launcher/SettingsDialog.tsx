@@ -363,6 +363,7 @@ function BehaviorSection({ onLaunch, onExit }: { onLaunch: OnLaunch; onExit: OnE
             void saveBehavior({ onLaunch: v });
           }}
           options={[
+            { value: "embed", label: t("settings.onLaunch.embed") },
             { value: "keep_open", label: t("settings.onLaunch.keep") },
             { value: "hide", label: t("settings.onLaunch.hide") },
           ]}

@@ -18,7 +18,7 @@ export type UiMode = "simple" | "advanced";
 export type MotionMode = "system" | "on" | "off";
 /** Whether the translucent window material follows Windows, is always tried, or is never used. */
 export type TransparencyMode = "system" | "on" | "off";
-export type OnLaunch = "keep_open" | "hide";
+export type OnLaunch = "embed" | "keep_open" | "hide";
 export type OnExit = "show" | "stay_hidden";
 
 /** What this computer allows for the game's memory, in MiB, and what "Automatic" means here. */
@@ -73,7 +73,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   onboardingDone: true,
   memoryMb: null,
   memory: { min: 1024, max: 16384, auto: 4096, total: null },
-  onLaunch: "hide",
+  onLaunch: "embed",
   onExit: "show",
   version: "",
 };
@@ -155,7 +155,7 @@ export function parseUiSettings(raw: unknown): UiSettings {
       auto: Math.min(max, Math.max(min, whole(m.auto, d.auto))),
       total: typeof m.total === "number" && m.total > 0 ? Math.round(m.total) : null,
     },
-    onLaunch: oneOf(o.onLaunch, ["keep_open", "hide"], "hide"),
+    onLaunch: oneOf(o.onLaunch, ["embed", "keep_open", "hide"], "embed"),
     onExit: oneOf(o.onExit, ["show", "stay_hidden"], "show"),
     version:
       typeof o.version === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(o.version) ? o.version : "",
@@ -303,7 +303,7 @@ export const resetUiSettings = () =>
       reducedMotion: "system",
       transparency: "system",
       memoryMb: null,
-      onLaunch: "hide",
+      onLaunch: "embed",
       onExit: "show",
     },
   );

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   accountsApi,
@@ -9,9 +9,16 @@ import {
 } from "@/lib/accounts/api";
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
-import { launchApi, LaunchRefused, type LaunchApi, type RunState } from "@/lib/launch/api";
+import {
+  launchApi,
+  LaunchRefused,
+  NO_EMBED,
+  type GameEmbedStatus,
+  type LaunchApi,
+  type RunState,
+} from "@/lib/launch/api";
 import { profilesApi, type ProfilesApi, type ProfilesSnapshot } from "@/lib/profiles/api";
-import { completeOnboarding, type UiSettings } from "@/lib/settings/uiSettings";
+import { completeOnboarding, inTauri, type UiSettings } from "@/lib/settings/uiSettings";
 import { playSound } from "@/lib/sound/soundService";
 import { AnimatedBackground } from "./AnimatedBackground";
 import { Hero } from "./Hero";
@@ -85,6 +92,8 @@ export function LauncherHome({
   const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [surface, setSurface] = useState<Surface>({ kind: "none" });
   const [runs, setRuns] = useState<Record<string, RunState>>({});
+  const [embed, setEmbed] = useState<GameEmbedStatus>(NO_EMBED);
+  const stageRef = useRef<HTMLDivElement>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
   // The first-run introduction: only when the backend says it was never finished or skipped.
   const [introduction, setIntroduction] = useState(initialUi?.onboardingDone === false);
@@ -148,6 +157,7 @@ export function LauncherHome({
           return next;
         });
         if (ev.state === "stopped") {
+          setEmbed((cur) => (cur.instanceId === ev.instanceId ? NO_EMBED : cur));
           refresh(); // the playtime moved
           refreshAccounts(); // a launch may have refreshed the sign-in and noted a new skin
           if (ev.exit && ev.exit.kind !== "normal") {
@@ -164,6 +174,72 @@ export function LauncherHome({
       off?.();
     };
   }, [launchClient, refresh, refreshAccounts]);
+
+  // Framed game mode ("Inside Clade"): sync active attachment state and report responsive stage
+  // geometry in physical pixels so Rust can size and round the embedded game window to match.
+  useEffect(() => {
+    if (!launchClient.embedStatus && !launchClient.onEmbedState) return;
+    let stale = false;
+    let off: (() => void) | null = null;
+    const apply = (next: GameEmbedStatus) => {
+      if (stale) return;
+      setEmbed(next);
+      if (next.active) {
+        setSurface((cur) => (cur.kind === "none" ? cur : { kind: "none" }));
+      }
+    };
+    launchClient.embedStatus?.().then(apply, () => undefined);
+    if (launchClient.onEmbedState) {
+      void launchClient.onEmbedState(apply).then((u) => {
+        if (stale) u();
+        else off = u;
+      });
+    }
+    return () => {
+      stale = true;
+      off?.();
+    };
+  }, [launchClient]);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    const sendBounds = launchClient.setStageBounds;
+    if (!el || !inTauri() || !sendBounds) return;
+    let last = "";
+    const measure = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = el.getBoundingClientRect();
+      const width = Math.max(0, Math.round(rect.width * dpr));
+      const height = Math.max(0, Math.round(rect.height * dpr));
+      if (width < 64 || height < 64) return;
+      const radiusCss =
+        Number.parseFloat(window.getComputedStyle(el).borderTopLeftRadius || "16") || 16;
+      const next = {
+        x: Math.round(rect.left * dpr),
+        y: Math.round(rect.top * dpr),
+        width,
+        height,
+        radius: Math.max(0, Math.round(radiusCss * dpr)),
+      };
+      const key = `${next.x},${next.y},${next.width},${next.height},${next.radius}`;
+      if (key === last) return;
+      last = key;
+      void sendBounds(next).catch(() => undefined);
+    };
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [launchClient]);
+
+  const toggleMaximize = useCallback(() => {
+    if (!launchClient.toggleMaximize) return;
+    void launchClient.toggleMaximize().then(setEmbed, () => undefined);
+  }, [launchClient]);
 
   // Choosing an account changes who plays, never what is played: no profile is touched.
   const selectAccount = (id: string) => {
@@ -277,20 +353,40 @@ export function LauncherHome({
       ? (accounts.accounts.find((a) => a.id === surface.id) ?? null)
       : null;
   const bgPaused =
-    surface.kind !== "none" || introduction || problem !== null || Object.keys(runs).length > 0;
+    embed.active ||
+    surface.kind !== "none" ||
+    introduction ||
+    problem !== null ||
+    Object.keys(runs).length > 0;
 
   return (
     <TooltipProvider delay={350}>
       <main className="relative h-full w-full overflow-hidden">
         <AnimatedBackground paused={bgPaused} />
-        <WindowChrome />
-        <section className="absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]">
-          <Hero
-            lastPhraseId={initialUi?.lastPhrase}
-            playtimeSeconds={snapshot.totalPlaytimeSeconds}
-          />
-        </section>
-        {unreadable.length > 0 && (
+        <WindowChrome
+          framed={embed.active}
+          maximized={embed.maximized}
+          onToggleMaximize={toggleMaximize}
+        />
+        <div
+          ref={stageRef}
+          data-testid="game-stage"
+          aria-hidden={!embed.active}
+          className={
+            embed.active
+              ? "bg-graphite/95 ring-graphite/15 pointer-events-none absolute top-11 right-3.5 bottom-3.5 left-3.5 rounded-2xl shadow-[0_24px_60px_-20px_rgb(43_38_34/0.55)] ring-1"
+              : "pointer-events-none invisible absolute top-11 right-3.5 bottom-3.5 left-3.5 rounded-2xl"
+          }
+        />
+        {!embed.active && (
+          <section className="absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]">
+            <Hero
+              lastPhraseId={initialUi?.lastPhrase}
+              playtimeSeconds={snapshot.totalPlaytimeSeconds}
+            />
+          </section>
+        )}
+        {!embed.active && unreadable.length > 0 && (
           <div
             role="status"
             className="dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
@@ -323,34 +419,37 @@ export function LauncherHome({
             </div>
           </div>
         )}
-        <LauncherDock
-          accounts={accounts.accounts}
-          activeAccountId={accounts.active}
-          onSelectAccount={selectAccount}
-          onManageAccount={(id) => setSurface({ kind: "account", id })}
-          onAddAccount={addAccount}
-          profiles={snapshot.profiles}
-          selectedProfileId={snapshot.selected}
-          onSelectProfile={select}
-          onCreateProfile={openCreate}
-          onOpenProfileSettings={() =>
-            selectedProfile && setSurface({ kind: "profile", id: selectedProfile.id })
-          }
-          onOpenProfileFolder={() =>
-            selectedProfile && void api.openFolder(selectedProfile.id).catch(() => undefined)
-          }
-          onVerifyProfile={() =>
-            selectedProfile && setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
-          }
-          verifyDisabled={run !== undefined || !accountReady}
-          removeDisabled={run !== undefined}
-          onRemoveProfile={() =>
-            selectedProfile && setSurface({ kind: "remove-profile", id: selectedProfile.id })
-          }
-          onPlay={play}
-          playState={playState}
-          onOpenSettings={() => setSurface({ kind: "settings" })}
-        />
+        {!embed.active && (
+          <LauncherDock
+            accounts={accounts.accounts}
+            activeAccountId={accounts.active}
+            onSelectAccount={selectAccount}
+            onManageAccount={(id) => setSurface({ kind: "account", id })}
+            onAddAccount={addAccount}
+            profiles={snapshot.profiles}
+            selectedProfileId={snapshot.selected}
+            onSelectProfile={select}
+            onCreateProfile={openCreate}
+            onOpenProfileSettings={() =>
+              selectedProfile && setSurface({ kind: "profile", id: selectedProfile.id })
+            }
+            onOpenProfileFolder={() =>
+              selectedProfile && void api.openFolder(selectedProfile.id).catch(() => undefined)
+            }
+            onVerifyProfile={() =>
+              selectedProfile &&
+              setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
+            }
+            verifyDisabled={run !== undefined || !accountReady}
+            removeDisabled={run !== undefined}
+            onRemoveProfile={() =>
+              selectedProfile && setSurface({ kind: "remove-profile", id: selectedProfile.id })
+            }
+            onPlay={play}
+            playState={playState}
+            onOpenSettings={() => setSurface({ kind: "settings" })}
+          />
+        )}
         <Suspense fallback={null}>
           {mounted.onboarding && <OnboardingDialog open={introduction} onExit={endIntroduction} />}
           {mounted["create-profile"] && (

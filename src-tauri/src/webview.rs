@@ -391,17 +391,26 @@ fn select_runtime_with(
 }
 
 #[cfg(any(target_os = "linux", test))]
-const LINUX_NVIDIA_WEBKIT_ENV: &[(&str, &str)] = &[("__NV_DISABLE_EXPLICIT_SYNC", "1")];
-
-#[cfg(any(target_os = "linux", test))]
-fn apply_linux_webkit_env_with(nvidia_present: bool) {
-    if !nvidia_present {
-        return;
+fn apply_linux_webkit_env_with(
+    nvidia_present: bool,
+    x11_embed: bool,
+    has_x11_display: bool,
+    dmabuf_disabled: bool,
+) {
+    let mut vars: Vec<(&'static str, &'static str)> = Vec::new();
+    if nvidia_present {
+        vars.push(("__NV_DISABLE_EXPLICIT_SYNC", "1"));
     }
-    for &(key, val) in LINUX_NVIDIA_WEBKIT_ENV {
+    if x11_embed && has_x11_display {
+        vars.push(("GDK_BACKEND", "x11"));
+        if nvidia_present && !dmabuf_disabled {
+            vars.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1"));
+        }
+    }
+    for (key, val) in vars {
         // Called once at startup while single-threaded, before GTK/WebKitGTK initializes.
-        // Respects any explicit value the user set in their environment, leaving DMA-BUF enabled.
-        // portability-allow: guards WebKitGTK against Wayland protocol error 71 on NVIDIA drivers
+        // Respects any explicit value the user set in their environment.
+        // portability-allow: guards WebKitGTK against Wayland/XWayland glitches on NVIDIA and X11 embedding
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, val);
         }
@@ -409,16 +418,24 @@ fn apply_linux_webkit_env_with(nvidia_present: bool) {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_linux_webkit_env() {
+fn apply_linux_webkit_env(x11_embed: bool) {
     let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists()
         || std::path::Path::new("/dev/nvidiactl").exists();
-    apply_linux_webkit_env_with(nvidia);
+    let has_x11_display = crate::loader_install::SystemEnv::from_process()
+        .session_env
+        .get("DISPLAY")
+        .is_some_and(|d| !d.is_empty());
+    // portability-allow: honors an explicit user WEBKIT_DISABLE_DMABUF_RENDERER override
+    let dmabuf_disabled = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+    apply_linux_webkit_env_with(nvidia, x11_embed, has_x11_display, dmabuf_disabled);
 }
 
 /// Must run before any WebView is created.
-pub fn select_runtime(root: &PortableRoot) -> RuntimeSource {
+pub fn select_runtime(root: &PortableRoot, x11_embed: bool) -> RuntimeSource {
     #[cfg(target_os = "linux")]
-    apply_linux_webkit_env();
+    apply_linux_webkit_env(x11_embed);
+    #[cfg(not(target_os = "linux"))]
+    let _ = x11_embed;
     select_runtime_with(
         root,
         crate::system::is_windows_10(),
@@ -689,21 +706,21 @@ mod tests {
         std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", "stale-override");
 
         let unc_root = PortableRoot::at(r"\\server\share\Clade");
-        assert_eq!(select_runtime(&unc_root), RuntimeSource::System);
+        assert_eq!(select_runtime(&unc_root, false), RuntimeSource::System);
         assert!(std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_none());
 
         let verbatim_unc = PortableRoot::at(r"\\?\UNC\server\share\Clade");
-        assert_eq!(select_runtime(&verbatim_unc), RuntimeSource::System);
+        assert_eq!(select_runtime(&verbatim_unc, false), RuntimeSource::System);
         assert!(std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_none());
 
         let local = tempfile::tempdir().unwrap();
         let local_root = PortableRoot::at(local.path());
-        assert_eq!(select_runtime(&local_root), RuntimeSource::System);
+        assert_eq!(select_runtime(&local_root, false), RuntimeSource::System);
 
         let rt_dir = local_root.fixed_webview2_dir();
         std::fs::create_dir_all(&rt_dir).unwrap();
         std::fs::write(rt_dir.join("msedgewebview2.exe"), b"stub").unwrap();
-        assert_eq!(select_runtime(&local_root), RuntimeSource::Bundled);
+        assert_eq!(select_runtime(&local_root, false), RuntimeSource::Bundled);
         assert_eq!(
             std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").as_deref(),
             Some(rt_dir.as_os_str())
@@ -1094,36 +1111,54 @@ mod tests {
     #[test]
     fn linux_nvidia_webkit_guards_apply_only_when_nvidia_present_and_unset() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> = LINUX_NVIDIA_WEBKIT_ENV
-            .iter()
-            .map(|&(k, _)| (k, std::env::var_os(k)))
-            .collect();
-        let dmabuf_saved = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
-        for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
+        let keys = [
+            "__NV_DISABLE_EXPLICIT_SYNC",
+            "GDK_BACKEND",
+            "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+        ];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        for k in keys {
             std::env::remove_var(k);
         }
-        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
 
-        apply_linux_webkit_env_with(false);
-        for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
+        // Without NVIDIA and without x11 embed, nothing is modified.
+        apply_linux_webkit_env_with(false, false, true, false);
+        for k in keys {
             assert!(
                 std::env::var_os(k).is_none(),
                 "{k} should remain unset without NVIDIA"
             );
         }
 
+        // Explicit user overrides must survive.
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "0");
-        apply_linux_webkit_env_with(true);
+        std::env::set_var("GDK_BACKEND", "wayland");
+        apply_linux_webkit_env_with(true, true, true, false);
         assert_eq!(
             std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
             Ok("0"),
             "explicit user override must be preserved"
         );
+        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("wayland"));
+        assert_eq!(
+            std::env::var("WEBKIT_DMABUF_RENDERER_FORCE_SHM").as_deref(),
+            Ok("1")
+        );
 
-        std::env::remove_var("__NV_DISABLE_EXPLICIT_SYNC");
-        apply_linux_webkit_env_with(true);
+        // Fresh environment with x11_embed + NVIDIA sets sync/X11/FORCE_SHM, never DISABLE_DMABUF.
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        apply_linux_webkit_env_with(true, true, true, false);
         assert_eq!(
             std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("x11"));
+        assert_eq!(
+            std::env::var("WEBKIT_DMABUF_RENDERER_FORCE_SHM").as_deref(),
             Ok("1")
         );
         assert!(
@@ -1131,17 +1166,22 @@ mod tests {
             "GPU DMA-BUF acceleration must stay enabled by default"
         );
 
+        // If user already disabled DMABUF or there is no X11 DISPLAY, skip FORCE_SHM / GDK_BACKEND.
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        apply_linux_webkit_env_with(true, true, false, false);
+        assert!(std::env::var_os("GDK_BACKEND").is_none());
+        assert!(std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none());
+        apply_linux_webkit_env_with(true, true, true, true);
+        assert!(std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none());
+
         for (k, prev) in saved {
             if let Some(v) = prev {
                 std::env::set_var(k, v);
             } else {
                 std::env::remove_var(k);
             }
-        }
-        if let Some(v) = dmabuf_saved {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", v);
-        } else {
-            std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
         }
     }
 }

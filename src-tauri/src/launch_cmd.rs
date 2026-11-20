@@ -279,6 +279,8 @@ pub struct LaunchEnv<'a> {
     pub default_memory_mb: Option<u32>,
     /// Live physical + commit memory availability (`None` in purely static planning tests).
     pub memory_snapshot: Option<crate::system::MemorySnapshot>,
+    /// Forces Linux game windows onto X11/XWayland when embedding inside Clade's frame.
+    pub force_x11: bool,
 }
 
 /// Everything that must be true before the game may start, ending in the ready-to-run command.
@@ -402,6 +404,7 @@ pub async fn plan_launch<T: Transport>(
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,
+        force_x11: env.force_x11,
     })
     .map_err(|e| match e {
         LaunchError::MissingFile(what) => needs_repair(&what),
@@ -515,6 +518,8 @@ async fn start(
         .http
         .as_ref()
         .map_err(|_| fail("offline", "Networking is unavailable."))?;
+    let behavior = app.state::<SettingsState>().behavior();
+    let wants_embed = behavior.embeds_on_launch() && crate::game_embed::can_embed(app);
     let planned = plan_launch(
         &state.root,
         transport,
@@ -527,6 +532,7 @@ async fn start(
             total_memory_mb: crate::system::total_memory_mb(),
             default_memory_mb: app.state::<SettingsState>().default_memory_mb(),
             memory_snapshot: crate::system::memory_snapshot(),
+            force_x11: cfg!(target_os = "linux") && wants_embed,
         },
     )
     .await?;
@@ -589,9 +595,11 @@ async fn start(
         }
     });
 
-    // "When Minecraft starts: Hide Clade" (Settings). The process is already running, so hiding
-    // the window cannot get in the game's way, and closing/starting Clade again still works.
-    if app.state::<SettingsState>().behavior().hides_on_launch() {
+    // Attach the game window inside Clade's frame when "Inside Clade" is enabled, or hide
+    // Clade completely when "Hide Clade" is selected.
+    if wants_embed {
+        crate::game_embed::start_session(app.clone(), id.as_str().to_owned(), pid);
+    } else if behavior.hides_on_launch() {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.hide();
         }
@@ -642,6 +650,7 @@ async fn start(
         let ls = app.state::<LaunchState>();
         let (closed, another_running) = ls.finish_session(&id);
         tracing::info!(code = ?outcome.exit.code, kind = ?outcome.exit.kind, "game process ended");
+        crate::game_embed::end_session(&app, id.as_str());
         crate::webview::resume_window(&app);
         emit(&app, &id, "stopped", Some((&outcome.exit).into()));
         // What happens to the window now that the game is over.
@@ -699,6 +708,11 @@ pub fn reattach_live_sessions(app: &AppHandle) {
         state.mark_playing(&id);
         emit(app, &id, "playing", None);
         tracing::info!(pid, instance = %id, "reattached live game session");
+        if app.state::<SettingsState>().behavior().embeds_on_launch()
+            && crate::game_embed::can_embed(app)
+        {
+            crate::game_embed::start_session(app.clone(), id.as_str().to_owned(), pid);
+        }
 
         let app = app.clone();
         let root = state.root.clone();
@@ -774,6 +788,7 @@ pub fn reattach_live_sessions(app: &AppHandle) {
                 kind = ?exit.kind,
                 "reattached game process ended"
             );
+            crate::game_embed::end_session(&app, id.as_str());
             crate::webview::resume_window(&app);
             emit(&app, &id, "stopped", Some((&exit).into()));
             apply_window_plan(&app, exit.kind, closed, another_running);

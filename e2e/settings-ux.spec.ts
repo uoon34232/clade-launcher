@@ -305,7 +305,7 @@ test.describe("memory saved above what a smaller computer allows", () => {
 test.describe("behavior around the game", () => {
   test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
 
-  test("hides Clade on launch and shows it again on exit by default, and saves each choice", async ({
+  test("opens Minecraft inside Clade and shows Clade again on exit by default, and saves each choice", async ({
     page,
     backend,
     openApp,
@@ -315,7 +315,7 @@ test.describe("behavior around the game", () => {
     const onLaunch = dialog.getByRole("radiogroup", { name: text("settings.onLaunch") });
     const onExit = dialog.getByRole("radiogroup", { name: text("settings.onExit") });
     await expect(
-      onLaunch.getByRole("radio", { name: text("settings.onLaunch.hide") }),
+      onLaunch.getByRole("radio", { name: text("settings.onLaunch.embed") }),
     ).toBeChecked();
     await expect(onExit.getByRole("radio", { name: text("settings.onExit.show") })).toBeChecked();
     await expect(dialog.getByText(text("settings.onExit.hiddenNote"))).toHaveCount(0);
@@ -329,10 +329,13 @@ test.describe("behavior around the game", () => {
 
     await onLaunch.getByRole("radio", { name: text("settings.onLaunch.hide") }).click();
     await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("hide");
+    await onLaunch.getByRole("radio", { name: text("settings.onLaunch.embed") }).click();
+    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("embed");
     expect((await backend.calls("set_behavior")).map((c) => c.args)).toEqual([
       { onLaunch: "keep_open" },
       { onExit: "stay_hidden" },
       { onLaunch: "hide" },
+      { onLaunch: "embed" },
     ]);
   });
 });
@@ -462,7 +465,7 @@ test.describe("reset settings", () => {
       ui.transparency,
       ui.memoryMb,
       ui.onLaunch,
-    ]).toEqual(["simple", true, "system", "system", null, "hide"]);
+    ]).toEqual(["simple", true, "system", "system", null, "embed"]);
     // the introduction stays seen, and the change touched nothing but the settings
     expect(ui.onboardingDone).toBe(true);
     expect(await backend.calls("reset_settings")).toHaveLength(1);

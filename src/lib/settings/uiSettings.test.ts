@@ -96,8 +96,10 @@ describe("parseUiSettings", () => {
     expect(bad.memory.max).toBeGreaterThanOrEqual(bad.memory.min);
     expect(bad.memory.auto).toBeLessThanOrEqual(bad.memory.max);
     expect(bad.memory.total).toBeNull();
-    expect([bad.onLaunch, bad.onExit]).toEqual(["hide", "show"]);
+    expect([bad.onLaunch, bad.onExit]).toEqual(["embed", "show"]);
     expect(bad.version).toBe("");
+    expect(parseUiSettings({ onLaunch: "embed" }).onLaunch).toBe("embed");
+    expect(parseUiSettings({ onLaunch: "hide" }).onLaunch).toBe("hide");
   });
 
   it("accepts only the two shipped languages and a well-formed Windows locale name", () => {
@@ -301,7 +303,7 @@ describe("the live settings copy", () => {
       uiMode: "simple",
       memoryMb: null,
       reducedMotion: "system",
-      onLaunch: "hide",
+      onLaunch: "embed",
       onExit: "show",
       onboardingDone: true,
     });
