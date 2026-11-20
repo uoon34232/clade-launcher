@@ -1,4 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   accountsApi,
@@ -28,31 +38,76 @@ import type { OnboardingExit } from "./OnboardingDialog";
 import type { PlayState } from "./PlayButton";
 import { WindowChrome } from "./WindowChrome";
 
-const AccountDialog = lazy(() =>
+type LazyModalComponent = Parameters<typeof lazy>[0] extends () => Promise<{ default: infer C }>
+  ? C
+  : never;
+
+/** Retries a dynamic modal import once so a transient Vite chunk race does not blank the launcher. */
+function lazyModal<C extends LazyModalComponent>(loader: () => Promise<{ default: C }>) {
+  return lazy<C>(async () => {
+    try {
+      return await loader();
+    } catch {
+      return await loader();
+    }
+  });
+}
+
+interface ModalBoundaryProps {
+  resetKey: string;
+  onError: () => void;
+  children: ReactNode;
+}
+
+/** Isolates modal chunk/render failures so a broken dialog never unmounts the launcher. */
+class ModalBoundary extends Component<ModalBoundaryProps, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("Modal boundary caught render failure:", error, info.componentStack);
+    this.props.onError();
+  }
+
+  componentDidUpdate(prevProps: ModalBoundaryProps): void {
+    if (this.state.failed && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false });
+    }
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
+const AccountDialog = lazyModal(() =>
   import("./AccountDialog").then((m) => ({ default: m.AccountDialog })),
 );
-const CreateProfileDialog = lazy(() =>
+const CreateProfileDialog = lazyModal(() =>
   import("./CreateProfileDialog").then((m) => ({ default: m.CreateProfileDialog })),
 );
-const LaunchProblemDialog = lazy(() =>
+const LaunchProblemDialog = lazyModal(() =>
   import("./LaunchProblemDialog").then((m) => ({ default: m.LaunchProblemDialog })),
 );
-const OnboardingDialog = lazy(() =>
+const OnboardingDialog = lazyModal(() =>
   import("./OnboardingDialog").then((m) => ({ default: m.OnboardingDialog })),
 );
-const PrepareDialog = lazy(() =>
+const PrepareDialog = lazyModal(() =>
   import("./PrepareDialog").then((m) => ({ default: m.PrepareDialog })),
 );
-const ProfileDialog = lazy(() =>
+const ProfileDialog = lazyModal(() =>
   import("./ProfileDialog").then((m) => ({ default: m.ProfileDialog })),
 );
-const RemoveProfileDialog = lazy(() =>
+const RemoveProfileDialog = lazyModal(() =>
   import("./RemoveProfileDialog").then((m) => ({ default: m.RemoveProfileDialog })),
 );
-const SettingsDialog = lazy(() =>
+const SettingsDialog = lazyModal(() =>
   import("./SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
 );
-const SignInDialog = lazy(() =>
+const SignInDialog = lazyModal(() =>
   import("./SignInDialog").then((m) => ({ default: m.SignInDialog })),
 );
 
@@ -450,123 +505,135 @@ export function LauncherHome({
             onOpenSettings={() => setSurface({ kind: "settings" })}
           />
         )}
-        <Suspense fallback={null}>
-          {mounted.onboarding && <OnboardingDialog open={introduction} onExit={endIntroduction} />}
-          {mounted["create-profile"] && (
-            <CreateProfileDialog
-              open={surface.kind === "create-profile"}
-              onOpenChange={(o) => !o && close()}
-              existingNames={snapshot.profiles.map((p) => p.name)}
-              onCreated={setSnapshot}
-              api={api}
-            />
-          )}
-          {mounted.profile && (
-            <ProfileDialog
-              profile={editingProfile}
-              profiles={snapshot.profiles}
-              running={editingRun !== undefined}
-              verifyDisabled={editingRun !== undefined || !accountReady}
-              removeDisabled={editingRun !== undefined}
-              onClose={close}
-              onUpdated={setSnapshot}
-              onDuplicated={(next) => {
-                setSnapshot(next);
-                if (next.selected) setSurface({ kind: "profile", id: next.selected });
-              }}
-              onVerify={() =>
-                editingProfile &&
-                setSurface({ kind: "prepare", id: editingProfile.id, verify: true })
-              }
-              onRemove={() =>
-                editingProfile && setSurface({ kind: "remove-profile", id: editingProfile.id })
-              }
-              api={api}
-            />
-          )}
-          {mounted.prepare && (
-            <PrepareDialog
-              profile={preparing}
-              verify={prepareSurface?.verify === true}
-              onClose={close}
-              onPrepared={setSnapshot}
-              api={api}
-            />
-          )}
-          {mounted["remove-profile"] && (
-            <RemoveProfileDialog
-              profile={removing}
-              onClose={close}
-              onRemoved={(next) => {
-                setSnapshot(next); // the backend's list and a valid selection; no restart needed
-                close();
-              }}
-              api={api}
-            />
-          )}
-          {mounted.problem && (
-            <LaunchProblemDialog
-              problem={problem}
-              onClose={() => setProblem(null)}
-              onRepair={(id) => {
-                setProblem(null);
-                setSurface({ kind: "prepare", id });
-              }}
-              onSignIn={(accountId) => {
-                setProblem(null);
-                setSurface({ kind: "sign-in", accountId });
-              }}
-              onRetry={(id) => {
-                setProblem(null);
-                launch(id);
-              }}
-              onOpenLogs={(id) => void launchClient.openLogs(id).catch(() => undefined)}
-              onVaultReset={(snapshot) => {
-                setAccounts(snapshot);
-                // "Start fresh" archived the old vault: the account must sign in again before it can play.
-                setProblem((cur) =>
-                  cur?.kind === "refused"
-                    ? { ...cur, code: "needs_sign_in", accountId: snapshot.active }
-                    : cur,
-                );
-              }}
-              accountsClient={accountsClient}
-            />
-          )}
-          {mounted.settings && (
-            <SettingsDialog
-              open={surface.kind === "settings"}
-              onOpenChange={(o) => !o && close()}
-            />
-          )}
-          {mounted["sign-in"] && (
-            <SignInDialog
-              open={surface.kind === "sign-in"}
-              onOpenChange={(o) => !o && close()}
-              account={signingIn ? { id: signingIn.id, username: signingIn.username } : null}
-              onSignedIn={(snapshot) => {
-                setAccounts(snapshot);
-                close();
-              }}
-              onVaultReset={setAccounts}
-              api={accountsClient}
-            />
-          )}
-          {mounted.account && (
-            <AccountDialog
-              account={managed}
-              capabilities={accounts.capabilities}
-              onClose={close}
-              onSignInAgain={(id) => setSurface({ kind: "sign-in", accountId: id })}
-              onRemoved={(snapshot) => {
-                setAccounts(snapshot);
-                close();
-              }}
-              onVaultReset={setAccounts}
-              api={accountsClient}
-            />
-          )}
-        </Suspense>
+        <ModalBoundary
+          resetKey={`${surface.kind}:${introduction ? 1 : 0}:${problem ? problem.kind : ""}`}
+          onError={() => {
+            setMounted({});
+            setSurface({ kind: "none" });
+            setProblem(null);
+            setIntroduction(false);
+          }}
+        >
+          <Suspense fallback={null}>
+            {mounted.onboarding && (
+              <OnboardingDialog open={introduction} onExit={endIntroduction} />
+            )}
+            {mounted["create-profile"] && (
+              <CreateProfileDialog
+                open={surface.kind === "create-profile"}
+                onOpenChange={(o) => !o && close()}
+                existingNames={snapshot.profiles.map((p) => p.name)}
+                onCreated={setSnapshot}
+                api={api}
+              />
+            )}
+            {mounted.profile && (
+              <ProfileDialog
+                profile={editingProfile}
+                profiles={snapshot.profiles}
+                running={editingRun !== undefined}
+                verifyDisabled={editingRun !== undefined || !accountReady}
+                removeDisabled={editingRun !== undefined}
+                onClose={close}
+                onUpdated={setSnapshot}
+                onDuplicated={(next) => {
+                  setSnapshot(next);
+                  if (next.selected) setSurface({ kind: "profile", id: next.selected });
+                }}
+                onVerify={() =>
+                  editingProfile &&
+                  setSurface({ kind: "prepare", id: editingProfile.id, verify: true })
+                }
+                onRemove={() =>
+                  editingProfile && setSurface({ kind: "remove-profile", id: editingProfile.id })
+                }
+                api={api}
+              />
+            )}
+            {mounted.prepare && (
+              <PrepareDialog
+                profile={preparing}
+                verify={prepareSurface?.verify === true}
+                onClose={close}
+                onPrepared={setSnapshot}
+                api={api}
+              />
+            )}
+            {mounted["remove-profile"] && (
+              <RemoveProfileDialog
+                profile={removing}
+                onClose={close}
+                onRemoved={(next) => {
+                  setSnapshot(next); // the backend's list and a valid selection; no restart needed
+                  close();
+                }}
+                api={api}
+              />
+            )}
+            {mounted.problem && (
+              <LaunchProblemDialog
+                problem={problem}
+                onClose={() => setProblem(null)}
+                onRepair={(id) => {
+                  setProblem(null);
+                  setSurface({ kind: "prepare", id });
+                }}
+                onSignIn={(accountId) => {
+                  setProblem(null);
+                  setSurface({ kind: "sign-in", accountId });
+                }}
+                onRetry={(id) => {
+                  setProblem(null);
+                  launch(id);
+                }}
+                onOpenLogs={(id) => void launchClient.openLogs(id).catch(() => undefined)}
+                onVaultReset={(snapshot) => {
+                  setAccounts(snapshot);
+                  // "Start fresh" archived the old vault: the account must sign in again before it can play.
+                  setProblem((cur) =>
+                    cur?.kind === "refused"
+                      ? { ...cur, code: "needs_sign_in", accountId: snapshot.active }
+                      : cur,
+                  );
+                }}
+                accountsClient={accountsClient}
+              />
+            )}
+            {mounted.settings && (
+              <SettingsDialog
+                open={surface.kind === "settings"}
+                onOpenChange={(o) => !o && close()}
+              />
+            )}
+            {mounted["sign-in"] && (
+              <SignInDialog
+                open={surface.kind === "sign-in"}
+                onOpenChange={(o) => !o && close()}
+                account={signingIn ? { id: signingIn.id, username: signingIn.username } : null}
+                onSignedIn={(snapshot) => {
+                  setAccounts(snapshot);
+                  close();
+                }}
+                onVaultReset={setAccounts}
+                api={accountsClient}
+              />
+            )}
+            {mounted.account && (
+              <AccountDialog
+                account={managed}
+                capabilities={accounts.capabilities}
+                onClose={close}
+                onSignInAgain={(id) => setSurface({ kind: "sign-in", accountId: id })}
+                onRemoved={(snapshot) => {
+                  setAccounts(snapshot);
+                  close();
+                }}
+                onVaultReset={setAccounts}
+                api={accountsClient}
+              />
+            )}
+          </Suspense>
+        </ModalBoundary>
       </main>
     </TooltipProvider>
   );

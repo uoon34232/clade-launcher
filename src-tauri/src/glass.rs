@@ -354,7 +354,9 @@ struct WindowBackdrop<'a> {
 }
 
 /// The warm paper colour of the opaque look (the same as `backgroundColor` in tauri.conf.json).
+#[cfg(windows)]
 const OPAQUE_BACKGROUND: tauri::window::Color = tauri::window::Color(0xF3, 0xED, 0xE3, 0xFF);
+#[cfg(windows)]
 const CLEAR_BACKGROUND: tauri::window::Color = tauri::window::Color(0, 0, 0, 0);
 
 impl Backdrop for WindowBackdrop<'_> {
@@ -367,14 +369,23 @@ impl Backdrop for WindowBackdrop<'_> {
         {
             let hwnd = window.hwnd().map_err(|e| e.to_string())?;
             native::set_backdrop(hwnd.0 as isize, on)?;
+            window
+                .set_background_color(Some(if on {
+                    CLEAR_BACKGROUND
+                } else {
+                    OPAQUE_BACKGROUND
+                }))
+                .map_err(|e| e.to_string())?;
         }
-        window
-            .set_background_color(Some(if on {
-                CLEAR_BACKGROUND
-            } else {
-                OPAQUE_BACKGROUND
-            }))
-            .map_err(|e| e.to_string())
+        // On Linux (GTK/WebKitGTK under XWayland with SHM), calling
+        // `set_background_color` at runtime clears the cairo/X11 surface without
+        // invalidating clean WebKit tiles. `wry` already initializes RGBA(0,0,0,0)
+        // once from `transparent: true`, and CSS `html[data-glass]` controls opacity.
+        #[cfg(not(windows))]
+        {
+            let _ = (&window, on);
+        }
+        Ok(())
     }
 }
 
