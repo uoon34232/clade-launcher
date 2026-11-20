@@ -521,7 +521,9 @@ fn run_watcher_x11(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
 #[cfg(windows)]
 mod win32 {
     use super::StageBounds;
-    pub use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows_sys::core::BOOL;
+    pub use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetClientRect, GetParent, GetWindow, GetWindowLongPtrW,
@@ -579,7 +581,7 @@ mod win32 {
         };
         // SAFETY: `search` outlives synchronous `EnumWindows` invocation.
         unsafe {
-            EnumWindows(Some(enum_proc), (&mut search as *mut Search) as LPARAM);
+            EnumWindows(Some(enum_proc), std::ptr::addr_of_mut!(search) as LPARAM);
         }
         search.found
     }
@@ -592,18 +594,18 @@ mod win32 {
     pub fn attach_and_place(mc: HWND, host: HWND, b: StageBounds) -> bool {
         // SAFETY: valid live HWNDs belonging to the game child and launcher host.
         unsafe {
-            let style = GetWindowLongPtrW(mc, GWL_STYLE);
-            let strip = (WS_POPUP
+            let style = GetWindowLongPtrW(mc, GWL_STYLE) as u32;
+            let strip = WS_POPUP
                 | WS_CAPTION
                 | WS_THICKFRAME
                 | WS_MINIMIZEBOX
                 | WS_MAXIMIZEBOX
-                | WS_SYSMENU) as isize;
-            let add = (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS) as isize;
-            SetWindowLongPtrW(mc, GWL_STYLE, (style & !strip) | add);
+                | WS_SYSMENU;
+            let add = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
+            SetWindowLongPtrW(mc, GWL_STYLE, ((style & !strip) | add) as i32 as isize);
 
-            let ex = GetWindowLongPtrW(mc, GWL_EXSTYLE);
-            SetWindowLongPtrW(mc, GWL_EXSTYLE, ex & !(WS_EX_APPWINDOW as isize));
+            let ex = GetWindowLongPtrW(mc, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(mc, GWL_EXSTYLE, (ex & !WS_EX_APPWINDOW) as i32 as isize);
 
             if SetParent(mc, host).is_null() {
                 return false;
@@ -648,9 +650,13 @@ mod win32 {
         }
     }
 
-    pub fn request_close(mc: HWND) -> bool {
+    pub fn request_close(mc: HWND) {
         // SAFETY: posts asynchronous WM_CLOSE to the game window.
-        unsafe { IsWindow(mc) != 0 && PostMessageW(mc, WM_CLOSE, 0, 0) != 0 }
+        unsafe {
+            if IsWindow(mc) != 0 {
+                let _ = PostMessageW(mc, WM_CLOSE, 0, 0);
+            }
+        }
     }
 }
 
