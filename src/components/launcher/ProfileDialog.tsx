@@ -20,9 +20,13 @@ import {
   type VersionFilter,
 } from "@/features/launcher/profileUi";
 import { useT, type MessageKey } from "@/lib/i18n";
-import { describeError } from "@/lib/i18n/errors";
+import { describeCode, describeError } from "@/lib/i18n/errors";
 import {
   LOADER_NAMES,
+  MAX_RESOLUTION_HEIGHT,
+  MAX_RESOLUTION_WIDTH,
+  MIN_RESOLUTION_HEIGHT,
+  MIN_RESOLUTION_WIDTH,
   profilesApi,
   type LoaderOption,
   type ProfileSummary,
@@ -40,6 +44,7 @@ import {
   BUTTON_SMALL_SOFT,
   BUTTON_SOFT,
   FIELD,
+  FIELD_COMPACT,
   LABEL,
 } from "./modalStyles";
 import { Segmented } from "./Segmented";
@@ -118,13 +123,15 @@ export function ProfileDialog({
     setDirty(false);
   }
 
+  const ui = useUiSettings();
+  const isAdvanced = ui.uiMode === "advanced";
   const current = profile ?? shown;
 
   return (
     <Modal
       open={isOpen}
       onOpenChange={(o) => !o && onClose()}
-      size="md"
+      size={isAdvanced ? "xl" : "md"}
       locked={saving}
       closeOnBackdrop={!dirty}
     >
@@ -186,6 +193,7 @@ function Body({
 }: BodyProps) {
   const t = useT();
   const ui = useUiSettings();
+  const isAdvanced = ui.uiMode === "advanced";
   const { min, max, auto } = ui.memory;
   const launcherDefaultMb = Math.min(max, Math.max(min, ui.memoryMb ?? auto));
 
@@ -209,6 +217,61 @@ function Body({
   const nameError = validateName(name, otherNames);
   const showNameError = nameError !== null && (nameTouched || nameError !== "validate.nameEmpty");
 
+  const savedMb = profile.memoryMb ?? null;
+  const custom = savedMb !== null;
+  const [draft, setDraft] = useState<number | null>(null);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const inFlightMb = useRef<number | null>(null);
+  const value = Math.min(max, Math.max(min, draft ?? savedMb ?? launcherDefaultMb));
+
+  const savedRes = profile.resolution ?? null;
+  const nextResKey = savedRes ? `${savedRes.width}x${savedRes.height}` : "";
+  const [prevResKey, setPrevResKey] = useState(nextResKey);
+  const [widthText, setWidthText] = useState(savedRes ? String(savedRes.width) : "1280");
+  const [heightText, setHeightText] = useState(savedRes ? String(savedRes.height) : "720");
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const [resolutionSaving, setResolutionSaving] = useState(false);
+  if (nextResKey !== prevResKey) {
+    setPrevResKey(nextResKey);
+    setWidthText(savedRes ? String(savedRes.width) : "1280");
+    setHeightText(savedRes ? String(savedRes.height) : "720");
+    setResolutionError(null);
+  }
+  const resolutionUnchanged =
+    savedRes === null ||
+    (widthText.trim() === String(savedRes.width) && heightText.trim() === String(savedRes.height));
+
+  const savedJvmArgs = useMemo(() => profile.jvmArgs ?? [], [profile.jvmArgs]);
+  const savedJvmJoined = savedJvmArgs.join(" ");
+  const [prevJvmJoined, setPrevJvmJoined] = useState(savedJvmJoined);
+  const [jvmText, setJvmText] = useState(savedJvmJoined);
+  const [jvmError, setJvmError] = useState<string | null>(null);
+  const [jvmSaving, setJvmSaving] = useState(false);
+  if (savedJvmJoined !== prevJvmJoined) {
+    setPrevJvmJoined(savedJvmJoined);
+    setJvmText(savedJvmJoined);
+    setJvmError(null);
+  }
+  const nextJvmArgs = useMemo(() => (jvmText.trim() ? jvmText.trim().split(/\s+/) : []), [jvmText]);
+  const jvmUnchanged =
+    nextJvmArgs.length === savedJvmArgs.length &&
+    nextJvmArgs.every((arg, i) => arg === savedJvmArgs[i]);
+
+  const [changingVersion, setChangingVersion] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
+
+  const computeDirty = (over?: {
+    name?: string;
+    changingVersion?: boolean;
+    resDirty?: boolean;
+    jvmDirty?: boolean;
+  }) =>
+    (over?.name ?? name) !== profile.name ||
+    (over?.changingVersion ?? changingVersion) ||
+    (over?.resDirty ?? !resolutionUnchanged) ||
+    (over?.jvmDirty ?? !jvmUnchanged);
+
   const saveRename = (e: { preventDefault: () => void }) => {
     e.preventDefault();
     setNameTouched(true);
@@ -219,7 +282,7 @@ function Body({
       (snapshot) => {
         playSound("primary");
         setSaving(false);
-        setDirty(false);
+        setDirty(computeDirty({ name: trimmed }));
         setName(trimmed);
         setNameTouched(false);
         onUpdated(snapshot);
@@ -230,13 +293,6 @@ function Body({
       },
     );
   };
-
-  const savedMb = profile.memoryMb ?? null;
-  const custom = savedMb !== null;
-  const [draft, setDraft] = useState<number | null>(null);
-  const [memoryError, setMemoryError] = useState<string | null>(null);
-  const inFlightMb = useRef<number | null>(null);
-  const value = Math.min(max, Math.max(min, draft ?? savedMb ?? launcherDefaultMb));
 
   const commitMemory = (rawMb: number) => {
     if (running || !Number.isFinite(rawMb)) return;
@@ -261,9 +317,65 @@ function Body({
     );
   };
 
-  const [changingVersion, setChangingVersion] = useState(false);
-  const [duplicating, setDuplicating] = useState(false);
-  const [filesError, setFilesError] = useState<string | null>(null);
+  const saveResolution = (e: { preventDefault: () => void }) => {
+    e.preventDefault();
+    if (running || saving || resolutionSaving || savedRes === null) return;
+    const wRaw = widthText.trim();
+    const hRaw = heightText.trim();
+    const width = /^\d+$/.test(wRaw) ? Number(wRaw) : Number.NaN;
+    const height = /^\d+$/.test(hRaw) ? Number(hRaw) : Number.NaN;
+    if (
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      width < MIN_RESOLUTION_WIDTH ||
+      width > MAX_RESOLUTION_WIDTH ||
+      height < MIN_RESOLUTION_HEIGHT ||
+      height > MAX_RESOLUTION_HEIGHT
+    ) {
+      setResolutionError(
+        describeCode("profile", "invalid_resolution", {
+          minWidth: MIN_RESOLUTION_WIDTH,
+          maxWidth: MAX_RESOLUTION_WIDTH,
+          minHeight: MIN_RESOLUTION_HEIGHT,
+          maxHeight: MAX_RESOLUTION_HEIGHT,
+        }),
+      );
+      return;
+    }
+    setResolutionSaving(true);
+    setResolutionError(null);
+    api.setResolution(profile.id, { width, height }).then(
+      (snap) => {
+        playSound("primary");
+        setResolutionSaving(false);
+        setDirty(computeDirty({ resDirty: false }));
+        onUpdated(snap);
+      },
+      (err: unknown) => {
+        setResolutionSaving(false);
+        setResolutionError(describeError("profile", err));
+      },
+    );
+  };
+
+  const saveJvmArgs = (e: { preventDefault: () => void }) => {
+    e.preventDefault();
+    if (running || saving || jvmSaving || jvmUnchanged) return;
+    setJvmSaving(true);
+    setJvmError(null);
+    api.setJvmArgs(profile.id, nextJvmArgs).then(
+      (snap) => {
+        playSound("primary");
+        setJvmSaving(false);
+        setDirty(computeDirty({ jvmDirty: false }));
+        onUpdated(snap);
+      },
+      (err: unknown) => {
+        setJvmSaving(false);
+        setJvmError(describeError("profile", err));
+      },
+    );
+  };
 
   const duplicateProfile = () => {
     if (running || saving) return;
@@ -286,215 +398,373 @@ function Body({
     );
   };
 
+  const detailsSection = (
+    <ModalSection
+      compact
+      className="gap-1.5 border-t-0 pt-0 pb-2"
+      title={t("profileModal.details")}
+    >
+      <form onSubmit={saveRename} className="flex flex-col gap-1" noValidate>
+        <label htmlFor="profile-edit-name" className={LABEL}>
+          {t("create.name")}
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            id="profile-edit-name"
+            value={name}
+            disabled={running || saving}
+            onChange={(e) => {
+              const next = e.target.value;
+              setName(next);
+              setDirty(computeDirty({ name: next }));
+              setRenameError(null);
+            }}
+            onBlur={() => setNameTouched(true)}
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={80}
+            aria-invalid={showNameError ? true : undefined}
+            aria-describedby={showNameError ? "profile-edit-name-error" : undefined}
+            className={`${FIELD} h-10 min-w-0 flex-1`}
+          />
+          <button
+            type="submit"
+            disabled={unchanged || nameError !== null || running || saving}
+            className={`${BUTTON_SOFT} h-10 shrink-0 px-4`}
+          >
+            {saving ? t("profileModal.saving") : t("profileModal.saveName")}
+          </button>
+        </div>
+        {showNameError && (
+          <p id="profile-edit-name-error" role="alert" className="text-clay-deep text-[0.8125rem]">
+            {t(nameError, { max: MAX_NAME_CHARS })}
+          </p>
+        )}
+        {renameError && !showNameError && (
+          <p role="alert" className="text-clay-deep text-[0.8125rem]">
+            {renameError}
+          </p>
+        )}
+      </form>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[0.8125rem]">
+          <div className="flex gap-2">
+            <dt className="text-ink-muted">{t("profileModal.status")}</dt>
+            <dd className="text-graphite font-medium">
+              {profile.ready ? t("profileModal.statusReady") : t("profileModal.statusPending")}
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="text-ink-muted">{t("profileModal.playtime")}</dt>
+            <dd className="text-graphite font-medium tabular-nums">
+              {formatPlaytime(profile.playtimeSeconds)}
+            </dd>
+          </div>
+        </dl>
+        {!changingVersion && (
+          <button
+            type="button"
+            disabled={running || saving}
+            className={BUTTON_SMALL_SOFT}
+            onClick={() => {
+              playSound("click");
+              setChangingVersion(true);
+              setDirty(true);
+            }}
+          >
+            {t("profileModal.changeVersion")}
+          </button>
+        )}
+      </div>
+      {changingVersion && (
+        <VersionEditor
+          profile={profile}
+          isAdvanced={isAdvanced}
+          running={running}
+          saving={saving}
+          setSaving={setSaving}
+          api={api}
+          onCancel={() => {
+            playSound("click");
+            setChangingVersion(false);
+            setDirty(computeDirty({ changingVersion: false }));
+          }}
+          onSaved={(snapshot) => {
+            setChangingVersion(false);
+            setDirty(computeDirty({ changingVersion: false }));
+            onUpdated(snapshot);
+          }}
+        />
+      )}
+    </ModalSection>
+  );
+
+  const filesSection = (
+    <ModalSection compact className="gap-1.5 py-2" title={t("profileModal.files")}>
+      <p className="text-ink-muted text-[0.8125rem]">
+        {profile.kind === "modded"
+          ? t("profileModal.filesNoteModded")
+          : t("profileModal.filesNoteVanilla")}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className={BUTTON_SMALL_SOFT}
+          onClick={() => {
+            playSound("click");
+            setFilesError(null);
+            api.openFolder(profile.id).catch((e: unknown) => {
+              setFilesError(describeError("profile", e));
+            });
+          }}
+        >
+          {t("profile.openFolder")}
+        </button>
+        <button
+          type="button"
+          disabled={verifyDisabled || saving}
+          className={BUTTON_SMALL_SOFT}
+          onClick={() => {
+            playSound("click");
+            onVerify();
+          }}
+        >
+          {t("profile.verify")}
+        </button>
+      </div>
+      {filesError && (
+        <p role="alert" className="text-clay-deep text-[0.8125rem]">
+          {filesError}
+        </p>
+      )}
+    </ModalSection>
+  );
+
+  const memorySection = (
+    <ModalSection
+      compact
+      className="gap-1.5 border-t py-2 sm:border-t-0 sm:pt-0"
+      title={t("settings.memory")}
+    >
+      <Segmented<"default" | "custom">
+        compact
+        className="self-start"
+        disabled={running}
+        label={t("settings.memory")}
+        value={custom ? "custom" : "default"}
+        onChange={(mode) => {
+          if ((mode === "custom") === custom) return;
+          playSound("select");
+          inFlightMb.current = null;
+          setDraft(null);
+          setMemoryError(null);
+          const nextMb = mode === "default" ? null : launcherDefaultMb;
+          api.setMemory(profile.id, nextMb).then(onUpdated, (e: unknown) => {
+            setMemoryError(describeError("profile", e));
+          });
+        }}
+        options={[
+          { value: "default", label: t("profileModal.memoryDefault") },
+          { value: "custom", label: t("settings.memory.custom") },
+        ]}
+      />
+      {custom ? (
+        <div className={`flex items-center gap-3 ${running ? "opacity-45" : ""}`}>
+          <input
+            id="profile-memory-slider"
+            type="range"
+            min={min}
+            max={max}
+            step={256}
+            disabled={running}
+            value={value}
+            onChange={(e) => {
+              setDraft(Number(e.target.value));
+              setMemoryError(null);
+            }}
+            onPointerUp={(e) => commitMemory(Number(e.currentTarget.value))}
+            onKeyUp={(e) => commitMemory(Number(e.currentTarget.value))}
+            onBlur={(e) => commitMemory(Number(e.currentTarget.value))}
+            aria-label={t("settings.memory.slider")}
+            aria-valuetext={formatGigabytes(value)}
+            className="accent-clay focus-visible:ring-clay/45 h-6 min-w-0 flex-1 cursor-default outline-none focus-visible:ring-2 disabled:cursor-not-allowed"
+          />
+          <span aria-hidden className="text-graphite w-14 text-right text-[0.875rem] tabular-nums">
+            {formatGigabytes(value)}
+          </span>
+        </div>
+      ) : (
+        <p className="text-ink-muted text-[0.8125rem]">
+          {t("profileModal.memoryDefaultNote", { value: formatGigabytes(launcherDefaultMb) })}
+        </p>
+      )}
+      {memoryError && (
+        <p role="alert" className="text-clay-deep text-[0.8125rem]">
+          {memoryError}
+        </p>
+      )}
+    </ModalSection>
+  );
+
+  const resolutionSection = (
+    <ModalSection compact className="gap-1.5 py-2" title={t("profileModal.resolution")}>
+      <Segmented<"default" | "fixed">
+        compact
+        className="self-start"
+        disabled={running || saving || resolutionSaving}
+        label={t("profileModal.resolution")}
+        value={savedRes !== null ? "fixed" : "default"}
+        onChange={(mode) => {
+          if ((mode === "fixed") === (savedRes !== null) || running || saving || resolutionSaving)
+            return;
+          playSound("select");
+          setResolutionError(null);
+          setResolutionSaving(true);
+          const nextRes = mode === "default" ? null : { width: 1280, height: 720 };
+          api.setResolution(profile.id, nextRes).then(
+            (snap) => {
+              setResolutionSaving(false);
+              setDirty(computeDirty({ resDirty: false }));
+              onUpdated(snap);
+            },
+            (e: unknown) => {
+              setResolutionSaving(false);
+              setResolutionError(describeError("profile", e));
+            },
+          );
+        }}
+        options={[
+          { value: "default", label: t("profileModal.resolutionDefault") },
+          { value: "fixed", label: t("profileModal.resolutionFixed") },
+        ]}
+      />
+      {savedRes !== null ? (
+        <form onSubmit={saveResolution} className="flex items-center gap-1.5" noValidate>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={4}
+            value={widthText}
+            disabled={running || saving || resolutionSaving}
+            onChange={(e) => {
+              const nextW = e.target.value;
+              setWidthText(nextW);
+              setResolutionError(null);
+              const resDirty =
+                nextW.trim() !== String(savedRes.width) ||
+                heightText.trim() !== String(savedRes.height);
+              setDirty(computeDirty({ resDirty }));
+            }}
+            aria-label={t("profileModal.resolutionWidth")}
+            className={`${FIELD_COMPACT} w-16 shrink-0 text-center tabular-nums`}
+          />
+          <span aria-hidden className="text-ink-muted text-[0.875rem]">
+            ×
+          </span>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={4}
+            value={heightText}
+            disabled={running || saving || resolutionSaving}
+            onChange={(e) => {
+              const nextH = e.target.value;
+              setHeightText(nextH);
+              setResolutionError(null);
+              const resDirty =
+                widthText.trim() !== String(savedRes.width) ||
+                nextH.trim() !== String(savedRes.height);
+              setDirty(computeDirty({ resDirty }));
+            }}
+            aria-label={t("profileModal.resolutionHeight")}
+            className={`${FIELD_COMPACT} w-16 shrink-0 text-center tabular-nums`}
+          />
+          <button
+            type="submit"
+            disabled={running || saving || resolutionSaving || resolutionUnchanged}
+            className={`${BUTTON_SMALL_SOFT} ml-auto h-9 shrink-0 px-3`}
+          >
+            {t("profileModal.applyResolution")}
+          </button>
+        </form>
+      ) : (
+        <p className="text-ink-muted text-[0.8125rem]">{t("profileModal.resolutionDefaultNote")}</p>
+      )}
+      {resolutionError && (
+        <p role="alert" className="text-clay-deep text-[0.8125rem]">
+          {resolutionError}
+        </p>
+      )}
+    </ModalSection>
+  );
+
+  const jvmArgsSection = (
+    <ModalSection compact className="gap-1.5 py-2" title={t("profileModal.jvmArgs")}>
+      <form onSubmit={saveJvmArgs} className="flex flex-col gap-1" noValidate>
+        <div className="flex items-center gap-2">
+          <input
+            id="profile-jvm-args"
+            value={jvmText}
+            disabled={running || saving || jvmSaving}
+            onChange={(e) => {
+              const nextText = e.target.value;
+              setJvmText(nextText);
+              setJvmError(null);
+              const nextTokens = nextText.trim() ? nextText.trim().split(/\s+/) : [];
+              const jvmDirty =
+                nextTokens.length !== savedJvmArgs.length ||
+                nextTokens.some((arg, i) => arg !== savedJvmArgs[i]);
+              setDirty(computeDirty({ jvmDirty }));
+            }}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t("profileModal.jvmArgsPlaceholder")}
+            aria-label={t("profileModal.jvmArgs")}
+            className={`${FIELD} h-9 min-w-0 flex-1 text-[0.8125rem]`}
+          />
+          <button
+            type="submit"
+            disabled={running || saving || jvmSaving || jvmUnchanged}
+            className={`${BUTTON_SMALL_SOFT} h-9 shrink-0 px-3`}
+          >
+            {t("profileModal.applyJvmArgs")}
+          </button>
+        </div>
+        {jvmError ? (
+          <p role="alert" className="text-clay-deep text-[0.8125rem]">
+            {jvmError}
+          </p>
+        ) : (
+          <p className="text-ink-muted text-[0.8125rem]">{t("profileModal.jvmArgsNote")}</p>
+        )}
+      </form>
+    </ModalSection>
+  );
+
   return (
     <>
       <div className="-mb-3">
         <ModalHeader title={profile.name} description={profileDetail(profile)} />
       </div>
 
-      <ModalSection
-        compact
-        className="gap-1.5 border-t-0 pt-0 pb-2"
-        title={t("profileModal.details")}
-      >
-        <form onSubmit={saveRename} className="flex flex-col gap-1" noValidate>
-          <label htmlFor="profile-edit-name" className={LABEL}>
-            {t("create.name")}
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              id="profile-edit-name"
-              value={name}
-              disabled={running || saving}
-              onChange={(e) => {
-                const next = e.target.value;
-                setName(next);
-                setDirty(next !== profile.name || changingVersion);
-                setRenameError(null);
-              }}
-              onBlur={() => setNameTouched(true)}
-              autoComplete="off"
-              spellCheck={false}
-              maxLength={80}
-              aria-invalid={showNameError ? true : undefined}
-              aria-describedby={showNameError ? "profile-edit-name-error" : undefined}
-              className={`${FIELD} h-10 min-w-0 flex-1`}
-            />
-            <button
-              type="submit"
-              disabled={unchanged || nameError !== null || running || saving}
-              className={`${BUTTON_SOFT} h-10 shrink-0 px-4`}
-            >
-              {saving ? t("profileModal.saving") : t("profileModal.saveName")}
-            </button>
+      {isAdvanced ? (
+        <div className="grid gap-x-6 sm:grid-cols-2 lg:gap-x-8">
+          <div className="flex min-w-0 flex-col">
+            {detailsSection}
+            {filesSection}
           </div>
-          {showNameError && (
-            <p
-              id="profile-edit-name-error"
-              role="alert"
-              className="text-clay-deep text-[0.8125rem]"
-            >
-              {t(nameError, { max: MAX_NAME_CHARS })}
-            </p>
-          )}
-          {renameError && !showNameError && (
-            <p role="alert" className="text-clay-deep text-[0.8125rem]">
-              {renameError}
-            </p>
-          )}
-        </form>
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[0.8125rem]">
-            <div className="flex gap-2">
-              <dt className="text-ink-muted">{t("profileModal.status")}</dt>
-              <dd className="text-graphite font-medium">
-                {profile.ready ? t("profileModal.statusReady") : t("profileModal.statusPending")}
-              </dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="text-ink-muted">{t("profileModal.playtime")}</dt>
-              <dd className="text-graphite font-medium tabular-nums">
-                {formatPlaytime(profile.playtimeSeconds)}
-              </dd>
-            </div>
-          </dl>
-          {!changingVersion && (
-            <button
-              type="button"
-              disabled={running || saving}
-              className={BUTTON_SMALL_SOFT}
-              onClick={() => {
-                playSound("click");
-                setChangingVersion(true);
-                setDirty(true);
-              }}
-            >
-              {t("profileModal.changeVersion")}
-            </button>
-          )}
-        </div>
-        {changingVersion && (
-          <VersionEditor
-            profile={profile}
-            running={running}
-            saving={saving}
-            setSaving={setSaving}
-            api={api}
-            onCancel={() => {
-              playSound("click");
-              setChangingVersion(false);
-              setDirty(name !== profile.name);
-            }}
-            onSaved={(snapshot) => {
-              setChangingVersion(false);
-              setDirty(name !== profile.name);
-              onUpdated(snapshot);
-            }}
-          />
-        )}
-      </ModalSection>
-
-      <ModalSection compact className="gap-1.5 py-2" title={t("settings.memory")}>
-        <Segmented<"default" | "custom">
-          compact
-          className="self-start"
-          disabled={running}
-          label={t("settings.memory")}
-          value={custom ? "custom" : "default"}
-          onChange={(mode) => {
-            if ((mode === "custom") === custom) return;
-            playSound("select");
-            inFlightMb.current = null;
-            setDraft(null);
-            setMemoryError(null);
-            const nextMb = mode === "default" ? null : launcherDefaultMb;
-            api.setMemory(profile.id, nextMb).then(onUpdated, (e: unknown) => {
-              setMemoryError(describeError("profile", e));
-            });
-          }}
-          options={[
-            { value: "default", label: t("profileModal.memoryDefault") },
-            { value: "custom", label: t("settings.memory.custom") },
-          ]}
-        />
-        {custom ? (
-          <div className={`flex items-center gap-3 ${running ? "opacity-45" : ""}`}>
-            <input
-              id="profile-memory-slider"
-              type="range"
-              min={min}
-              max={max}
-              step={256}
-              disabled={running}
-              value={value}
-              onChange={(e) => {
-                setDraft(Number(e.target.value));
-                setMemoryError(null);
-              }}
-              onPointerUp={(e) => commitMemory(Number(e.currentTarget.value))}
-              onKeyUp={(e) => commitMemory(Number(e.currentTarget.value))}
-              onBlur={(e) => commitMemory(Number(e.currentTarget.value))}
-              aria-label={t("settings.memory.slider")}
-              aria-valuetext={formatGigabytes(value)}
-              className="accent-clay focus-visible:ring-clay/45 h-6 min-w-0 flex-1 cursor-default outline-none focus-visible:ring-2 disabled:cursor-not-allowed"
-            />
-            <span
-              aria-hidden
-              className="text-graphite w-14 text-right text-[0.875rem] tabular-nums"
-            >
-              {formatGigabytes(value)}
-            </span>
+          <div className="flex min-w-0 flex-col">
+            {memorySection}
+            {resolutionSection}
+            {jvmArgsSection}
           </div>
-        ) : (
-          <p className="text-ink-muted text-[0.8125rem]">
-            {t("profileModal.memoryDefaultNote", { value: formatGigabytes(launcherDefaultMb) })}
-          </p>
-        )}
-        {memoryError && (
-          <p role="alert" className="text-clay-deep text-[0.8125rem]">
-            {memoryError}
-          </p>
-        )}
-      </ModalSection>
-
-      <ModalSection compact className="gap-1.5 py-2" title={t("profileModal.files")}>
-        <p className="text-ink-muted text-[0.8125rem]">
-          {profile.kind === "modded"
-            ? t("profileModal.filesNoteModded")
-            : t("profileModal.filesNoteVanilla")}
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            className={BUTTON_SMALL_SOFT}
-            onClick={() => {
-              playSound("click");
-              setFilesError(null);
-              api.openFolder(profile.id).catch((e: unknown) => {
-                setFilesError(describeError("profile", e));
-              });
-            }}
-          >
-            {t("profile.openFolder")}
-          </button>
-          <button
-            type="button"
-            disabled={verifyDisabled || saving}
-            className={BUTTON_SMALL_SOFT}
-            onClick={() => {
-              playSound("click");
-              onVerify();
-            }}
-          >
-            {t("profile.verify")}
-          </button>
         </div>
-        {filesError && (
-          <p role="alert" className="text-clay-deep text-[0.8125rem]">
-            {filesError}
-          </p>
-        )}
-      </ModalSection>
+      ) : (
+        <div className="flex min-w-0 flex-col">
+          {detailsSection}
+          {filesSection}
+        </div>
+      )}
 
       <ModalFooter>
         <button
@@ -534,6 +804,7 @@ function Body({
 
 interface VersionEditorProps {
   profile: ProfileSummary;
+  isAdvanced: boolean;
   running: boolean;
   saving: boolean;
   setSaving: (saving: boolean) => void;
@@ -544,6 +815,7 @@ interface VersionEditorProps {
 
 function VersionEditor({
   profile,
+  isAdvanced,
   running,
   saving,
   setSaving,
@@ -577,7 +849,7 @@ function VersionEditor({
       (data) => {
         if (cancelled) return;
         const match = data.entries.find((e) => e.id === profile.minecraft);
-        const initialFilter = filterForKind(match?.kind);
+        const initialFilter = isAdvanced ? filterForKind(match?.kind) : "releases";
         setFilter(initialFilter);
         setCatalogResult({ key: reload, state: { status: "ready", data } });
         const list = filterVersions(data.entries, initialFilter);
@@ -599,45 +871,53 @@ function VersionEditor({
     return () => {
       cancelled = true;
     };
-  }, [reload, api, profile.minecraft]);
+  }, [reload, api, profile.minecraft, isAdvanced]);
+
+  const activeFilter: VersionFilter = isAdvanced ? filter : "releases";
+  const entries = useMemo(
+    () => (catalog.status === "ready" ? catalog.data.entries : []),
+    [catalog],
+  );
+  const shown = useMemo(() => filterVersions(entries, activeFilter), [entries, activeFilter]);
+  const selectedMc =
+    catalog.status === "ready"
+      ? shown.some((e) => e.id === mc)
+        ? mc
+        : (defaultVersion(catalog.data, shown, activeFilter) ?? mc)
+      : mc;
 
   const moddedLoader = profile.kind === "modded" ? profile.loader : null;
 
   useEffect(() => {
-    if (!moddedLoader || !mc) return;
+    if (!moddedLoader || !selectedMc) return;
     let cancelled = false;
-    api.loaderOptions(mc).then(
+    api.loaderOptions(selectedMc).then(
       (options) => {
-        if (!cancelled) setLoaderResult({ mc, options });
+        if (!cancelled) setLoaderResult({ mc: selectedMc, options });
       },
       () => {
-        if (!cancelled) setLoaderResult({ mc, options: null });
+        if (!cancelled) setLoaderResult({ mc: selectedMc, options: null });
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [moddedLoader, mc, api]);
+  }, [moddedLoader, selectedMc, api]);
 
-  const entries = useMemo(
-    () => (catalog.status === "ready" ? catalog.data.entries : []),
-    [catalog],
-  );
-  const shown = useMemo(() => filterVersions(entries, filter), [entries, filter]);
-  const loaderForMc = loaderResult?.mc === mc ? loaderResult : null;
+  const loaderForMc = loaderResult?.mc === selectedMc ? loaderResult : null;
   const loaderFailed = loaderForMc !== null && loaderForMc.options === null;
-  const loadingLoaders = moddedLoader !== null && !!mc && loaderForMc === null;
+  const loadingLoaders = moddedLoader !== null && !!selectedMc && loaderForMc === null;
   const currentLoader = moddedLoader
     ? loaderForMc?.options?.find((o) => o.loader === moddedLoader)
     : undefined;
   const chosenLoaderVersion = currentLoader
-    ? loaderVersion && currentLoader.versions.some((v) => v.version === loaderVersion)
+    ? isAdvanced && loaderVersion && currentLoader.versions.some((v) => v.version === loaderVersion)
       ? loaderVersion
       : currentLoader.recommended
     : null;
 
   const isUnchanged =
-    mc === profile.minecraft &&
+    selectedMc === profile.minecraft &&
     (moddedLoader === null ||
       (chosenLoaderVersion !== null && chosenLoaderVersion === profile.loaderVersion));
 
@@ -645,7 +925,7 @@ function VersionEditor({
     !running &&
     !saving &&
     catalog.status === "ready" &&
-    !!mc &&
+    !!selectedMc &&
     !isUnchanged &&
     (moddedLoader === null ||
       (!loadingLoaders && currentLoader?.status === "ok" && !!chosenLoaderVersion));
@@ -672,7 +952,7 @@ function VersionEditor({
       moddedLoader && chosenLoaderVersion
         ? ({ mode: "pinned", version: chosenLoaderVersion } as const)
         : null;
-    api.setVersion(profile.id, mc, choice).then(
+    api.setVersion(profile.id, selectedMc, choice).then(
       (snapshot) => {
         playSound("primary");
         setSaving(false);
@@ -685,6 +965,17 @@ function VersionEditor({
     );
   };
 
+  const loaderIssue = loaderFailed
+    ? t("create.loaderCheckFailed")
+    : currentLoader && currentLoader.status !== "ok"
+      ? currentLoader.status === "none"
+        ? t("create.loaderNone", {
+            loader: LOADER_NAMES[moddedLoader!],
+            minecraft: selectedMc,
+          })
+        : t("create.loaderUnchecked", { loader: LOADER_NAMES[moddedLoader!] })
+      : null;
+
   return (
     <div className="bg-sand/35 ring-graphite/10 mt-1 flex flex-col gap-2.5 rounded-2xl p-3 ring-1">
       <div className="flex min-w-0 flex-col gap-1">
@@ -692,23 +983,25 @@ function VersionEditor({
           <span id="profile-edit-mc-label" className={LABEL}>
             {t("create.mcVersion")}
           </span>
-          <Segmented
-            variant="plain"
-            label={t("create.filterLabel")}
-            value={filter}
-            onChange={(f) => {
-              playSound("click");
-              changeFilter(f);
-            }}
-            options={(Object.keys(FILTER_KEYS) as VersionFilter[]).map((f) => ({
-              value: f,
-              label: t(FILTER_KEYS[f]),
-            }))}
-          />
+          {isAdvanced && (
+            <Segmented
+              variant="plain"
+              label={t("create.filterLabel")}
+              value={filter}
+              onChange={(f) => {
+                playSound("click");
+                changeFilter(f);
+              }}
+              options={(Object.keys(FILTER_KEYS) as VersionFilter[]).map((f) => ({
+                value: f,
+                label: t(FILTER_KEYS[f]),
+              }))}
+            />
+          )}
         </div>
         {catalog.status === "ready" ? (
           <Select
-            value={mc}
+            value={selectedMc}
             onValueChange={(v) => {
               if (typeof v === "string") {
                 playSound("select");
@@ -765,70 +1058,62 @@ function VersionEditor({
         )}
       </div>
 
-      {moddedLoader && (
-        <div className="flex min-w-0 flex-col gap-1">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-            <span id="profile-edit-loader-label" className={LABEL}>
-              {t("profileModal.loaderVersionFor", { loader: LOADER_NAMES[moddedLoader] })}
-            </span>
-            {loaderFailed ? (
-              <span className="text-clay-deep text-[0.75rem]">{t("create.loaderCheckFailed")}</span>
-            ) : currentLoader && currentLoader.status !== "ok" ? (
-              <span className="text-clay-deep text-[0.75rem]">
-                {currentLoader.status === "none"
-                  ? t("create.loaderNone", {
-                      loader: LOADER_NAMES[moddedLoader],
-                      minecraft: mc,
-                    })
-                  : t("create.loaderUnchecked", { loader: LOADER_NAMES[moddedLoader] })}
+      {moddedLoader &&
+        (isAdvanced ? (
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+              <span id="profile-edit-loader-label" className={LABEL}>
+                {t("profileModal.loaderVersionFor", { loader: LOADER_NAMES[moddedLoader] })}
               </span>
-            ) : null}
+              {loaderIssue && <span className="text-clay-deep text-[0.75rem]">{loaderIssue}</span>}
+            </div>
+            <Select
+              value={chosenLoaderVersion}
+              disabled={!currentLoader || currentLoader.status !== "ok"}
+              onValueChange={(v) => {
+                if (typeof v === "string") {
+                  playSound("select");
+                  setLoaderVersion(v);
+                  setSubmitError(null);
+                }
+              }}
+              items={(currentLoader?.versions ?? []).map((v) => ({
+                value: v.version,
+                label:
+                  v.version === currentLoader?.recommended
+                    ? t("create.versionRecommended", { version: v.version })
+                    : v.version,
+              }))}
+            >
+              <SelectTrigger
+                aria-labelledby="profile-edit-loader-label"
+                className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+              >
+                <SelectValue
+                  placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
+                />
+              </SelectTrigger>
+              <SelectContent
+                alignItemWithTrigger={false}
+                sideOffset={6}
+                className="max-h-56 rounded-xl p-1"
+              >
+                {(currentLoader?.versions ?? []).map((v) => (
+                  <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
+                    <span className="flex-1">{v.version}</span>
+                    <span className="text-cream/45 pr-4 text-[0.75rem]">
+                      {v.version === currentLoader?.recommended
+                        ? t("create.channel.recommended")
+                        : t(CHANNEL_NOTE[v.channel])}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <Select
-            value={chosenLoaderVersion}
-            disabled={!currentLoader || currentLoader.status !== "ok"}
-            onValueChange={(v) => {
-              if (typeof v === "string") {
-                playSound("select");
-                setLoaderVersion(v);
-                setSubmitError(null);
-              }
-            }}
-            items={(currentLoader?.versions ?? []).map((v) => ({
-              value: v.version,
-              label:
-                v.version === currentLoader?.recommended
-                  ? t("create.versionRecommended", { version: v.version })
-                  : v.version,
-            }))}
-          >
-            <SelectTrigger
-              aria-labelledby="profile-edit-loader-label"
-              className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
-            >
-              <SelectValue
-                placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
-              />
-            </SelectTrigger>
-            <SelectContent
-              alignItemWithTrigger={false}
-              sideOffset={6}
-              className="max-h-56 rounded-xl p-1"
-            >
-              {(currentLoader?.versions ?? []).map((v) => (
-                <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
-                  <span className="flex-1">{v.version}</span>
-                  <span className="text-cream/45 pr-4 text-[0.75rem]">
-                    {v.version === currentLoader?.recommended
-                      ? t("create.channel.recommended")
-                      : t(CHANNEL_NOTE[v.channel])}
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
+        ) : loaderIssue ? (
+          <p className="text-clay-deep text-[0.75rem]">{loaderIssue}</p>
+        ) : null)}
 
       <p className="text-ink-muted text-[0.8125rem]">
         {moddedLoader ? t("profileModal.versionModdedNote") : t("profileModal.versionKeepNote")}

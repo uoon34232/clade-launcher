@@ -4,7 +4,7 @@ import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { LaunchApi, RunState } from "@/lib/launch/api";
 import type { ProfileSummary, ProfilesApi, ProfilesSnapshot } from "@/lib/profiles/api";
-import { resetUiSettings } from "@/lib/settings/uiSettings";
+import { resetUiSettings, saveUiMode } from "@/lib/settings/uiSettings";
 import { readyAccountsClient } from "@/test/testAccounts";
 import { LauncherHome } from "./LauncherHome";
 
@@ -27,6 +27,8 @@ const profile = (over: Partial<ProfileSummary> = {}): ProfileSummary => ({
   ready: true,
   playtimeSeconds: 5400,
   memoryMb: null,
+  resolution: null,
+  jvmArgs: [],
   ...over,
 });
 
@@ -96,6 +98,20 @@ function setup(
       current = {
         ...current,
         profiles: current.profiles.map((p) => (p.id === id ? { ...p, memoryMb: mb } : p)),
+      };
+      return Promise.resolve(current);
+    }),
+    setResolution: vi.fn<ProfilesApi["setResolution"]>((id, resolution) => {
+      current = {
+        ...current,
+        profiles: current.profiles.map((p) => (p.id === id ? { ...p, resolution } : p)),
+      };
+      return Promise.resolve(current);
+    }),
+    setJvmArgs: vi.fn<ProfilesApi["setJvmArgs"]>((id, args) => {
+      current = {
+        ...current,
+        profiles: current.profiles.map((p) => (p.id === id ? { ...p, jvmArgs: [...args] } : p)),
       };
       return Promise.resolve(current);
     }),
@@ -220,7 +236,30 @@ beforeEach(async () => {
 afterEach(() => cleanup());
 
 describe("Profile settings dialog", () => {
+  it("in Simple mode shows details and files only, hiding Memory, Window size, JVM arguments and version filters", async () => {
+    setup(snap([profile()]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+    expect(d.getByRole("heading", { name: "Survival" })).toBeTruthy();
+    expect(d.getByText("Profile")).toBeTruthy();
+    expect(d.getByText("Files")).toBeTruthy();
+    expect(d.queryByText("Memory")).toBeNull();
+    expect(d.queryByText("Window size")).toBeNull();
+    expect(d.queryByText("JVM arguments")).toBeNull();
+
+    fireEvent.click(d.getByRole("button", { name: "Change version…" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "1.21.4",
+      ),
+    );
+    expect(d.queryByRole("radiogroup", { name: "Which versions to list" })).toBeNull();
+  });
+
   it("shows header details, Ready vs Needs setup, playtime, default memory, Vanilla vs Modded notes, and actions", async () => {
+    await saveUiMode("advanced");
     const modded = profile({
       id: "fabric-pack",
       name: "Fabric Pack",
@@ -368,6 +407,7 @@ describe("Profile settings dialog", () => {
   });
 
   it("switches memory between Launcher default and Custom, commits 256 MiB slider steps, clamps saved values, and words invalid_memory", async () => {
+    await saveUiMode("advanced");
     const { api } = setup(snap([profile()]));
     await flush();
 
@@ -434,6 +474,79 @@ describe("Profile settings dialog", () => {
     expect(lowSlider.getAttribute("aria-valuetext")).toBe("1 GB");
   });
 
+  it("configures Window size and JVM arguments in Advanced mode and surfaces validation errors inline", async () => {
+    await saveUiMode("advanced");
+    const { api } = setup(snap([profile()]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+
+    // Window size starts at Game default
+    expect(d.getByRole("radio", { name: "Game default" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(d.getByText("Starts with Minecraft’s standard window size.")).toBeTruthy();
+
+    // Switching to Fixed size calls setResolution with 1280x720
+    fireEvent.click(d.getByRole("radio", { name: "Fixed size" }));
+    await waitFor(() =>
+      expect(api.setResolution).toHaveBeenCalledWith("survival", { width: 1280, height: 720 }),
+    );
+    const widthInput = await d.findByLabelText<HTMLInputElement>("Window width");
+    const heightInput = d.getByLabelText<HTMLInputElement>("Window height");
+    expect(widthInput.value).toBe("1280");
+    expect(heightInput.value).toBe("720");
+
+    // Out-of-range dimensions are caught inline without calling the backend
+    fireEvent.change(widthInput, { target: { value: "100" } });
+    fireEvent.click(d.getByRole("button", { name: "Apply size" }));
+    expect((await d.findByRole("alert")).textContent).toBe(
+      "Choose a window size between 320×240 and 7680×4320.",
+    );
+    expect(api.setResolution).toHaveBeenCalledTimes(1);
+
+    // Valid dimensions commit
+    fireEvent.change(widthInput, { target: { value: "1920" } });
+    fireEvent.change(heightInput, { target: { value: "1080" } });
+    fireEvent.click(d.getByRole("button", { name: "Apply size" }));
+    await waitFor(() =>
+      expect(api.setResolution).toHaveBeenCalledWith("survival", { width: 1920, height: 1080 }),
+    );
+
+    // Back to Game default clears resolution
+    fireEvent.click(d.getByRole("radio", { name: "Game default" }));
+    await waitFor(() => expect(api.setResolution).toHaveBeenCalledWith("survival", null));
+    expect(await d.findByText("Starts with Minecraft’s standard window size.")).toBeTruthy();
+
+    // JVM arguments: commit valid flags, handle backend refusal, and clear flags
+    const jvmInput = d.getByLabelText<HTMLInputElement>("JVM arguments");
+    const applyFlags = d.getByRole<HTMLButtonElement>("button", { name: "Apply flags" });
+    expect(applyFlags.disabled).toBe(true);
+
+    fireEvent.change(jvmInput, {
+      target: { value: " -XX:+UseStringDeduplication  -Dfml.readTimeout=120 " },
+    });
+    expect(applyFlags.disabled).toBe(false);
+    fireEvent.click(applyFlags);
+    await waitFor(() =>
+      expect(api.setJvmArgs).toHaveBeenCalledWith("survival", [
+        "-XX:+UseStringDeduplication",
+        "-Dfml.readTimeout=120",
+      ]),
+    );
+    expect(applyFlags.disabled).toBe(true);
+
+    api.setJvmArgs.mockRejectedValueOnce(new BackendError("forbidden", "invalid_jvm_args"));
+    fireEvent.change(jvmInput, { target: { value: "-Xmx4G" } });
+    fireEvent.click(applyFlags);
+    expect((await d.findByRole("alert")).textContent).toMatch(/Only safe JVM flags/);
+
+    fireEvent.change(jvmInput, { target: { value: "   " } });
+    fireEvent.click(applyFlags);
+    await waitFor(() => expect(api.setJvmArgs).toHaveBeenCalledWith("survival", []));
+  });
+
   it("opens the profile folder from menu and dialog (surfacing open_failed), and delegates Verify files and Remove from Clade…", async () => {
     const { api } = setup(snap([profile(), profile({ id: "b", name: "Beta" })]));
     await flush();
@@ -473,10 +586,14 @@ describe("Profile settings dialog", () => {
   });
 
   it("disables edits, verification and removal while launching or playing, keeping Open profile folder and Done active", async () => {
-    const { api } = setup(snap([profile({ memoryMb: 6144 })]), {
-      running: "survival",
-      runState: "launching",
-    });
+    await saveUiMode("advanced");
+    const { api } = setup(
+      snap([profile({ memoryMb: 6144, resolution: { width: 1280, height: 720 } })]),
+      {
+        running: "survival",
+        runState: "launching",
+      },
+    );
     await flush();
 
     const dialog = await openProfileSettings();
@@ -491,6 +608,13 @@ describe("Profile settings dialog", () => {
     expect(d.getByRole<HTMLInputElement>("slider", { name: "Memory for Minecraft" }).disabled).toBe(
       true,
     );
+    expect(d.getByRole<HTMLButtonElement>("radio", { name: "Game default" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("radio", { name: "Fixed size" }).disabled).toBe(true);
+    expect(d.getByLabelText<HTMLInputElement>("Window width").disabled).toBe(true);
+    expect(d.getByLabelText<HTMLInputElement>("Window height").disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Apply size" }).disabled).toBe(true);
+    expect(d.getByLabelText<HTMLInputElement>("JVM arguments").disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Apply flags" }).disabled).toBe(true);
     expect(d.getByRole<HTMLButtonElement>("button", { name: "Verify files" }).disabled).toBe(true);
     expect(d.getByRole<HTMLButtonElement>("button", { name: "Remove from Clade…" }).disabled).toBe(
       true,
@@ -537,6 +661,7 @@ describe("unreadable profile folders recovery strip", () => {
 describe("Profile settings and unreadable notice in Russian", () => {
   it("renders ProfileDialog, errors and the unreadable folders strip in Russian", async () => {
     setLocale("ru");
+    await saveUiMode("advanced");
     const { api } = setup(snap([profile()], { unreadable: ["broken-world", "corrupt-pack"] }));
     await flush();
 
@@ -560,6 +685,11 @@ describe("Profile settings and unreadable notice in Russian", () => {
     expect(d.getByRole("radio", { name: "По умолчанию" })).toBeTruthy();
     expect(d.getByRole("radio", { name: "Своя" })).toBeTruthy();
     expect(d.getByText("Как в настройках лаунчера (4 ГБ на этом компьютере).")).toBeTruthy();
+    expect(d.getByText("Размер окна")).toBeTruthy();
+    expect(d.getByRole("radio", { name: "Стандартный" })).toBeTruthy();
+    expect(d.getByRole("radio", { name: "Заданный" })).toBeTruthy();
+    expect(d.getByLabelText("Аргументы JVM")).toBeTruthy();
+    expect(d.getByRole("button", { name: "Применить флаги" })).toBeTruthy();
     expect(d.getByText("Файлы")).toBeTruthy();
     expect(
       d.getByText("Миры, ресурспаки, скриншоты и настройки хранятся в папке профиля."),
@@ -588,6 +718,7 @@ describe("Profile settings and unreadable notice in Russian", () => {
 
   it("changes a profile's Minecraft version in place and duplicates a profile onto the new copy", async () => {
     setLocale("en");
+    await saveUiMode("advanced");
     const { api } = setup(snap([profile()]));
     await flush();
 

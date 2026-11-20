@@ -259,6 +259,15 @@ describe("structured backend errors are worded in the current language", () => {
     expect(describeCode("profile", "invalid_memory", { min: 1024, max: 12288 })).toBe(
       "That amount of memory isn't safe for this computer. Choose between 1 GB and 12 GB.",
     );
+    expect(
+      describeCode("profile", "invalid_resolution", {
+        minWidth: 320,
+        maxWidth: 7680,
+        minHeight: 240,
+        maxHeight: 4320,
+      }),
+    ).toBe("Choose a window size between 320×240 and 7680×4320.");
+    expect(describeCode("profile", "invalid_jvm_args")).toMatch(/safe JVM flags/);
     expect(describeCode("profile", "open_failed")).toBe("Windows couldn't open that folder.");
     setLocale("ru");
     expect(
@@ -272,6 +281,15 @@ describe("structured backend errors are worded in the current language", () => {
     expect(describeCode("profile", "invalid_memory", { min: 1024, max: 12288 })).toBe(
       "Такой объём памяти небезопасен для этого компьютера. Выбери от 1 ГБ до 12 ГБ.",
     );
+    expect(
+      describeCode("profile", "invalid_resolution", {
+        minWidth: 320,
+        maxWidth: 7680,
+        minHeight: 240,
+        maxHeight: 4320,
+      }),
+    ).toBe("Выбери размер окна от 320×240 до 7680×4320.");
+    expect(describeCode("profile", "invalid_jvm_args")).toMatch(/безопасные флаги JVM/);
     expect(describeCode("profile", "open_failed")).toBe("Windows не смог открыть эту папку.");
     expect(describeCode("launch", "needs_sign_in")).toBe(
       "Этому аккаунту нужно войти снова, чтобы играть.",
@@ -388,6 +406,8 @@ describe("structured backend errors are worded in the current language", () => {
         "sign_in_unavailable",
         "unsupported_value",
         "invalid_memory",
+        "invalid_resolution",
+        "invalid_jvm_args",
         "diagnostics_failed",
         // removing or duplicating a profile
         "already_running",
@@ -415,6 +435,8 @@ describe("structured backend errors are worded in the current language", () => {
       "loader_version_not_offered",
       "invalid_name",
       "invalid_memory",
+      "invalid_resolution",
+      "invalid_jvm_args",
       "open_failed",
       "already_running",
       "busy",

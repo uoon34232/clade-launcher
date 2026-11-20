@@ -10,11 +10,13 @@ import {
   saveMemory,
   saveReducedMotion,
   saveTransparency,
+  saveUiMode,
   type MotionMode,
   type OnExit,
   type OnLaunch,
   type SaveResult,
   type TransparencyMode,
+  type UiMode,
 } from "@/lib/settings/uiSettings";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound, sound } from "@/lib/sound/soundService";
@@ -44,6 +46,7 @@ interface Props {
  */
 export function SettingsDialog({ open, onOpenChange, support = supportApi }: Props) {
   const t = useT();
+  const ui = useUiSettings();
   // A pending "Reset settings?" confirmation must not be dismissed by a stray click or Escape.
   const [confirming, setConfirming] = useState(false);
   const close = (next: boolean) => {
@@ -53,8 +56,24 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
 
   return (
     <Modal open={open} onOpenChange={close} size="xl" locked={confirming}>
-      <div className="-mb-4">
-        <ModalHeader title={t("settings.title")} />
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-4">
+        <div className="-mb-5">
+          <ModalHeader title={t("settings.title")} />
+        </div>
+        <Segmented<UiMode>
+          compact
+          disabled={confirming}
+          label={t("settings.mode")}
+          value={ui.uiMode}
+          onChange={(mode) => {
+            playSound("select");
+            void saveUiMode(mode);
+          }}
+          options={[
+            { value: "simple", label: t("settings.mode.simple") },
+            { value: "advanced", label: t("settings.mode.advanced") },
+          ]}
+        />
       </div>
       <SettingsBody
         support={support}
@@ -79,17 +98,23 @@ function SettingsBody({
 }) {
   const t = useT();
   const s = useUiSettings();
+  const isAdvanced = s.uiMode === "advanced";
 
   return (
     <>
       <div className="grid gap-x-6 sm:grid-cols-2 lg:gap-x-8">
         <div className="flex min-w-0 flex-col">
-          <InterfaceSection />
-          <MinecraftSection />
+          <InterfaceSection isAdvanced={isAdvanced} />
+          {isAdvanced && <MinecraftSection />}
         </div>
         <div className="flex min-w-0 flex-col">
-          <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} />
-          <SupportSection support={support} confirming={confirming} setConfirming={setConfirming} />
+          {isAdvanced && <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} />}
+          <SupportSection
+            support={support}
+            isAdvanced={isAdvanced}
+            confirming={confirming}
+            setConfirming={setConfirming}
+          />
         </div>
       </div>
       <div className="border-graphite/10 mt-1 flex items-center justify-between gap-4 border-t pt-2">
@@ -147,7 +172,7 @@ function Row({
 
 // ------------------------------------------------------------------------------ Interface
 
-function InterfaceSection() {
+function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
   const t = useT();
   const locale = useLocale();
   const ui = useUiSettings();
@@ -209,39 +234,43 @@ function InterfaceSection() {
         />
       </div>
 
-      <Row id="motion-label" label={t("settings.motion")} stacked>
-        <Segmented<MotionMode>
-          compact
-          label={t("settings.motion")}
-          value={ui.reducedMotion}
-          onChange={(mode) => {
-            playSound("select");
-            void saveReducedMotion(mode);
-          }}
-          options={[
-            { value: "system", label: t("settings.motion.system") },
-            { value: "on", label: t("settings.motion.on") },
-            { value: "off", label: t("settings.motion.off") },
-          ]}
-        />
-      </Row>
+      {isAdvanced && (
+        <>
+          <Row id="motion-label" label={t("settings.motion")} stacked>
+            <Segmented<MotionMode>
+              compact
+              label={t("settings.motion")}
+              value={ui.reducedMotion}
+              onChange={(mode) => {
+                playSound("select");
+                void saveReducedMotion(mode);
+              }}
+              options={[
+                { value: "system", label: t("settings.motion.system") },
+                { value: "on", label: t("settings.motion.on") },
+                { value: "off", label: t("settings.motion.off") },
+              ]}
+            />
+          </Row>
 
-      <Row id="transparency-label" label={t("settings.transparency")} stacked>
-        <Segmented<TransparencyMode>
-          compact
-          label={t("settings.transparency")}
-          value={ui.transparency}
-          onChange={(mode) => {
-            playSound("select");
-            void saveTransparency(mode);
-          }}
-          options={[
-            { value: "system", label: t("settings.transparency.system") },
-            { value: "on", label: t("settings.transparency.on") },
-            { value: "off", label: t("settings.transparency.off") },
-          ]}
-        />
-      </Row>
+          <Row id="transparency-label" label={t("settings.transparency")} stacked>
+            <Segmented<TransparencyMode>
+              compact
+              label={t("settings.transparency")}
+              value={ui.transparency}
+              onChange={(mode) => {
+                playSound("select");
+                void saveTransparency(mode);
+              }}
+              options={[
+                { value: "system", label: t("settings.transparency.system") },
+                { value: "on", label: t("settings.transparency.on") },
+                { value: "off", label: t("settings.transparency.off") },
+              ]}
+            />
+          </Row>
+        </>
+      )}
     </ModalSection>
   );
 }
@@ -365,10 +394,12 @@ type Notice = { kind: "ok" | "error"; text: string } | null;
 
 function SupportSection({
   support,
+  isAdvanced,
   confirming,
   setConfirming,
 }: {
   support: SupportApi;
+  isAdvanced: boolean;
   confirming: boolean;
   setConfirming: (v: boolean) => void;
 }) {
@@ -450,21 +481,25 @@ function SupportSection({
             >
               {t("settings.openFolder")}
             </button>
-            <button
-              type="button"
-              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
-              onClick={() => run(() => support.openLogsFolder())}
-            >
-              {t("common.openLogs")}
-            </button>
-            <button
-              type="button"
-              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
-              disabled={exporting}
-              onClick={exportDiagnostics}
-            >
-              {exporting ? t("settings.exporting") : t("settings.exportDiagnostics")}
-            </button>
+            {isAdvanced && (
+              <>
+                <button
+                  type="button"
+                  className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
+                  onClick={() => run(() => support.openLogsFolder())}
+                >
+                  {t("common.openLogs")}
+                </button>
+                <button
+                  type="button"
+                  className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
+                  disabled={exporting}
+                  onClick={exportDiagnostics}
+                >
+                  {exporting ? t("settings.exporting") : t("settings.exportDiagnostics")}
+                </button>
+              </>
+            )}
             <button
               ref={resetTriggerRef}
               type="button"
@@ -478,7 +513,9 @@ function SupportSection({
               {t("settings.reset")}
             </button>
           </div>
-          <p className="text-ink-muted text-[0.8125rem]">{t("settings.diagnosticsNote")}</p>
+          {isAdvanced && (
+            <p className="text-ink-muted text-[0.8125rem]">{t("settings.diagnosticsNote")}</p>
+          )}
         </>
       )}
       {notice && (

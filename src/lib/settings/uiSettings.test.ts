@@ -26,6 +26,7 @@ import {
   saveReducedMotion,
   saveSoundSettings,
   saveTransparency,
+  saveUiMode,
   subscribeUiSettings,
 } from "./uiSettings";
 
@@ -174,6 +175,8 @@ describe("inside the launcher (Tauri)", () => {
   });
 
   it("sends each Settings change through its own command and reports a refusal", async () => {
+    expect(await saveUiMode("advanced")).toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledWith("set_ui_mode", { mode: "advanced" });
     expect(await saveReducedMotion("on")).toEqual({ ok: true });
     expect(invoke).toHaveBeenCalledWith("set_reduced_motion", { mode: "on" });
     expect(await saveMemory(4096)).toEqual({ ok: true });
@@ -274,11 +277,13 @@ describe("the live settings copy", () => {
   it("keeps session-only values and tells subscribers, with no backend and no browser storage", async () => {
     const seen: number[] = [];
     const off = subscribeUiSettings(() => seen.push(getUiSettings().memoryMb ?? -1));
+    expect(await saveUiMode("advanced")).toEqual({ ok: true });
     expect(await saveMemory(8192)).toEqual({ ok: true });
     expect(await saveReducedMotion("off")).toEqual({ ok: true });
     await saveBehavior({ onLaunch: "keep_open", onExit: "stay_hidden" });
     await completeOnboarding();
     expect(getUiSettings()).toMatchObject({
+      uiMode: "advanced",
       memoryMb: 8192,
       reducedMotion: "off",
       onLaunch: "keep_open",
@@ -289,6 +294,7 @@ describe("the live settings copy", () => {
     // a reset puts the preferences back, but never the introduction
     await resetUiSettings();
     expect(getUiSettings()).toMatchObject({
+      uiMode: "simple",
       memoryMb: null,
       reducedMotion: "system",
       onLaunch: "hide",
@@ -297,5 +303,13 @@ describe("the live settings copy", () => {
     });
     off();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("defaults uiMode to simple and repairs unknown values", () => {
+    expect(DEFAULT_UI_SETTINGS.uiMode).toBe("simple");
+    expect(parseUiSettings({ uiMode: "advanced" }).uiMode).toBe("advanced");
+    for (const bad of ["expert", "", 1, null, {}]) {
+      expect(parseUiSettings({ uiMode: bad }).uiMode).toBe("simple");
+    }
   });
 });

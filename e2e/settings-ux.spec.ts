@@ -10,7 +10,86 @@ const openSettings = async (page: Page) => {
   return dialog;
 };
 
+test.describe("simple and advanced mode", () => {
+  test("starts in Simple mode, switches live to Advanced and back, and fits 960x600 in English and Russian", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+    const dialog = await openSettings(page);
+
+    const modeGroup = dialog.getByRole("radiogroup", { name: text("settings.mode") });
+    await expect(
+      modeGroup.getByRole("radio", { name: text("settings.mode.simple") }),
+    ).toBeChecked();
+    expect(await dialog.getByRole("heading", { level: 3 }).allTextContents()).toEqual([
+      text("settings.interface"),
+      text("settings.support"),
+    ]);
+    await expect(dialog.getByRole("radiogroup", { name: text("settings.motion") })).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: text("settings.exportDiagnostics") }),
+    ).toHaveCount(0);
+    expect(
+      await dialog.evaluate((el) => ({
+        vertical: el.scrollHeight <= el.clientHeight + 1,
+        horizontal: el.scrollWidth <= el.clientWidth + 1,
+      })),
+    ).toEqual({ vertical: true, horizontal: true });
+
+    // Switch live to Advanced
+    await modeGroup.getByRole("radio", { name: text("settings.mode.advanced") }).click();
+    await expect(
+      modeGroup.getByRole("radio", { name: text("settings.mode.advanced") }),
+    ).toBeChecked();
+    await expect.poll(async () => (await backend.state()).ui.uiMode).toBe("advanced");
+    expect((await backend.calls("set_ui_mode")).map((c) => c.args)).toEqual([{ mode: "advanced" }]);
+    expect(await dialog.getByRole("heading", { level: 3 }).allTextContents()).toEqual([
+      text("settings.interface"),
+      text("settings.minecraft"),
+      text("settings.behavior"),
+      text("settings.support"),
+    ]);
+    await expect(dialog.getByRole("radiogroup", { name: text("settings.motion") })).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: text("settings.exportDiagnostics") }),
+    ).toBeVisible();
+    expect(
+      await dialog.evaluate((el) => ({
+        vertical: el.scrollHeight <= el.clientHeight + 1,
+        horizontal: el.scrollWidth <= el.clientWidth + 1,
+      })),
+    ).toEqual({ vertical: true, horizontal: true });
+
+    // Russian in Advanced mode also fits 960x600
+    await dialog.getByRole("radio", { name: "Русский" }).click();
+    const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+    await expect(ruDialog.getByRole("radiogroup", { name: textRu("settings.mode") })).toBeVisible();
+    expect(
+      await ruDialog.evaluate((el) => ({
+        vertical: el.scrollHeight <= el.clientHeight + 1,
+        horizontal: el.scrollWidth <= el.clientWidth + 1,
+      })),
+    ).toEqual({ vertical: true, horizontal: true });
+
+    // Switch back to Simple in Russian
+    await ruDialog
+      .getByRole("radiogroup", { name: textRu("settings.mode") })
+      .getByRole("radio", { name: textRu("settings.mode.simple") })
+      .click();
+    await expect.poll(async () => (await backend.state()).ui.uiMode).toBe("simple");
+    expect(await ruDialog.getByRole("heading", { level: 3 }).allTextContents()).toEqual([
+      textRu("settings.interface"),
+      textRu("settings.support"),
+    ]);
+  });
+});
+
 test.describe("settings sections", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("shows Interface, Minecraft, Behavior and Support, and nothing else", async ({
     page,
     openApp,
@@ -49,6 +128,7 @@ test.describe("settings sections", () => {
       textRu("settings.behavior"),
       textRu("settings.support"),
     ]);
+    await expect(dialog.getByRole("radiogroup", { name: textRu("settings.mode") })).toBeVisible();
     await expect(dialog.getByRole("radiogroup", { name: textRu("settings.motion") })).toBeVisible();
     await expect(
       dialog.getByRole("button", { name: textRu("settings.exportDiagnostics") }),
@@ -58,6 +138,8 @@ test.describe("settings sections", () => {
 });
 
 test.describe("reduced motion", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("offers Follow Windows, On and Off, and applies the choice at once", async ({
     page,
     backend,
@@ -90,7 +172,9 @@ test.describe("reduced motion", () => {
 });
 
 test.describe("reduced motion saved as On", () => {
-  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, reducedMotion: "on" } } });
+  test.use({
+    backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced", reducedMotion: "on" } },
+  });
 
   test("is applied when the launcher starts", async ({ page, openApp }) => {
     await openApp();
@@ -105,6 +189,8 @@ test.describe("reduced motion saved as On", () => {
 });
 
 test.describe("memory", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("is Automatic by default and says what that means", async ({ page, openApp }) => {
     await openApp();
     const dialog = await openSettings(page);
@@ -178,7 +264,9 @@ test.describe("memory", () => {
 });
 
 test.describe("memory saved as Custom", () => {
-  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, memoryMb: 6144 } } });
+  test.use({
+    backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced", memoryMb: 6144 } },
+  });
 
   test("opens on Custom with the saved amount", async ({ page, openApp }) => {
     await openApp();
@@ -195,6 +283,7 @@ test.describe("memory saved above what a smaller computer allows", () => {
     backendConfig: {
       ui: {
         ...DEFAULT_CONFIG.ui,
+        uiMode: "advanced",
         memoryMb: 16384,
         memory: { min: 1024, max: 6144, auto: 4096, total: 8192 },
       },
@@ -214,6 +303,8 @@ test.describe("memory saved above what a smaller computer allows", () => {
 });
 
 test.describe("behavior around the game", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("hides Clade on launch and shows it again on exit by default, and saves each choice", async ({
     page,
     backend,
@@ -247,6 +338,8 @@ test.describe("behavior around the game", () => {
 });
 
 test.describe("support actions", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("Open Clade folder and Open logs ask the backend, which opens its own folders", async ({
     page,
     backend,
@@ -303,6 +396,8 @@ test.describe("support actions", () => {
 });
 
 test.describe("reset settings", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("asks first, and Keep settings changes nothing", async ({ page, backend, openApp }) => {
     await openApp();
     const dialog = await openSettings(page);
@@ -349,27 +444,25 @@ test.describe("reset settings", () => {
     await dialog.getByRole("button", { name: text("settings.resetDo") }).click();
     await expect(dialog.getByText(text("settings.resetConfirm"))).toHaveCount(0);
 
+    await expect(
+      dialog
+        .getByRole("radiogroup", { name: text("settings.mode") })
+        .getByRole("radio", { name: text("settings.mode.simple") }),
+    ).toBeChecked();
     await expect(dialog.getByRole("switch", { name: text("settings.sound") })).toBeChecked();
-    await expect(
-      dialog
-        .getByRole("radiogroup", { name: text("settings.motion") })
-        .getByRole("radio", { name: text("settings.motion.system") }),
-    ).toBeChecked();
-    await expect(
-      dialog
-        .getByRole("radiogroup", { name: text("settings.transparency") })
-        .getByRole("radio", { name: text("settings.transparency.system") }),
-    ).toBeChecked();
-    await expect(dialog.getByRole("radio", { name: text("settings.memory.auto") })).toBeChecked();
-    await expect(dialog.getByRole("radio", { name: text("settings.onLaunch.hide") })).toBeChecked();
+    await expect(dialog.getByRole("heading", { name: text("settings.minecraft") })).toHaveCount(0);
+    await expect(dialog.getByRole("heading", { name: text("settings.behavior") })).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-motion", "system");
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "on");
     const ui = (await backend.state()).ui;
-    expect([ui.soundEnabled, ui.reducedMotion, ui.memoryMb, ui.onLaunch]).toEqual([
-      true,
-      "system",
-      null,
-      "hide",
-    ]);
+    expect([
+      ui.uiMode,
+      ui.soundEnabled,
+      ui.reducedMotion,
+      ui.transparency,
+      ui.memoryMb,
+      ui.onLaunch,
+    ]).toEqual(["simple", true, "system", "system", null, "hide"]);
     // the introduction stays seen, and the change touched nothing but the settings
     expect(ui.onboardingDone).toBe(true);
     expect(await backend.calls("reset_settings")).toHaveLength(1);
@@ -417,6 +510,10 @@ test.describe("settings persistence", () => {
   }) => {
     await openApp();
     const dialog = await openSettings(page);
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.mode") })
+      .getByRole("radio", { name: text("settings.mode.advanced") })
+      .click();
     await dialog.getByRole("switch", { name: text("settings.sound") }).click();
     await dialog
       .getByRole("radiogroup", { name: text("settings.motion") })
@@ -432,7 +529,13 @@ test.describe("settings persistence", () => {
       .click();
     await expect.poll(async () => (await backend.state()).ui.memoryMb).toBe(4096);
     const commands = (await backend.calls()).map((c) => c.cmd);
-    for (const sent of ["set_sound_settings", "set_reduced_motion", "set_behavior", "set_memory"]) {
+    for (const sent of [
+      "set_ui_mode",
+      "set_sound_settings",
+      "set_reduced_motion",
+      "set_behavior",
+      "set_memory",
+    ]) {
       expect(commands, sent).toContain(sent);
     }
     const stored = await page.evaluate(async () => ({
@@ -446,6 +549,8 @@ test.describe("settings persistence", () => {
 });
 
 test.describe("transparency effects", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   const html = (page: Page) => page.locator("html");
   const group = (dialog: Awaited<ReturnType<typeof openSettings>>) =>
     dialog.getByRole("radiogroup", { name: text("settings.transparency") });
@@ -552,7 +657,10 @@ test.describe("transparency effects", () => {
 
 test.describe("transparency effects when Windows has them off", () => {
   test.use({
-    backendConfig: { windows: { transparencyEffects: false, highContrast: false } },
+    backendConfig: {
+      ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      windows: { transparencyEffects: false, highContrast: false },
+    },
   });
 
   test("Follow Windows is opaque, and On asks for glass but says Windows is not drawing it", async ({
@@ -573,7 +681,10 @@ test.describe("transparency effects when Windows has them off", () => {
 
 test.describe("transparency effects with Windows High Contrast", () => {
   test.use({
-    backendConfig: { windows: { transparencyEffects: true, highContrast: true } },
+    backendConfig: {
+      ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      windows: { transparencyEffects: true, highContrast: true },
+    },
   });
 
   test("stay opaque even when On is chosen", async ({ page, openApp }) => {

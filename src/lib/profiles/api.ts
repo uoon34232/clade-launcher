@@ -23,6 +23,16 @@ export const LOADER_NAMES: Readonly<Record<LoaderKind, string>> = {
 export type VersionKind = "release" | "snapshot" | "old_beta" | "old_alpha";
 export type Channel = "recommended" | "stable" | "latest" | "prerelease";
 
+export const MIN_RESOLUTION_WIDTH = 320;
+export const MAX_RESOLUTION_WIDTH = 7680;
+export const MIN_RESOLUTION_HEIGHT = 240;
+export const MAX_RESOLUTION_HEIGHT = 4320;
+
+export interface ProfileResolution {
+  width: number;
+  height: number;
+}
+
 export interface ProfileSummary {
   id: string;
   name: string;
@@ -36,6 +46,10 @@ export interface ProfileSummary {
   playtimeSeconds: number;
   /** Per-profile memory override in MiB, or null to follow Launcher Settings. */
   memoryMb?: number | null;
+  /** Custom initial game window resolution, or null for Minecraft's default. */
+  resolution?: ProfileResolution | null;
+  /** Validated extra JVM arguments for this profile. */
+  jvmArgs?: readonly string[];
 }
 
 export interface ProfilesSnapshot {
@@ -104,6 +118,39 @@ const isLoader = (v: unknown): v is LoaderKind =>
 const VERSION_KINDS: readonly string[] = ["release", "snapshot", "old_beta", "old_alpha"];
 const CHANNELS: readonly string[] = ["recommended", "stable", "latest", "prerelease"];
 
+const MAX_JVM_ARGS = 64;
+const MAX_JVM_ARG_LEN = 512;
+
+function parseResolution(raw: unknown): ProfileResolution | null {
+  if (!isObj(raw)) return null;
+  const { width, height } = raw;
+  if (
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < MIN_RESOLUTION_WIDTH ||
+    width > MAX_RESOLUTION_WIDTH ||
+    height < MIN_RESOLUTION_HEIGHT ||
+    height > MAX_RESOLUTION_HEIGHT
+  ) {
+    return null;
+  }
+  return { width, height };
+}
+
+function parseJvmArgs(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item === "string" && item.length > 0 && item.length <= MAX_JVM_ARG_LEN) {
+      out.push(item);
+      if (out.length >= MAX_JVM_ARGS) break;
+    }
+  }
+  return out;
+}
+
 export function parseProfiles(raw: unknown): ProfilesSnapshot {
   const o = isObj(raw) ? raw : {};
   const profiles: ProfileSummary[] = [];
@@ -126,6 +173,8 @@ export function parseProfiles(raw: unknown): ProfilesSnapshot {
         typeof p.memoryMb === "number" && Number.isFinite(p.memoryMb) && p.memoryMb > 0
           ? p.memoryMb
           : null,
+      resolution: parseResolution(p.resolution),
+      jvmArgs: parseJvmArgs(p.jvmArgs),
     });
   }
   const unreadable: string[] = [];
@@ -272,6 +321,10 @@ export const profilesApi = {
     parseProfiles(await call("rename_profile", { id, name })),
   setMemory: async (id: string, mb: number | null) =>
     parseProfiles(await call("set_profile_memory", { id, mb })),
+  setResolution: async (id: string, resolution: ProfileResolution | null) =>
+    parseProfiles(await call("set_profile_resolution", { id, resolution })),
+  setJvmArgs: async (id: string, args: readonly string[]) =>
+    parseProfiles(await call("set_profile_jvm_args", { id, args: [...args] })),
   setVersion: async (
     id: string,
     minecraft: string,

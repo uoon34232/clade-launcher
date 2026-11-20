@@ -138,6 +138,12 @@ function makeProfiles() {
     setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
+    setResolution: vi.fn<ProfilesApi["setResolution"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    setJvmArgs: vi.fn<ProfilesApi["setJvmArgs"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
     setVersion: vi.fn<ProfilesApi["setVersion"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),

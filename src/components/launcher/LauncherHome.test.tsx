@@ -8,6 +8,7 @@ import type {
   VersionCatalog,
 } from "@/lib/profiles/api";
 import { BackendError } from "@/lib/ipc";
+import { resetUiSettings, saveUiMode } from "@/lib/settings/uiSettings";
 import { LauncherHome } from "./LauncherHome";
 import { readyAccountsClient } from "@/test/testAccounts";
 
@@ -118,6 +119,12 @@ function makeApi(initial: ProfilesSnapshot) {
     setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
+    setResolution: vi.fn<ProfilesApi["setResolution"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    setJvmArgs: vi.fn<ProfilesApi["setJvmArgs"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
     setVersion: vi.fn<ProfilesApi["setVersion"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
@@ -137,7 +144,8 @@ const empty: ProfilesSnapshot = { profiles: [], selected: null, totalPlaytimeSec
 const flush = async () => act(async () => void (await Promise.resolve()));
 const dialog = () => screen.getByRole("dialog");
 
-beforeEach(() => {
+beforeEach(async () => {
+  await resetUiSettings();
   // jsdom lacks these; the dialog and select primitives expect them.
   globalThis.ResizeObserver ??= class {
     observe() {}
@@ -307,7 +315,35 @@ describe("Create profile", () => {
     ).toBeTruthy();
   });
 
+  it("in Simple mode hides version filters and loader version picker, creating Modded with the recommended loader version", async () => {
+    const api = makeApi(empty);
+    await openDialog(api);
+    const d = within(dialog());
+    expect(d.queryByRole("radiogroup", { name: "Which versions to list" })).toBeNull();
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "Simple Modded" } });
+    fireEvent.click(d.getByRole("radio", { name: "Modded" }));
+
+    await waitFor(() =>
+      expect(d.getByRole<HTMLButtonElement>("radio", { name: "Fabric" }).disabled).toBe(false),
+    );
+    expect(d.queryByRole("combobox", { name: "Loader version" })).toBeNull();
+
+    fireEvent.click(d.getByRole("radio", { name: "Forge" }));
+    fireEvent.click(d.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(api.create).toHaveBeenCalled());
+    expect(api.create.mock.calls[0][0]).toEqual({
+      name: "Simple Modded",
+      minecraft: "26.3",
+      profile: {
+        type: "modded",
+        loader: "forge",
+        loader_version: { mode: "pinned", version: "54.1.14" },
+      },
+    });
+  });
+
   it("Modded reveals the loader fields, offers only compatible loaders, and creates with the recommended version", async () => {
+    await saveUiMode("advanced");
     const api = makeApi(empty);
     await openDialog(api);
     const d = within(dialog());
@@ -356,6 +392,7 @@ describe("Create profile", () => {
   });
 
   it("filters the version list: releases by default, snapshots and historical on request", async () => {
+    await saveUiMode("advanced");
     const api = makeApi(empty);
     await openDialog(api);
     const d = within(dialog());

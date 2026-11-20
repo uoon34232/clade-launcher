@@ -13,6 +13,60 @@ async function openProfileSettings(page: Page) {
 }
 
 test.describe("profile settings", () => {
+  test("in Simple mode shows details and files only, hides advanced sections, and fits 960x600 in English and Russian", async ({
+    page,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+
+    const fits = async () =>
+      page.getByRole("dialog").evaluate((el) => ({
+        vertical: el.scrollHeight <= el.clientHeight + 1,
+        horizontal: el.scrollWidth <= el.clientWidth + 1,
+      }));
+
+    const dialog = await openProfileSettings(page);
+    expect(await dialog.getByRole("heading", { level: 3 }).allTextContents()).toEqual([
+      text("profileModal.details"),
+      text("profileModal.files"),
+    ]);
+    await expect(dialog.getByRole("heading", { name: text("settings.memory") })).toHaveCount(0);
+    await expect(
+      dialog.getByRole("heading", { name: text("profileModal.resolution") }),
+    ).toHaveCount(0);
+    await expect(dialog.getByRole("heading", { name: text("profileModal.jvmArgs") })).toHaveCount(
+      0,
+    );
+    expect(await fits()).toEqual({ vertical: true, horizontal: true });
+
+    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await expect(dialog.getByRole("combobox", { name: text("create.mcVersion") })).toBeVisible();
+    await expect(dialog.getByRole("radiogroup", { name: text("create.filterLabel") })).toHaveCount(
+      0,
+    );
+    await dialog.getByRole("button", { name: text("common.cancel") }).click();
+    await dialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await settingsButton(page).click();
+    await page
+      .getByRole("dialog", { name: text("settings.title") })
+      .getByRole("radio", { name: "Русский" })
+      .click();
+    await page.getByRole("button", { name: textRu("common.done") }).click();
+
+    await profileTrigger(page).click();
+    await page.getByRole("menuitem", { name: textRu("profile.settings") }).click();
+    const ruDialog = page.getByRole("dialog");
+    await expect(ruDialog).toBeVisible();
+    expect(await ruDialog.getByRole("heading", { level: 3 }).allTextContents()).toEqual([
+      textRu("profileModal.details"),
+      textRu("profileModal.files"),
+    ]);
+    expect(await fits()).toEqual({ vertical: true, horizontal: true });
+  });
+
   test("shows profile status, playtime and files note, and renames (including case-only and duplicate refusal)", async ({
     page,
     backend,
@@ -86,6 +140,98 @@ test.describe("profile settings", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
+  test("opens the profile folder from menu and dialog, and hands off Verify files and Remove from Clade…", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+
+    // Direct menu item
+    await profileTrigger(page).click();
+    await page.getByRole("menuitem", { name: text("profile.openFolder") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect
+      .poll(async () => (await backend.calls("open_profile_folder")).map((c) => c.args))
+      .toEqual([{ id: SURVIVAL.id }]);
+
+    // Inside ProfileDialog + open_failed
+    const dialog = await openProfileSettings(page);
+    await dialog.getByRole("button", { name: text("profile.openFolder") }).click();
+    await expect.poll(async () => (await backend.calls("open_profile_folder")).length).toBe(2);
+
+    await backend.failNext("open_profile_folder", "open_failed");
+    await dialog.getByRole("button", { name: text("profile.openFolder") }).click();
+    await expect(dialog.getByRole("alert")).toHaveText(text("error.profile.open_failed"));
+
+    // Verify files handoff
+    await dialog.getByRole("button", { name: text("profile.verify") }).click();
+    await expect
+      .poll(async () => (await backend.calls("prepare_profile")).map((c) => c.args))
+      .toEqual([{ id: SURVIVAL.id, verify: true }]);
+    await backend.finishPrepare();
+    const readyDialog = page.getByRole("dialog", { name: text("prepare.ready") });
+    await expect(readyDialog).toBeVisible();
+    await readyDialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    // Remove from Clade… handoff
+    const reopened = await openProfileSettings(page);
+    await reopened.getByRole("button", { name: text("profile.remove") }).click();
+    const removeDialog = page.getByRole("dialog", {
+      name: text("removeProfile.title", { profile: SURVIVAL.name }),
+    });
+    await expect(removeDialog).toBeVisible();
+    await removeDialog.getByRole("button", { name: text("common.cancel") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("duplicates a profile and changes its Minecraft version without touching the original", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openProfileSettings(page);
+
+    // Duplicate "Survival" -> "Survival (2)" and switch straight onto the new copy
+    await dialog.getByRole("button", { name: text("profileModal.duplicate") }).click();
+    await expect
+      .poll(async () => (await backend.calls("duplicate_profile")).map((c) => c.args))
+      .toEqual([{ id: SURVIVAL.id }]);
+    await expect(dialog.getByRole("heading", { name: "Survival (2)" })).toBeVisible();
+    await expect(dialog.getByLabel(text("create.name"))).toHaveValue("Survival (2)");
+
+    // Change the copy's Minecraft version to 1.21.1 -> flips copy to Needs setup + dock Set up
+    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await dialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    await page.getByRole("option", { name: /^1\.21\.1/ }).click();
+    await dialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
+
+    await expect(
+      dialog.getByText(text("profileModal.statusPending"), { exact: true }),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(profileTrigger(page)).toHaveAccessibleName(
+      text("profile.trigger", { label: "Survival (2)" }),
+    );
+    await expect(playButton(page)).toHaveText(text("play.setup"));
+
+    // Original "Survival" stays Ready on 1.21.4
+    const snap = await backend.state();
+    const orig = snap.profiles.find((p) => p.id === SURVIVAL.id);
+    const copy = snap.profiles.find((p) => p.name === "Survival (2)");
+    expect(orig?.minecraft).toBe("1.21.4");
+    expect(orig?.ready).toBe(true);
+    expect(copy?.minecraft).toBe("1.21.1");
+    expect(copy?.ready).toBe(false);
+  });
+});
+
+test.describe("profile settings: Advanced mode", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("switches between Launcher default and Custom memory with 256 MiB keyboard steps and words invalid_memory", async ({
     page,
     backend,
@@ -141,50 +287,77 @@ test.describe("profile settings", () => {
     await expect.poll(async () => (await backend.state()).profiles[0]?.memoryMb).toBeNull();
   });
 
-  test("opens the profile folder from menu and dialog, and hands off Verify files and Remove from Clade…", async ({
+  test("configures Window size and JVM arguments and explains invalid values", async ({
     page,
     backend,
     openApp,
   }) => {
     await openApp();
-
-    // Direct menu item
-    await profileTrigger(page).click();
-    await page.getByRole("menuitem", { name: text("profile.openFolder") }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expect
-      .poll(async () => (await backend.calls("open_profile_folder")).map((c) => c.args))
-      .toEqual([{ id: SURVIVAL.id }]);
-
-    // Inside ProfileDialog + open_failed
     const dialog = await openProfileSettings(page);
-    await dialog.getByRole("button", { name: text("profile.openFolder") }).click();
-    await expect.poll(async () => (await backend.calls("open_profile_folder")).length).toBe(2);
 
-    await backend.failNext("open_profile_folder", "open_failed");
-    await dialog.getByRole("button", { name: text("profile.openFolder") }).click();
-    await expect(dialog.getByRole("alert")).toHaveText(text("error.profile.open_failed"));
+    const resGroup = dialog.getByRole("radiogroup", { name: text("profileModal.resolution") });
+    await expect(
+      resGroup.getByRole("radio", { name: text("profileModal.resolutionDefault") }),
+    ).toBeChecked();
+    await expect(dialog.getByText(text("profileModal.resolutionDefaultNote"))).toBeVisible();
 
-    // Verify files handoff
-    await dialog.getByRole("button", { name: text("profile.verify") }).click();
+    await resGroup.getByRole("radio", { name: text("profileModal.resolutionFixed") }).click();
     await expect
-      .poll(async () => (await backend.calls("prepare_profile")).map((c) => c.args))
-      .toEqual([{ id: SURVIVAL.id, verify: true }]);
-    await backend.finishPrepare();
-    const readyDialog = page.getByRole("dialog", { name: text("prepare.ready") });
-    await expect(readyDialog).toBeVisible();
-    await readyDialog.getByRole("button", { name: text("common.done") }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+      .poll(async () => (await backend.state()).profiles[0]?.resolution)
+      .toEqual({ width: 1280, height: 720 });
 
-    // Remove from Clade… handoff
-    const reopened = await openProfileSettings(page);
-    await reopened.getByRole("button", { name: text("profile.remove") }).click();
-    const removeDialog = page.getByRole("dialog", {
-      name: text("removeProfile.title", { profile: SURVIVAL.name }),
-    });
-    await expect(removeDialog).toBeVisible();
-    await removeDialog.getByRole("button", { name: text("common.cancel") }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const width = dialog.getByLabel(text("profileModal.resolutionWidth"));
+    const height = dialog.getByLabel(text("profileModal.resolutionHeight"));
+    const applySize = dialog.getByRole("button", { name: text("profileModal.applyResolution") });
+    await expect(width).toHaveValue("1280");
+    await expect(height).toHaveValue("720");
+    await expect(applySize).toBeDisabled();
+
+    // Out-of-range dimensions are caught cleanly without calling the backend
+    await width.fill("100");
+    await applySize.click();
+    await expect(dialog.getByRole("alert")).toHaveText(
+      text("error.profile.invalid_resolution", {
+        minWidth: 320,
+        maxWidth: 7680,
+        minHeight: 240,
+        maxHeight: 4320,
+      }),
+    );
+    expect(await backend.calls("set_profile_resolution")).toHaveLength(1);
+
+    await width.fill("1920");
+    await height.fill("1080");
+    await applySize.click();
+    await expect
+      .poll(async () => (await backend.state()).profiles[0]?.resolution)
+      .toEqual({ width: 1920, height: 1080 });
+
+    await resGroup.getByRole("radio", { name: text("profileModal.resolutionDefault") }).click();
+    await expect.poll(async () => (await backend.state()).profiles[0]?.resolution).toBeNull();
+
+    // JVM arguments
+    const jvmInput = dialog.getByLabel(text("profileModal.jvmArgs"));
+    const applyFlags = dialog.getByRole("button", { name: text("profileModal.applyJvmArgs") });
+    await expect(applyFlags).toBeDisabled();
+
+    await jvmInput.fill("-XX:+UseStringDeduplication -Dfml.readTimeout=120");
+    await expect(applyFlags).toBeEnabled();
+    await applyFlags.click();
+    await expect
+      .poll(async () => (await backend.state()).profiles[0]?.jvmArgs)
+      .toEqual(["-XX:+UseStringDeduplication", "-Dfml.readTimeout=120"]);
+    await expect(applyFlags).toBeDisabled();
+
+    // Forbidden flag refused by backend
+    await jvmInput.fill("-Xmx4G");
+    await applyFlags.click();
+    await expect(dialog.getByRole("alert")).toHaveText(text("error.profile.invalid_jvm_args"));
+
+    // Clearing flags
+    await jvmInput.fill("");
+    await applyFlags.click();
+    await expect.poll(async () => (await backend.state()).profiles[0]?.jvmArgs).toEqual([]);
   });
 
   test("locks edits, verification and removal while the game runs, while Open profile folder and Done still work", async ({
@@ -194,12 +367,14 @@ test.describe("profile settings", () => {
   }) => {
     await openApp();
 
-    // Set custom memory first so the slider is also visible during the lock check
+    // Set custom memory and fixed window size first so all controls are visible during the lock check
     const initial = await openProfileSettings(page);
     await initial.getByRole("radio", { name: text("settings.memory.custom") }).click();
     await expect(
       initial.getByRole("slider", { name: text("settings.memory.slider") }),
     ).toBeVisible();
+    await initial.getByRole("radio", { name: text("profileModal.resolutionFixed") }).click();
+    await expect(initial.getByLabel(text("profileModal.resolutionWidth"))).toBeVisible();
     await initial.getByRole("button", { name: text("common.done") }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -220,6 +395,21 @@ test.describe("profile settings", () => {
     ).toBeDisabled();
     await expect(
       dialog.getByRole("slider", { name: text("settings.memory.slider") }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("radio", { name: text("profileModal.resolutionDefault") }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("radio", { name: text("profileModal.resolutionFixed") }),
+    ).toBeDisabled();
+    await expect(dialog.getByLabel(text("profileModal.resolutionWidth"))).toBeDisabled();
+    await expect(dialog.getByLabel(text("profileModal.resolutionHeight"))).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: text("profileModal.applyResolution") }),
+    ).toBeDisabled();
+    await expect(dialog.getByLabel(text("profileModal.jvmArgs"))).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: text("profileModal.applyJvmArgs") }),
     ).toBeDisabled();
     await expect(dialog.getByRole("button", { name: text("profile.verify") })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: text("profile.remove") })).toBeDisabled();
@@ -243,7 +433,7 @@ test.describe("profile settings", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
-  test("fits inside the minimum 960x600 window in both English and Russian (Launcher default and Custom memory)", async ({
+  test("fits inside the minimum 960x600 window in both English and Russian (Custom memory and Fixed window size)", async ({
     page,
     openApp,
   }) => {
@@ -256,17 +446,20 @@ test.describe("profile settings", () => {
         horizontal: el.scrollWidth <= el.clientWidth + 1,
       }));
 
-    // English: Launcher default and Custom slider states
+    // English: defaults and expanded Custom memory + Fixed window size
     const enDialog = await openProfileSettings(page);
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
 
     await enDialog.getByRole("radio", { name: text("settings.memory.custom") }).click();
+    await enDialog.getByRole("radio", { name: text("profileModal.resolutionFixed") }).click();
     await expect(
       enDialog.getByRole("slider", { name: text("settings.memory.slider") }),
     ).toBeVisible();
+    await expect(enDialog.getByLabel(text("profileModal.resolutionWidth"))).toBeVisible();
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
 
     await enDialog.getByRole("radio", { name: text("profileModal.memoryDefault") }).click();
+    await enDialog.getByRole("radio", { name: text("profileModal.resolutionDefault") }).click();
     await enDialog.getByRole("button", { name: text("common.done") }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -279,7 +472,7 @@ test.describe("profile settings", () => {
     await page.getByRole("button", { name: textRu("common.done") }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
-    // Russian: Launcher default and Custom slider states
+    // Russian: defaults and expanded Custom memory + Fixed window size
     await profileTrigger(page).click();
     await page.getByRole("menuitem", { name: textRu("profile.settings") }).click();
     const ruDialog = page.getByRole("dialog");
@@ -294,52 +487,12 @@ test.describe("profile settings", () => {
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
 
     await ruDialog.getByRole("radio", { name: textRu("settings.memory.custom") }).click();
+    await ruDialog.getByRole("radio", { name: textRu("profileModal.resolutionFixed") }).click();
     await expect(
       ruDialog.getByRole("slider", { name: textRu("settings.memory.slider") }),
     ).toBeVisible();
+    await expect(ruDialog.getByLabel(textRu("profileModal.resolutionWidth"))).toBeVisible();
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
-  });
-
-  test("duplicates a profile and changes its Minecraft version without touching the original", async ({
-    page,
-    backend,
-    openApp,
-  }) => {
-    await openApp();
-    const dialog = await openProfileSettings(page);
-
-    // Duplicate "Survival" -> "Survival (2)" and switch straight onto the new copy
-    await dialog.getByRole("button", { name: text("profileModal.duplicate") }).click();
-    await expect
-      .poll(async () => (await backend.calls("duplicate_profile")).map((c) => c.args))
-      .toEqual([{ id: SURVIVAL.id }]);
-    await expect(dialog.getByRole("heading", { name: "Survival (2)" })).toBeVisible();
-    await expect(dialog.getByLabel(text("create.name"))).toHaveValue("Survival (2)");
-
-    // Change the copy's Minecraft version to 1.21.1 -> flips copy to Needs setup + dock Set up
-    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
-    await dialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
-    await page.getByRole("option", { name: /^1\.21\.1/ }).click();
-    await dialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
-
-    await expect(
-      dialog.getByText(text("profileModal.statusPending"), { exact: true }),
-    ).toBeVisible();
-    await dialog.getByRole("button", { name: text("common.done") }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expect(profileTrigger(page)).toHaveAccessibleName(
-      text("profile.trigger", { label: "Survival (2)" }),
-    );
-    await expect(playButton(page)).toHaveText(text("play.setup"));
-
-    // Original "Survival" stays Ready on 1.21.4
-    const snap = await backend.state();
-    const orig = snap.profiles.find((p) => p.id === SURVIVAL.id);
-    const copy = snap.profiles.find((p) => p.name === "Survival (2)");
-    expect(orig?.minecraft).toBe("1.21.4");
-    expect(orig?.ready).toBe(true);
-    expect(copy?.minecraft).toBe("1.21.1");
-    expect(copy?.ready).toBe(false);
   });
 });
 

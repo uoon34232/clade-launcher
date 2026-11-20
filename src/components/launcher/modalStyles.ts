@@ -1,8 +1,10 @@
 // Shared styling for everything inside a Modal, so every secondary surface has the same fields,
 // labels and buttons.
 
-export const FIELD =
-  "h-11 w-full rounded-xl bg-sand/45 px-3.5 text-[0.9375rem] text-graphite outline-none transition-shadow duration-200 placeholder:text-ink-muted/60 focus-visible:ring-2 focus-visible:ring-clay/45";
+const FIELD_SURFACE =
+  "rounded-xl bg-sand/45 text-graphite outline-none transition-shadow duration-200 placeholder:text-ink-muted/60 focus-visible:ring-2 focus-visible:ring-clay/45";
+export const FIELD = `${FIELD_SURFACE} h-11 w-full px-3.5 text-[0.9375rem]`;
+export const FIELD_COMPACT = `${FIELD_SURFACE} h-9 px-2.5 text-[0.875rem]`;
 export const LABEL = "text-[0.8125rem] font-medium text-ink-muted";
 
 const BUTTON =

@@ -12,6 +12,8 @@ export interface FixtureProfile {
   ready: boolean;
   playtimeSeconds: number;
   memoryMb?: number | null;
+  resolution?: { width: number; height: number } | null;
+  jvmArgs?: string[];
 }
 
 export interface FixtureAccount {
@@ -34,6 +36,7 @@ export interface FixtureUiSettings {
   lastPhrase: string | null;
   language: "en" | "ru" | null;
   systemLocale: string | null;
+  uiMode: "simple" | "advanced";
   reducedMotion: "system" | "on" | "off";
   transparency: "system" | "on" | "off";
   onboardingDone: boolean;
@@ -218,6 +221,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     // Explicit English, so the run does not depend on the machine's language.
     language: "en",
     systemLocale: "en-US",
+    uiMode: "simple",
     reducedMotion: "system",
     transparency: "system",
     // Most tests are not about the introduction, so it counts as already seen; its own tests turn it on.
