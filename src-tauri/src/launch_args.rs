@@ -830,10 +830,13 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
                 .get("DISPLAY")
                 .is_some_and(|d| !d.is_empty())
         {
-            env.remove("WAYLAND_DISPLAY");
+            // Point WAYLAND_DISPLAY at a nonexistent socket name rather than unsetting it, because
+            // libwayland-client's `wl_display_connect(NULL)` falls back to "wayland-0" when unset.
+            env.insert("WAYLAND_DISPLAY".to_owned(), "clade-x11-embed".to_owned());
             env.insert("XDG_SESSION_TYPE".to_owned(), "x11".to_owned());
             env.insert("GDK_BACKEND".to_owned(), "x11".to_owned());
             env.insert("SDL_VIDEODRIVER".to_owned(), "x11".to_owned());
+            env.insert("SDL_VIDEO_DRIVER".to_owned(), "x11".to_owned());
         }
     }
 

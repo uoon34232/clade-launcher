@@ -21,7 +21,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 /// Event announcing a change to the framed game embedding state.
 pub const EMBED_EVENT: &str = "game-embed-state";
 
-const POLL_IDLE: Duration = Duration::from_millis(80);
+const POLL_IDLE: Duration = Duration::from_millis(16);
 const POLL_ACTIVE: Duration = Duration::from_millis(24);
 const FALLBACK_TOP_PX: i32 = 44;
 const FALLBACK_MARGIN_PX: i32 = 14;
@@ -80,6 +80,7 @@ struct ActiveSession {
     game_win: AtomicU64,
     attached: AtomicBool,
     maximized: AtomicBool,
+    maximize_grace_until: Mutex<Option<std::time::Instant>>,
     restore_size: Mutex<Option<PhysicalSize<u32>>>,
     restore_pos: Mutex<Option<PhysicalPosition<i32>>>,
     close_requested: AtomicBool,
@@ -96,6 +97,7 @@ impl ActiveSession {
             game_win: AtomicU64::new(0),
             attached: AtomicBool::new(false),
             maximized: AtomicBool::new(false),
+            maximize_grace_until: Mutex::new(None),
             restore_size: Mutex::new(None),
             restore_pos: Mutex::new(None),
             close_requested: AtomicBool::new(false),
@@ -264,6 +266,11 @@ pub fn toggle_game_maximize(app: AppHandle, state: State<'_, EmbedState>) -> Gam
             .is_maximized()
             .unwrap_or_else(|_| session.maximized.load(Ordering::Acquire));
         let next = !cur;
+        *session
+            .maximize_grace_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now() + Duration::from_millis(450));
         if next {
             let _ = w.maximize();
         } else {
@@ -298,6 +305,15 @@ pub fn on_host_resized(app: &AppHandle) {
     };
     if !session.attached.load(Ordering::Acquire) {
         return;
+    }
+    if let Some(deadline) = *session
+        .maximize_grace_until
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+    {
+        if std::time::Instant::now() < deadline {
+            return;
+        }
     }
     if let Some(w) = app.get_webview_window("main") {
         if let Ok(actual) = w.is_maximized() {
@@ -343,6 +359,7 @@ pub fn start_session(app: AppHandle, instance_id: String, pid: u32) {
         );
         return;
     };
+    tracing::info!(instance = %instance_id, pid, "watching for game window to embed");
     let state = app.state::<EmbedState>();
     let session = state.begin(instance_id, pid);
 
@@ -385,6 +402,10 @@ pub fn end_session(app: &AppHandle, instance_id: &str) {
 fn mark_attached(app: &AppHandle, session: &ActiveSession, win_id: u64) {
     session.game_win.store(win_id, Ordering::Release);
     if !session.attached.swap(true, Ordering::AcqRel) {
+        tracing::info!(
+            instance = %session.instance_id,
+            "embedded game window into Clade stage"
+        );
         if let Some(w) = app.get_webview_window("main") {
             if let Ok(sz) = w.inner_size() {
                 *session
@@ -443,7 +464,7 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 
         let mc_hwnd = mc_id as usize as win32::HWND;
         let (bounds, seq) = active_bounds(&app);
-        if seq != last_seq {
+        if seq != last_seq || win32::needs_bounds_sync(mc_hwnd, bounds) {
             win32::apply_bounds(mc_hwnd, bounds);
             last_seq = seq;
         }
@@ -467,20 +488,29 @@ fn run_watcher_x11(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
         return;
     };
     let host_xid = host_id as x11::Window;
+    let existing_windows = api.collect_all_windows(dpy);
+    let mut pids = x11::process_tree_pids(session.pid);
     let mut last_seq = u64::MAX;
-    let mut last_pids_refresh = std::time::Instant::now()
-        .checked_sub(Duration::from_secs(10))
-        .unwrap_or_else(std::time::Instant::now);
-    let mut pids = std::collections::HashSet::new();
+    let mut last_pids_refresh = std::time::Instant::now();
+    let mut delayed_focus_at: Option<std::time::Instant> = None;
 
     while !session.stop.load(Ordering::Acquire) {
         let cur_xid = session.game_win.load(Ordering::Acquire) as x11::Window;
         let mut invalidated = false;
+        let mut drifted = false;
+        let expected_bounds = (cur_xid != 0).then(|| active_bounds(&app).0);
 
-        api.drain_events(dpy, cur_xid, &mut invalidated);
+        api.drain_events(
+            dpy,
+            cur_xid,
+            expected_bounds,
+            &mut invalidated,
+            &mut drifted,
+        );
         if invalidated && cur_xid != 0 {
             session.game_win.store(0, Ordering::Release);
             last_seq = u64::MAX;
+            delayed_focus_at = None;
         }
 
         let mc_xid = session.game_win.load(Ordering::Acquire) as x11::Window;
@@ -489,11 +519,12 @@ fn run_watcher_x11(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
                 pids = x11::process_tree_pids(session.pid);
                 last_pids_refresh = std::time::Instant::now();
             }
-            if let Some(found) = api.find_game_window(dpy, host_xid, &pids) {
+            if let Some(found) = api.find_game_window(dpy, host_xid, &pids, &existing_windows) {
                 let (bounds, seq) = active_bounds(&app);
                 if api.attach_and_place(dpy, found, host_xid, bounds) {
                     mark_attached(&app, &session, found);
                     last_seq = seq;
+                    delayed_focus_at = Some(std::time::Instant::now() + Duration::from_millis(80));
                 }
             }
             std::thread::sleep(POLL_IDLE);
@@ -501,11 +532,14 @@ fn run_watcher_x11(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
         }
 
         let (bounds, seq) = active_bounds(&app);
-        if seq != last_seq {
+        if seq != last_seq || drifted {
             api.apply_bounds(dpy, mc_xid, bounds);
             last_seq = seq;
         }
-        if session.focus_requested.swap(false, Ordering::AcqRel) {
+        if session.focus_requested.swap(false, Ordering::AcqRel)
+            || delayed_focus_at.is_some_and(|t| std::time::Instant::now() >= t)
+        {
+            delayed_focus_at = None;
             api.focus_window(dpy, mc_xid);
         }
         if session.close_requested.swap(false, Ordering::AcqRel) {
@@ -643,6 +677,24 @@ mod win32 {
         }
     }
 
+    pub fn needs_bounds_sync(mc: HWND, b: StageBounds) -> bool {
+        let w = i32::try_from(b.width).unwrap_or(1280);
+        let h = i32::try_from(b.height).unwrap_or(720);
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: valid live HWND checked with IsWindowVisible.
+        unsafe {
+            if IsWindowVisible(mc) == 0 || GetClientRect(mc, &mut rect) == 0 {
+                return false;
+            }
+        }
+        (rect.right - rect.left) != w || (rect.bottom - rect.top) != h
+    }
+
     pub fn focus_window(mc: HWND) {
         // SAFETY: best-effort z-order lift when host window regains focus.
         unsafe {
@@ -682,8 +734,9 @@ pub(crate) mod x11 {
 
     const XA_ATOM: Atom = 4;
     const XA_CARDINAL: Atom = 6;
+    const XA_WINDOW: Atom = 33;
     const ANY_PROPERTY_TYPE: Atom = 0;
-    const IS_VIEWABLE: c_int = 2;
+    const IS_UNMAPPED: c_int = 0;
     const PROP_MODE_REPLACE: c_int = 0;
     const FOCUS_CHANGE_MASK: c_long = 1 << 21;
     const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
@@ -701,6 +754,7 @@ pub(crate) mod x11 {
     const EVENT_FOCUS_OUT: c_int = 10;
     const EVENT_DESTROY_NOTIFY: c_int = 17;
     const EVENT_UNMAP_NOTIFY: c_int = 18;
+    const EVENT_CONFIGURE_NOTIFY: c_int = 22;
     const EVENT_CLIENT_MESSAGE: c_int = 33;
 
     const SHAPE_SET: c_int = 0;
@@ -757,6 +811,24 @@ pub(crate) mod x11 {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct XConfigureEvent {
+        event_type: c_int,
+        serial: c_ulong,
+        send_event: Bool,
+        display: *mut Display,
+        event: Window,
+        window: Window,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+        border_width: c_int,
+        above: Window,
+        override_redirect: Bool,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct XClientMessageEvent {
         event_type: c_int,
         serial: c_ulong,
@@ -773,6 +845,7 @@ pub(crate) mod x11 {
         event_type: c_int,
         xany: XAnyEvent,
         xdestroywindow: XDestroyWindowEvent,
+        xconfigure: XConfigureEvent,
         xclient: XClientMessageEvent,
         _pad: [c_long; 24],
     }
@@ -786,6 +859,15 @@ pub(crate) mod x11 {
 
     unsafe extern "C" fn ignore_x_error(_dpy: *mut Display, _err: *mut c_void) -> c_int {
         0
+    }
+
+    struct SearchCtx<'a> {
+        dpy: *mut Display,
+        host_xid: Window,
+        pids: &'a HashSet<u32>,
+        existing: &'a HashSet<Window>,
+        pid_atom: Atom,
+        leader_atom: Atom,
     }
 
     pub(crate) struct X11Api {
@@ -879,6 +961,22 @@ pub(crate) mod x11 {
         ) -> c_int,
         x_shape_combine_mask:
             unsafe extern "C" fn(*mut Display, Window, c_int, c_int, c_int, Pixmap, c_int),
+        #[cfg_attr(not(test), allow(dead_code))]
+        x_create_simple_window: unsafe extern "C" fn(
+            *mut Display,
+            Window,
+            c_int,
+            c_int,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_ulong,
+            c_ulong,
+        ) -> Window,
+        #[cfg_attr(not(test), allow(dead_code))]
+        x_destroy_window: unsafe extern "C" fn(*mut Display, Window) -> c_int,
+        #[cfg_attr(not(test), allow(dead_code))]
+        x_map_window: unsafe extern "C" fn(*mut Display, Window) -> c_int,
     }
 
     // SAFETY: `Display` handles are never shared across threads (each watcher opens its own
@@ -942,6 +1040,9 @@ pub(crate) mod x11 {
                     x_fill_rectangle: sym(lib_x11, c"XFillRectangle")?,
                     x_fill_arc: sym(lib_x11, c"XFillArc")?,
                     x_shape_combine_mask: sym(lib_xext, c"XShapeCombineMask")?,
+                    x_create_simple_window: sym(lib_x11, c"XCreateSimpleWindow")?,
+                    x_destroy_window: sym(lib_x11, c"XDestroyWindow")?,
+                    x_map_window: sym(lib_x11, c"XMapWindow")?,
                 };
                 (api.x_set_error_handler)(Some(ignore_x_error));
                 Some(api)
@@ -966,71 +1067,7 @@ pub(crate) mod x11 {
             unsafe { (self.x_intern_atom)(dpy, name.as_ptr(), 0) }
         }
 
-        fn window_pid(&self, dpy: *mut Display, win: Window, pid_atom: Atom) -> Option<u32> {
-            let mut actual_type: Atom = 0;
-            let mut actual_format: c_int = 0;
-            let mut nitems: c_ulong = 0;
-            let mut bytes_after: c_ulong = 0;
-            let mut prop: *mut c_uchar = std::ptr::null_mut();
-            // SAFETY: output pointers initialized and buffer freed via `XFree` below.
-            unsafe {
-                if (self.x_get_window_property)(
-                    dpy,
-                    win,
-                    pid_atom,
-                    0,
-                    1,
-                    0,
-                    XA_CARDINAL,
-                    &mut actual_type,
-                    &mut actual_format,
-                    &mut nitems,
-                    &mut bytes_after,
-                    &mut prop,
-                ) != 0
-                {
-                    return None;
-                }
-                let out = if !prop.is_null() && actual_format == 32 && nitems >= 1 {
-                    let val = *(prop as *const c_ulong);
-                    u32::try_from(val).ok()
-                } else {
-                    None
-                };
-                if !prop.is_null() {
-                    (self.x_free)(prop.cast());
-                }
-                out
-            }
-        }
-
-        fn inspect_subtree(
-            &self,
-            dpy: *mut Display,
-            win: Window,
-            host_xid: Window,
-            pids: &HashSet<u32>,
-            pid_atom: Atom,
-            depth: usize,
-        ) -> Option<Window> {
-            if depth > 8 || win == host_xid {
-                return None;
-            }
-            if let Some(pid) = self.window_pid(dpy, win, pid_atom) {
-                if pids.contains(&pid) {
-                    let mut attrs = XWindowAttributes::default();
-                    // SAFETY: `attrs` matches X11 XWindowAttributes layout on Linux x86_64.
-                    let ok = unsafe { (self.x_get_window_attributes)(dpy, win, &mut attrs) != 0 };
-                    if ok
-                        && attrs.map_state == IS_VIEWABLE
-                        && attrs.override_redirect == 0
-                        && attrs.width >= 160
-                        && attrs.height >= 120
-                    {
-                        return Some(win);
-                    }
-                }
-            }
+        fn query_children(&self, dpy: *mut Display, win: Window) -> Vec<Window> {
             let mut root_ret: Window = 0;
             let mut parent_ret: Window = 0;
             let mut children: *mut Window = std::ptr::null_mut();
@@ -1046,21 +1083,204 @@ pub(crate) mod x11 {
                     &mut count,
                 ) == 0
                 {
-                    return None;
+                    return Vec::new();
                 }
-                let found = if !children.is_null() && count > 0 {
-                    let slice = std::slice::from_raw_parts(children, count as usize);
-                    slice.iter().rev().find_map(|&c| {
-                        self.inspect_subtree(dpy, c, host_xid, pids, pid_atom, depth + 1)
-                    })
+                let out = if !children.is_null() && count > 0 {
+                    std::slice::from_raw_parts(children, count as usize).to_vec()
                 } else {
-                    None
+                    Vec::new()
                 };
                 if !children.is_null() {
                     (self.x_free)(children.cast());
                 }
-                found
+                out
             }
+        }
+
+        fn window_ulong_prop(
+            &self,
+            dpy: *mut Display,
+            win: Window,
+            prop_atom: Atom,
+            prop_type: Atom,
+        ) -> Option<c_ulong> {
+            if prop_atom == 0 {
+                return None;
+            }
+            let mut actual_type: Atom = 0;
+            let mut actual_format: c_int = 0;
+            let mut nitems: c_ulong = 0;
+            let mut bytes_after: c_ulong = 0;
+            let mut prop: *mut c_uchar = std::ptr::null_mut();
+            // SAFETY: output pointers initialized and buffer freed via `XFree` below.
+            unsafe {
+                if (self.x_get_window_property)(
+                    dpy,
+                    win,
+                    prop_atom,
+                    0,
+                    1,
+                    0,
+                    prop_type,
+                    &mut actual_type,
+                    &mut actual_format,
+                    &mut nitems,
+                    &mut bytes_after,
+                    &mut prop,
+                ) != 0
+                {
+                    return None;
+                }
+                let out = if !prop.is_null() && actual_format == 32 && nitems >= 1 {
+                    Some(*(prop as *const c_ulong))
+                } else {
+                    None
+                };
+                if !prop.is_null() {
+                    (self.x_free)(prop.cast());
+                }
+                out
+            }
+        }
+
+        fn window_pid(&self, dpy: *mut Display, win: Window, pid_atom: Atom) -> Option<u32> {
+            self.window_ulong_prop(dpy, win, pid_atom, XA_CARDINAL)
+                .and_then(|v| u32::try_from(v).ok())
+        }
+
+        fn client_leader_pid(
+            &self,
+            dpy: *mut Display,
+            win: Window,
+            leader_atom: Atom,
+            pid_atom: Atom,
+        ) -> Option<u32> {
+            let leader = self.window_ulong_prop(dpy, win, leader_atom, XA_WINDOW)?;
+            (leader != 0 && leader != win)
+                .then(|| self.window_pid(dpy, leader, pid_atom))
+                .flatten()
+        }
+
+        fn window_text_prop(
+            &self,
+            dpy: *mut Display,
+            win: Window,
+            prop_atom: Atom,
+        ) -> Option<Vec<u8>> {
+            if prop_atom == 0 {
+                return None;
+            }
+            let mut actual_type: Atom = 0;
+            let mut actual_format: c_int = 0;
+            let mut nitems: c_ulong = 0;
+            let mut bytes_after: c_ulong = 0;
+            let mut prop: *mut c_uchar = std::ptr::null_mut();
+            // SAFETY: output pointers initialized and buffer freed via `XFree` below.
+            unsafe {
+                if (self.x_get_window_property)(
+                    dpy,
+                    win,
+                    prop_atom,
+                    0,
+                    256,
+                    0,
+                    ANY_PROPERTY_TYPE,
+                    &mut actual_type,
+                    &mut actual_format,
+                    &mut nitems,
+                    &mut bytes_after,
+                    &mut prop,
+                ) != 0
+                {
+                    return None;
+                }
+                let out = if !prop.is_null() && actual_format == 8 && nitems > 0 {
+                    Some(std::slice::from_raw_parts(prop, nitems as usize).to_vec())
+                } else {
+                    None
+                };
+                if !prop.is_null() {
+                    (self.x_free)(prop.cast());
+                }
+                out
+            }
+        }
+
+        fn window_has_game_hint(&self, dpy: *mut Display, win: Window) -> bool {
+            for name in [c"WM_CLASS", c"_NET_WM_NAME", c"WM_NAME"] {
+                let atom = self.atom(dpy, name);
+                let Some(bytes) = self.window_text_prop(dpy, win, atom) else {
+                    continue;
+                };
+                for needle in [b"minecraft".as_slice(), b"lwjgl".as_slice()] {
+                    if bytes
+                        .windows(needle.len())
+                        .any(|w| w.eq_ignore_ascii_case(needle))
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        fn collect_subtree(
+            &self,
+            dpy: *mut Display,
+            win: Window,
+            depth: usize,
+            out: &mut HashSet<Window>,
+        ) {
+            if depth > 8 || win == 0 || !out.insert(win) {
+                return;
+            }
+            for child in self.query_children(dpy, win) {
+                self.collect_subtree(dpy, child, depth + 1, out);
+            }
+        }
+
+        pub(crate) fn collect_all_windows(&self, dpy: *mut Display) -> HashSet<Window> {
+            // SAFETY: `XDefaultRootWindow` returns the X11 root window ID.
+            let root = unsafe { (self.x_default_root_window)(dpy) };
+            let mut out = HashSet::new();
+            self.collect_subtree(dpy, root, 0, &mut out);
+            out
+        }
+
+        fn inspect_subtree(
+            &self,
+            ctx: &SearchCtx<'_>,
+            win: Window,
+            depth: usize,
+        ) -> Option<Window> {
+            if depth > 8 || win == ctx.host_xid || win == 0 {
+                return None;
+            }
+            let pid = self.window_pid(ctx.dpy, win, ctx.pid_atom);
+            let leader_pid = self.client_leader_pid(ctx.dpy, win, ctx.leader_atom, ctx.pid_atom);
+            let matches = pid.is_some_and(|p| ctx.pids.contains(&p))
+                || leader_pid.is_some_and(|p| ctx.pids.contains(&p))
+                || (pid.is_none()
+                    && leader_pid.is_none()
+                    && !ctx.existing.contains(&win)
+                    && self.window_has_game_hint(ctx.dpy, win));
+            if matches {
+                let mut attrs = XWindowAttributes::default();
+                // SAFETY: `attrs` matches X11 XWindowAttributes layout on Linux x86_64.
+                let ok = unsafe { (self.x_get_window_attributes)(ctx.dpy, win, &mut attrs) != 0 };
+                if ok
+                    && attrs.map_state != IS_UNMAPPED
+                    && attrs.override_redirect == 0
+                    && attrs.width >= 160
+                    && attrs.height >= 120
+                {
+                    return Some(win);
+                }
+            }
+            self.query_children(ctx.dpy, win)
+                .into_iter()
+                .rev()
+                .find_map(|c| self.inspect_subtree(ctx, c, depth + 1))
         }
 
         pub(crate) fn find_game_window(
@@ -1068,14 +1288,39 @@ pub(crate) mod x11 {
             dpy: *mut Display,
             host_xid: Window,
             pids: &HashSet<u32>,
+            existing: &HashSet<Window>,
         ) -> Option<Window> {
             let pid_atom = self.atom(dpy, c"_NET_WM_PID");
             if pid_atom == 0 {
                 return None;
             }
+            let leader_atom = self.atom(dpy, c"WM_CLIENT_LEADER");
             // SAFETY: `XDefaultRootWindow` returns the X11 root window ID.
             let root = unsafe { (self.x_default_root_window)(dpy) };
-            self.inspect_subtree(dpy, root, host_xid, pids, pid_atom, 0)
+            let ctx = SearchCtx {
+                dpy,
+                host_xid,
+                pids,
+                existing,
+                pid_atom,
+                leader_atom,
+            };
+            self.inspect_subtree(&ctx, root, 0)
+        }
+
+        unsafe fn arm_focus_grab(&self, dpy: *mut Display, mc: Window) {
+            (self.x_grab_button)(
+                dpy,
+                ANY_BUTTON,
+                ANY_MODIFIER,
+                mc,
+                0,
+                BUTTON_PRESS_MASK,
+                GRAB_MODE_SYNC,
+                GRAB_MODE_ASYNC,
+                0,
+                0,
+            );
         }
 
         pub(crate) fn attach_and_place(
@@ -1106,6 +1351,7 @@ pub(crate) mod x11 {
                 self.apply_bounds(dpy, mc, b);
                 (self.x_map_raised)(dpy, mc);
                 (self.x_select_input)(dpy, mc, FOCUS_CHANGE_MASK | STRUCTURE_NOTIFY_MASK);
+                self.arm_focus_grab(dpy, mc);
                 (self.x_set_input_focus)(dpy, mc, REVERT_TO_PARENT, CURRENT_TIME);
                 (self.x_sync)(dpy, 0);
             }
@@ -1200,7 +1446,14 @@ pub(crate) mod x11 {
             }
         }
 
-        pub(crate) fn drain_events(&self, dpy: *mut Display, mc: Window, invalidated: &mut bool) {
+        pub(crate) fn drain_events(
+            &self,
+            dpy: *mut Display,
+            mc: Window,
+            expected: Option<StageBounds>,
+            invalidated: &mut bool,
+            drifted: &mut bool,
+        ) {
             // SAFETY: reads queued X11 events from the thread-private Display handle.
             unsafe {
                 while (self.x_pending)(dpy) > 0 {
@@ -1212,18 +1465,7 @@ pub(crate) mod x11 {
                     }
                     match et {
                         EVENT_FOCUS_OUT if ev.xany.window == mc => {
-                            (self.x_grab_button)(
-                                dpy,
-                                ANY_BUTTON,
-                                ANY_MODIFIER,
-                                mc,
-                                0,
-                                BUTTON_PRESS_MASK,
-                                GRAB_MODE_SYNC,
-                                GRAB_MODE_ASYNC,
-                                0,
-                                0,
-                            );
+                            self.arm_focus_grab(dpy, mc);
                         }
                         EVENT_FOCUS_IN if ev.xany.window == mc => {
                             (self.x_ungrab_button)(dpy, ANY_BUTTON, ANY_MODIFIER, mc);
@@ -1233,6 +1475,21 @@ pub(crate) mod x11 {
                             (self.x_allow_events)(dpy, REPLAY_POINTER, CURRENT_TIME);
                             (self.x_ungrab_button)(dpy, ANY_BUTTON, ANY_MODIFIER, mc);
                             (self.x_flush)(dpy);
+                        }
+                        EVENT_CONFIGURE_NOTIFY if ev.xconfigure.window == mc => {
+                            if let Some(b) = expected {
+                                let w = i32::try_from(b.width).unwrap_or(1280);
+                                let h = i32::try_from(b.height).unwrap_or(720);
+                                if (
+                                    ev.xconfigure.x,
+                                    ev.xconfigure.y,
+                                    ev.xconfigure.width,
+                                    ev.xconfigure.height,
+                                ) != (b.x, b.y, w, h)
+                                {
+                                    *drifted = true;
+                                }
+                            }
                         }
                         EVENT_DESTROY_NOTIFY | EVENT_UNMAP_NOTIFY
                             if ev.xdestroywindow.window == mc =>
@@ -1292,9 +1549,87 @@ pub(crate) mod x11 {
         out
     }
 
+    #[cfg(test)]
+    impl X11Api {
+        pub(crate) fn verify_reparent_and_bounds(&self) {
+            let Some(dpy) = self.open_display() else {
+                return;
+            };
+            let bounds = StageBounds::clamped(14, 44, 800, 500, 16);
+            // SAFETY: creates temporary unmapped hierarchy on local X11/XWayland server, exercises
+            // subtree discovery, reparenting, XShape rounding mask, geometry readback, then cleans up.
+            unsafe {
+                let root = (self.x_default_root_window)(dpy);
+                let container = (self.x_create_simple_window)(dpy, root, 0, 0, 1000, 700, 0, 0, 0);
+                let host = (self.x_create_simple_window)(dpy, container, 0, 0, 960, 640, 0, 0, 0);
+                let mc = (self.x_create_simple_window)(dpy, container, 0, 0, 640, 480, 0, 0, 0);
+                let pid_atom = self.atom(dpy, c"_NET_WM_PID");
+                let leader_atom = self.atom(dpy, c"WM_CLIENT_LEADER");
+                let pid_val: c_ulong = c_ulong::from(std::process::id());
+                (self.x_change_property)(
+                    dpy,
+                    mc,
+                    pid_atom,
+                    XA_CARDINAL,
+                    32,
+                    PROP_MODE_REPLACE,
+                    (&raw const pid_val).cast(),
+                    1,
+                );
+                (self.x_map_window)(dpy, mc);
+                (self.x_sync)(dpy, 0);
+
+                let pids = HashSet::from([std::process::id()]);
+                let existing = HashSet::new();
+                let ctx = SearchCtx {
+                    dpy,
+                    host_xid: host,
+                    pids: &pids,
+                    existing: &existing,
+                    pid_atom,
+                    leader_atom,
+                };
+                let found = self.inspect_subtree(&ctx, container, 0);
+                assert_eq!(found, Some(mc), "must locate mapped child window by PID");
+
+                assert!(self.attach_and_place(dpy, mc, host, bounds));
+
+                let mut root_ret: Window = 0;
+                let mut parent_ret: Window = 0;
+                let mut children: *mut Window = std::ptr::null_mut();
+                let mut count: c_uint = 0;
+                assert_ne!(
+                    (self.x_query_tree)(
+                        dpy,
+                        mc,
+                        &mut root_ret,
+                        &mut parent_ret,
+                        &mut children,
+                        &mut count,
+                    ),
+                    0
+                );
+                if !children.is_null() {
+                    (self.x_free)(children.cast());
+                }
+                assert_eq!(parent_ret, host, "game window must be reparented to host");
+
+                let mut attrs = XWindowAttributes::default();
+                assert_ne!((self.x_get_window_attributes)(dpy, mc, &mut attrs), 0);
+                assert_eq!(
+                    (attrs.x, attrs.y, attrs.width, attrs.height),
+                    (14, 44, 800, 500)
+                );
+
+                (self.x_destroy_window)(dpy, container);
+                (self.x_sync)(dpy, 0);
+            }
+            self.close_display(dpy);
+        }
+    }
+
     // Silence dead-code warnings on unused atom constant kept alongside XA_CARDINAL.
     const _: Atom = XA_ATOM;
-    const _: Atom = ANY_PROPERTY_TYPE;
 }
 
 #[cfg(test)]
@@ -1380,5 +1715,13 @@ mod tests {
         );
         let pid = std::process::id();
         assert!(x11::process_tree_pids(pid).contains(&pid));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_reparents_and_shapes_child_window_end_to_end() {
+        if let Some(api) = x11::api() {
+            api.verify_reparent_and_bounds();
+        }
     }
 }

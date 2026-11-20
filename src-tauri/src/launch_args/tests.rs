@@ -841,7 +841,10 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
         })
         .unwrap();
         assert_eq!(x11_cmd.env.get("DISPLAY").map(String::as_str), Some(":0"));
-        assert!(!x11_cmd.env.contains_key("WAYLAND_DISPLAY"));
+        assert_eq!(
+            x11_cmd.env.get("WAYLAND_DISPLAY").map(String::as_str),
+            Some("clade-x11-embed")
+        );
         assert_eq!(
             x11_cmd.env.get("XDG_SESSION_TYPE").map(String::as_str),
             Some("x11")
@@ -852,6 +855,10 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
         );
         assert_eq!(
             x11_cmd.env.get("SDL_VIDEODRIVER").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            x11_cmd.env.get("SDL_VIDEO_DRIVER").map(String::as_str),
             Some("x11")
         );
     }

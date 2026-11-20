@@ -136,9 +136,13 @@ pub fn run() {
         });
 
     // Before any WebView or thread pool exists: choose the bundled runtime if present and configure
-    // Linux X11/NVIDIA WebKitGTK startup overrides while single-threaded.
-    let webview_source =
-        webview::select_runtime(&root, launcher_settings.behavior.embeds_on_launch());
+    // Linux X11/NVIDIA WebKitGTK startup overrides while single-threaded so framed game embedding
+    // works immediately even if toggled on in Settings during the session.
+    #[cfg(target_os = "linux")]
+    let x11_host = game_embed::x11::is_available();
+    #[cfg(not(target_os = "linux"))]
+    let x11_host = false;
+    let webview_source = webview::select_runtime(&root, x11_host);
 
     let workers = std::thread::available_parallelism()
         .map(usize::from)

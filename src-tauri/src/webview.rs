@@ -397,21 +397,22 @@ fn apply_linux_webkit_env_with(
     has_x11_display: bool,
     dmabuf_disabled: bool,
 ) {
-    let mut vars: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut vars: Vec<(&'static str, &'static str, bool)> = Vec::new();
     if nvidia_present {
-        vars.push(("__NV_DISABLE_EXPLICIT_SYNC", "1"));
+        vars.push(("__NV_DISABLE_EXPLICIT_SYNC", "1", false));
     }
     if x11_embed && has_x11_display {
-        vars.push(("GDK_BACKEND", "x11"));
+        // Override ambient desktop session defaults (e.g. `GDK_BACKEND="wayland,x11,*"`) so GTK3
+        // opens an XWayland window with a real XID capable of reparenting the game child window.
+        vars.push(("GDK_BACKEND", "x11", true));
         if nvidia_present && !dmabuf_disabled {
-            vars.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1"));
+            vars.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", false));
         }
     }
-    for (key, val) in vars {
+    for (key, val, force) in vars {
         // Called once at startup while single-threaded, before GTK/WebKitGTK initializes.
-        // Respects any explicit value the user set in their environment.
         // portability-allow: guards WebKitGTK against Wayland/XWayland glitches on NVIDIA and X11 embedding
-        if std::env::var_os(key).is_none() {
+        if force || std::env::var_os(key).is_none() {
             std::env::set_var(key, val);
         }
     }
@@ -1132,16 +1133,17 @@ mod tests {
             );
         }
 
-        // Explicit user overrides must survive.
+        // Explicit NVIDIA override survives while session GDK_BACKEND ("wayland,x11,*") is forced
+        // to X11 so desktop defaults do not break framed game embedding.
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "0");
-        std::env::set_var("GDK_BACKEND", "wayland");
+        std::env::set_var("GDK_BACKEND", "wayland,x11,*");
         apply_linux_webkit_env_with(true, true, true, false);
         assert_eq!(
             std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
             Ok("0"),
             "explicit user override must be preserved"
         );
-        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("wayland"));
+        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("x11"));
         assert_eq!(
             std::env::var("WEBKIT_DMABUF_RENDERER_FORCE_SHM").as_deref(),
             Ok("1")
