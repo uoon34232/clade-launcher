@@ -240,7 +240,6 @@ impl RootLock {
         root.ensure_data_dir()?;
         let mut opts = OpenOptions::new();
         opts.create(true).truncate(false).read(true).write(true);
-        #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
             // FILE_SHARE_READ | FILE_SHARE_WRITE (0x3), deliberately omitting FILE_SHARE_DELETE
@@ -250,7 +249,6 @@ impl RootLock {
         let file = opts
             .open(root.lock_file())
             .map_err(|e| match e.raw_os_error() {
-                #[cfg(windows)]
                 Some(32 | 33) => RootError::AlreadyRunning,
                 _ => RootError::Io(e),
             })?;

@@ -1073,7 +1073,6 @@ fn huge_classpaths_compact_to_relative_paths_and_spill_to_a_secret_free_argfile_
     assert!(content.is_ascii());
     assert!(content.starts_with("-cp\n\""));
     assert!(content.contains("heavy_pack_component_000"));
-    #[cfg(windows)]
     assert!(
         content.contains(r"..\\..\\..\\libraries\\"),
         "backslashes inside quoted Java argfile strings are doubled"

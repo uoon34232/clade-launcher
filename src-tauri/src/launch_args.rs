@@ -304,7 +304,6 @@ impl GameCommand {
             .envs(&self.env)
             .args(&self.args)
             .current_dir(&self.cwd);
-        #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -349,15 +348,9 @@ where
 /// Exact UTF-16 `WCHAR` length (including quotes, escaped backslashes/quotes, separating spaces,
 /// and terminating `NUL`) of the Windows CRT command line `CreateProcessW` receives.
 pub fn utf16_command_line_len(program: &Path, args: &[String]) -> usize {
-    #[cfg(windows)]
     let mut total = {
         use std::os::windows::ffi::OsStrExt;
         quoted_utf16_arg_len(program.as_os_str().encode_wide(), true)
-    };
-    #[cfg(not(windows))]
-    let mut total = {
-        let s = program.to_string_lossy();
-        quoted_utf16_arg_len(s.encode_utf16(), true)
     };
     for arg in args {
         total += 1 + quoted_utf16_arg_len(arg.encode_utf16(), false);

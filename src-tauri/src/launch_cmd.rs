@@ -746,16 +746,10 @@ pub fn reattach_live_sessions(app: &AppHandle) {
 
             let out_path = crate::game_session::output_dir(&root).join(format!("{id}.out"));
             let tail_lines = read_output_tail(&out_path);
-            #[cfg(windows)]
             let status = raw_exit.map(|c| {
                 use std::os::windows::process::ExitStatusExt;
                 std::process::ExitStatus::from_raw(c)
             });
-            #[cfg(not(windows))]
-            let status: Option<std::process::ExitStatus> = {
-                let _ = raw_exit;
-                None
-            };
             let mut exit = crate::game_session::summarize(
                 status,
                 Duration::from_secs(banked_secs.max(15)),

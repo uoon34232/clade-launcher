@@ -285,7 +285,6 @@ pub fn resume(app: &AppHandle) {
 
 /// Reads the initial Windows transparency preference and calls `refresh` whenever Windows reports
 /// that it changed.
-#[cfg(windows)]
 pub fn watch_system_preference(app: AppHandle) {
     use windows::core::IInspectable;
     use windows::Foundation::TypedEventHandler;
@@ -329,9 +328,6 @@ pub fn watch_system_preference(app: AppHandle) {
     }
 }
 
-#[cfg(not(windows))]
-pub fn watch_system_preference(_app: AppHandle) {}
-
 /// Applies the material to the real window.
 struct WindowBackdrop<'a> {
     app: &'a AppHandle,
@@ -347,11 +343,8 @@ impl Backdrop for WindowBackdrop<'_> {
             .app
             .get_webview_window("main")
             .ok_or("the main window does not exist yet")?;
-        #[cfg(windows)]
-        {
-            let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-            native::set_backdrop(hwnd.0 as isize, on)?;
-        }
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        native::set_backdrop(hwnd.0 as isize, on)?;
         window
             .set_background_color(Some(if on {
                 CLEAR_BACKGROUND
@@ -362,7 +355,6 @@ impl Backdrop for WindowBackdrop<'_> {
     }
 }
 
-#[cfg(windows)]
 mod native {
     use windows_sys::Win32::Graphics::Dwm::{
         DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE,

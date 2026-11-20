@@ -1,3 +1,6 @@
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+compile_error!("Clade Launcher targets 64-bit Windows (x86_64) only.");
+
 pub mod accounts;
 pub mod accounts_api;
 pub mod appearance_cmd;
@@ -432,28 +435,15 @@ pub fn run() {
 }
 
 fn keep_windowed(window: &tauri::Window, width: u32, height: u32) {
-    #[cfg(windows)]
-    {
-        if let Ok(hwnd) = window.hwnd() {
-            // SAFETY: `hwnd` is the live window handle owned by Tauri; `IsZoomed` is a lightweight
-            // read-only check on the window style bits.
-            if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd.0.cast()) } != 0
-            {
-                let _ = window.unmaximize();
-            }
-        }
-        if width >= 800 && height >= 500 && window.is_fullscreen().unwrap_or(false) {
-            let _ = window.set_fullscreen(false);
-        }
-    }
-    #[cfg(not(windows))]
-    if width >= 800 && height >= 500 {
-        if window.is_fullscreen().unwrap_or(false) {
-            let _ = window.set_fullscreen(false);
-        }
-        if window.is_maximized().unwrap_or(false) {
+    if let Ok(hwnd) = window.hwnd() {
+        // SAFETY: `hwnd` is the live window handle owned by Tauri; `IsZoomed` is a lightweight
+        // read-only check on the window style bits.
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd.0.cast()) } != 0 {
             let _ = window.unmaximize();
         }
+    }
+    if width >= 800 && height >= 500 && window.is_fullscreen().unwrap_or(false) {
+        let _ = window.set_fullscreen(false);
     }
 }
 

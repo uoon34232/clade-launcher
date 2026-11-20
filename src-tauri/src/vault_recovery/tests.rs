@@ -384,7 +384,6 @@ fn it_is_refused_during_a_sign_in_a_skin_change_and_a_game_start_and_releases_it
     assert!(w.accounts.begin_appearance_change().is_some());
 }
 
-#[cfg(windows)]
 #[test]
 fn a_failed_rename_leaves_the_active_vault_usable_and_puts_the_backup_back() {
     use std::os::windows::fs::OpenOptionsExt;
@@ -439,7 +438,6 @@ fn a_credential_path_that_is_a_folder_is_never_touched() {
     assert!(w.vault().is_file());
 }
 
-#[cfg(windows)]
 #[test]
 fn when_the_account_list_cannot_be_written_the_vault_stays_archived_and_a_retry_finishes() {
     use std::os::windows::fs::OpenOptionsExt;
@@ -859,38 +857,19 @@ fn accounts_changed_event_is_emitted_only_when_state_could_have_changed() {
 }
 
 fn make_dir_link(target: &Path, link: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
-            return true;
-        }
-        std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .output()
-            .is_ok_and(|o| o.status.success())
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return true;
     }
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link).is_ok()
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = (target, link);
-        false
-    }
+    std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 fn remove_dir_link(link: &Path) {
-    #[cfg(windows)]
-    {
-        fs::remove_dir(link).unwrap();
-    }
-    #[cfg(not(windows))]
-    {
-        fs::remove_file(link).unwrap();
-    }
+    fs::remove_dir(link).unwrap();
 }
 
 #[test]

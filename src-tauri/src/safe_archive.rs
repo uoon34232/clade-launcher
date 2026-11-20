@@ -71,13 +71,10 @@ fn common_base_dir(a: &Path, b: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     let mut normal_count = 0usize;
     for (ca, cb) in a.components().zip(b.components()) {
-        let same = if cfg!(windows) {
-            ca.as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&cb.as_os_str().to_string_lossy())
-        } else {
-            ca == cb
-        };
+        let same = ca
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&cb.as_os_str().to_string_lossy());
         if !same {
             break;
         }

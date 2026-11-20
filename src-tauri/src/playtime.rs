@@ -50,102 +50,81 @@ fn fallback_monotonic_ms() -> u64 {
 /// Monotonic milliseconds excluding time spent in Windows sleep or hibernation
 /// (`QueryUnbiasedInterruptTime`).
 pub fn unbiased_ms() -> u64 {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
-        let mut ticks_100ns: u64 = 0;
-        // SAFETY: `ticks_100ns` is a valid aligned `u64` out-pointer for the duration of the call.
-        if unsafe { QueryUnbiasedInterruptTime(&mut ticks_100ns) } != 0 {
-            return ticks_100ns / 10_000;
-        }
-        fallback_monotonic_ms()
+    use windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
+    let mut ticks_100ns: u64 = 0;
+    // SAFETY: `ticks_100ns` is a valid aligned `u64` out-pointer for the duration of the call.
+    if unsafe { QueryUnbiasedInterruptTime(&mut ticks_100ns) } != 0 {
+        return ticks_100ns / 10_000;
     }
-    #[cfg(not(windows))]
-    {
-        fallback_monotonic_ms()
-    }
+    fallback_monotonic_ms()
 }
 
 /// Handle to a verified OS process matching an [`ActiveSession`]'s PID and creation timestamp.
-#[cfg(windows)]
 pub(crate) struct LiveProcess(std::os::windows::io::OwnedHandle);
-
-#[cfg(not(windows))]
-pub(crate) struct LiveProcess;
 
 impl LiveProcess {
     /// Opens `pid` with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE` and verifies its
     /// OS creation timestamp is within 120 seconds of `started_at` (defending against PID reuse).
     /// Returns `(handle, still_running)`.
     pub(crate) fn open_matching(pid: u32, started_at: i64) -> Option<(Self, bool)> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-            use windows_sys::Win32::Foundation::{FILETIME, WAIT_TIMEOUT};
-            use windows_sys::Win32::System::Threading::{
-                GetProcessTimes, OpenProcess, WaitForSingleObject,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-            };
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{FILETIME, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE,
+        };
 
-            if pid == 0 {
-                return None;
-            }
-            // SAFETY: `OpenProcess` takes plain integer arguments and returns a null handle on error.
-            let raw = unsafe {
-                OpenProcess(
-                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                    0,
-                    pid,
-                )
-            };
-            if raw.is_null() {
-                return None;
-            }
-            // SAFETY: `raw` is a fresh non-null process handle owned exclusively by `owned`, which
-            // calls `CloseHandle` automatically on every exit path.
-            let owned = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
-            let h = owned.as_raw_handle().cast();
+        if pid == 0 {
+            return None;
+        }
+        // SAFETY: `OpenProcess` takes plain integer arguments and returns a null handle on error.
+        let raw = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: `raw` is a fresh non-null process handle owned exclusively by `owned`, which
+        // calls `CloseHandle` automatically on every exit path.
+        let owned = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+        let h = owned.as_raw_handle().cast();
 
-            let mut creation = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            let mut exit = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            let mut kernel = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            let mut user = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            // SAFETY: `h` is valid with `PROCESS_QUERY_LIMITED_INFORMATION` and all `FILETIME`
-            // out-pointers are valid stack locals.
-            if unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) } == 0
-            {
-                return None;
-            }
-            const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
-            let ticks_100ns =
-                (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
-            let created_secs =
-                (ticks_100ns / 10_000_000).checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)?;
-            let created_unix = i64::try_from(created_secs).ok()?;
-            if created_unix.abs_diff(started_at) > 120 {
-                return None;
-            }
-            // SAFETY: `h` is valid with `PROCESS_SYNCHRONIZE`; timeout 0 polls without blocking.
-            let alive = unsafe { WaitForSingleObject(h, 0) } == WAIT_TIMEOUT;
-            Some((Self(owned), alive))
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        // SAFETY: `h` is valid with `PROCESS_QUERY_LIMITED_INFORMATION` and all `FILETIME`
+        // out-pointers are valid stack locals.
+        if unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+            return None;
         }
-        #[cfg(not(windows))]
-        {
-            let _ = (pid, started_at);
-            None
+        const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+        let ticks_100ns =
+            (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        let created_secs = (ticks_100ns / 10_000_000).checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)?;
+        let created_unix = i64::try_from(created_secs).ok()?;
+        if created_unix.abs_diff(started_at) > 120 {
+            return None;
         }
+        // SAFETY: `h` is valid with `PROCESS_SYNCHRONIZE`; timeout 0 polls without blocking.
+        let alive = unsafe { WaitForSingleObject(h, 0) } == WAIT_TIMEOUT;
+        Some((Self(owned), alive))
     }
 
     pub(crate) fn open_alive(pid: u32, started_at: i64) -> Option<Self> {
@@ -154,24 +133,17 @@ impl LiveProcess {
 
     /// Blocks until the process terminates and returns its raw OS exit code.
     pub(crate) fn wait_blocking(self) -> Option<u32> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::System::Threading::{
-                GetExitCodeProcess, WaitForSingleObject, INFINITE,
-            };
-            let h = self.0.as_raw_handle().cast();
-            // SAFETY: `self.0` owns a valid process handle with `PROCESS_SYNCHRONIZE` and
-            // `PROCESS_QUERY_LIMITED_INFORMATION` for the duration of both calls.
-            unsafe {
-                WaitForSingleObject(h, INFINITE);
-                let mut code: u32 = 0;
-                (GetExitCodeProcess(h, &mut code) != 0).then_some(code)
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            None
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+        };
+        let h = self.0.as_raw_handle().cast();
+        // SAFETY: `self.0` owns a valid process handle with `PROCESS_SYNCHRONIZE` and
+        // `PROCESS_QUERY_LIMITED_INFORMATION` for the duration of both calls.
+        unsafe {
+            WaitForSingleObject(h, INFINITE);
+            let mut code: u32 = 0;
+            (GetExitCodeProcess(h, &mut code) != 0).then_some(code)
         }
     }
 }

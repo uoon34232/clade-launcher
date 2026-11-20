@@ -204,7 +204,6 @@ fn retiring_cleans_disposable_natives_while_preserving_all_user_files_byte_for_b
     assert!(!retired_at.join("natives").exists());
     assert_eq!(tree(&retired_at), expected);
 
-    #[cfg(windows)]
     {
         let outside = d.path().join("outside-profile");
         fs::create_dir_all(&outside).unwrap();

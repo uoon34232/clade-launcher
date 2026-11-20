@@ -17,7 +17,6 @@ pub struct MemorySnapshot {
 }
 
 /// Physical memory and commit availability in MiB, or `None` where they cannot be read.
-#[cfg(windows)]
 pub fn memory_snapshot() -> Option<MemorySnapshot> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     // SAFETY: MEMORYSTATUSEX is plain data; the length field is set as the API requires and the
@@ -33,11 +32,6 @@ pub fn memory_snapshot() -> Option<MemorySnapshot> {
     }
 }
 
-#[cfg(not(windows))]
-pub fn memory_snapshot() -> Option<MemorySnapshot> {
-    None
-}
-
 /// Total physical memory in MiB, or `None` where it cannot be read.
 pub fn total_memory_mb() -> Option<u64> {
     memory_snapshot().map(|s| s.total_mb)
@@ -45,7 +39,6 @@ pub fn total_memory_mb() -> Option<u64> {
 
 /// The Windows display language as a locale name (`en-US`, `ru-RU`), or `None` where it cannot be
 /// read. Used only for the first-run language default; it is never stored.
-#[cfg(windows)]
 pub fn system_locale() -> Option<String> {
     use windows_sys::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
     // SAFETY: the buffer is valid for `len` UTF-16 units for the duration of the call, which
@@ -62,15 +55,9 @@ pub fn system_locale() -> Option<String> {
     }
 }
 
-#[cfg(not(windows))]
-pub fn system_locale() -> Option<String> {
-    None
-}
-
 /// The Windows "Transparency effects" preference, read through the documented
 /// `UISettings.AdvancedEffectsEnabled` property (read-only; nothing is written anywhere). `None`
 /// where it cannot be read.
-#[cfg(windows)]
 pub fn transparency_effects_enabled() -> Option<bool> {
     use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
     use windows::UI::ViewManagement::UISettings;
@@ -90,13 +77,7 @@ pub fn transparency_effects_enabled() -> Option<bool> {
     .flatten()
 }
 
-#[cfg(not(windows))]
-pub fn transparency_effects_enabled() -> Option<bool> {
-    None
-}
-
 /// Whether Windows High Contrast is on (glass is never used then).
-#[cfg(windows)]
 pub fn high_contrast() -> bool {
     use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETHIGHCONTRAST};
@@ -115,19 +96,12 @@ pub fn high_contrast() -> bool {
     }
 }
 
-#[cfg(not(windows))]
-pub fn high_contrast() -> bool {
-    false
-}
-
-#[cfg(any(windows, test))]
 const fn is_windows_10_version(major: u32, build: u32) -> bool {
     major == 10 && build < 22000
 }
 
 /// True when the host OS is Windows 10 (`dwMajorVersion == 10 && dwBuildNumber < 22000`), queried
 /// directly via `ntdll!RtlGetVersion` so compatibility manifests cannot mask the kernel build.
-#[cfg(windows)]
 pub fn is_windows_10() -> bool {
     use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
     #[link(name = "ntdll")]
@@ -146,12 +120,6 @@ pub fn is_windows_10() -> bool {
     }
 }
 
-#[cfg(not(windows))]
-pub fn is_windows_10() -> bool {
-    false
-}
-
-#[cfg(windows)]
 pub(crate) fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -187,7 +155,6 @@ pub(crate) fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
 }
 
 /// Free space, in bytes, available to this user on the drive that holds `path`.
-#[cfg(windows)]
 pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -214,12 +181,6 @@ pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-#[cfg(not(windows))]
-pub fn free_disk_bytes(_path: &Path) -> Option<u64> {
-    None
-}
-
-#[cfg(windows)]
 fn volume_root_win32(verbatim: &Path) -> Option<std::path::PathBuf> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStrExt;
@@ -241,7 +202,6 @@ fn volume_root_win32(verbatim: &Path) -> Option<std::path::PathBuf> {
 
 /// Whether the volume holding `path` supports persistent NTFS-style ACLs (`FILE_PERSISTENT_ACLS`),
 /// or `None` when the volume cannot be queried.
-#[cfg(windows)]
 pub fn volume_supports_acls(path: &Path) -> Option<bool> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
@@ -295,11 +255,6 @@ pub fn volume_supports_acls(path: &Path) -> Option<bool> {
         )
     };
     (ok != 0).then_some((flags & FILE_PERSISTENT_ACLS) != 0)
-}
-
-#[cfg(not(windows))]
-pub fn volume_supports_acls(_path: &Path) -> Option<bool> {
-    None
 }
 
 /// Safe maximum JVM heap ceiling (MiB) for a machine with `total_mb` physical RAM, reserving
@@ -554,7 +509,6 @@ mod tests {
         // Non-existent >260-char path walks up cleanly after verbatim conversion.
         assert!(free_disk_bytes(&deep).is_some());
 
-        #[cfg(windows)]
         {
             assert_eq!(
                 to_verbatim_win32(Path::new(r"\\?\D:\Portable\Clade")),

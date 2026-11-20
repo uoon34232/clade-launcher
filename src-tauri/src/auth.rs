@@ -160,7 +160,6 @@ async fn read_head(stream: &mut TcpStream) -> Option<String> {
     None
 }
 
-#[cfg(windows)]
 fn set_exclusive_addr_use(sock: &socket2::Socket) -> std::io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
@@ -190,7 +189,6 @@ fn bind_v4_exclusive(port: u16) -> std::io::Result<TcpListener> {
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
-    #[cfg(windows)]
     set_exclusive_addr_use(&sock)?;
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     sock.bind(&addr.into())?;
@@ -207,7 +205,6 @@ fn bind_v6_exclusive(port: u16) -> std::io::Result<TcpListener> {
         Some(socket2::Protocol::TCP),
     )?;
     sock.set_only_v6(true)?;
-    #[cfg(windows)]
     set_exclusive_addr_use(&sock)?;
     let addr = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
     sock.bind(&addr.into())?;
@@ -218,25 +215,10 @@ fn bind_v6_exclusive(port: u16) -> std::io::Result<TcpListener> {
 }
 
 fn ipv6_unavailable(e: &std::io::Error) -> bool {
-    if matches!(
+    matches!(
         e.kind(),
         std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-    ) {
-        return true;
-    }
-    #[cfg(windows)]
-    if matches!(e.raw_os_error(), Some(10043 | 10047 | 10049)) {
-        return true;
-    }
-    #[cfg(target_os = "linux")]
-    if matches!(e.raw_os_error(), Some(93 | 97 | 99)) {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    if matches!(e.raw_os_error(), Some(43 | 47 | 49)) {
-        return true;
-    }
-    false
+    ) || matches!(e.raw_os_error(), Some(10043 | 10047 | 10049))
 }
 
 fn is_transient_accept(e: &std::io::Error) -> bool {
@@ -1943,7 +1925,6 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_handles_idle_preconnects_ipv6_and_port_collisions() {
-        #[cfg(windows)]
         {
             let v4 = bind_v4_exclusive(0).unwrap();
             let p = v4.local_addr().unwrap().port();
