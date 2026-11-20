@@ -213,26 +213,21 @@ pub fn preview_requested(root: &Path) {
 pub fn preview_requested(_root: &Path) {}
 
 fn show_error(title: &str, message: &str) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-        let wide = |s: &str| {
-            s.encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<u16>>()
-        };
-        // SAFETY: both buffers are NUL-terminated and outlive the call; a null owner is allowed.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                wide(message).as_ptr(),
-                wide(title).as_ptr(),
-                MB_OK | MB_ICONERROR,
-            );
-        }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    // SAFETY: both buffers are NUL-terminated and outlive the call; a null owner is allowed.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide(message).as_ptr(),
+            wide(title).as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
     }
-    #[cfg(not(windows))]
-    eprintln!("{title}: {message}");
 }
 
 /// Deterministic Win32 message-only window class for a specific portable folder.
@@ -241,19 +236,10 @@ fn show_error(title: &str, message: &str) {
 /// portable Clade folders can run side by side without colliding.
 pub fn wake_window_class(root: &Path) -> String {
     use sha2::{Digest, Sha256};
+    use std::os::windows::ffi::OsStrExt;
 
     let clean = crate::portable::root::normalize_verbatim_path(root.to_path_buf());
-    let raw_units: Vec<u16> = {
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            clean.as_os_str().encode_wide().collect()
-        }
-        #[cfg(not(windows))]
-        {
-            clean.to_string_lossy().encode_utf16().collect()
-        }
-    };
+    let raw_units: Vec<u16> = clean.as_os_str().encode_wide().collect();
 
     let mut normalized: Vec<u16> = raw_units
         .into_iter()
@@ -289,13 +275,11 @@ pub fn wake_window_class(root: &Path) -> String {
     format!("CladeWake.{}", &hex[..16])
 }
 
-#[cfg(windows)]
 const WM_CLADE_WAKE: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 
 /// Another Clade on this PC already owns the folder: signal its per-folder message-only window so
 /// it brings its UI back (it may be hidden while a game runs) instead of reporting an error, and
 /// without colliding with File Explorer windows or separate portable copies.
-#[cfg(windows)]
 pub fn wake_running_instance(root: &Path) -> bool {
     use std::time::Duration;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -334,17 +318,10 @@ pub fn wake_running_instance(root: &Path) -> bool {
     false
 }
 
-#[cfg(not(windows))]
-pub fn wake_running_instance(_root: &Path) -> bool {
-    false
-}
-
-#[cfg(windows)]
 struct WakeState {
     on_wake: Box<dyn Fn() + Send + Sync>,
 }
 
-#[cfg(windows)]
 unsafe extern "system" fn wake_wnd_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     msg: u32,
@@ -371,7 +348,6 @@ unsafe extern "system" fn wake_wnd_proc(
 
 /// Spawns a lightweight Win32 message-only window listener (`"clade-wake"`) for `root`. Parked in
 /// the kernel inside `GetMessageW` at 0% CPU until `WM_CLADE_WAKE` arrives.
-#[cfg(windows)]
 pub fn spawn_wake_listener(root: &Path, on_wake: impl Fn() + Send + Sync + 'static) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassExW, TranslateMessage,
@@ -427,9 +403,6 @@ pub fn spawn_wake_listener(root: &Path, on_wake: impl Fn() + Send + Sync + 'stat
         tracing::warn!(error = %e, "could not spawn wake listener thread");
     }
 }
-
-#[cfg(not(windows))]
-pub fn spawn_wake_listener(_root: &Path, _on_wake: impl Fn() + Send + Sync + 'static) {}
 
 /// Logs go to `logs/clade.log` inside the folder. One rotation keeps the stick tidy.
 /// Secrets must never reach this log: only log ids and states, never tokens or passphrases.
@@ -515,7 +488,6 @@ mod tests {
         assert_ne!(c1, other);
     }
 
-    #[cfg(windows)]
     #[test]
     fn wake_listener_and_client_round_trip_per_folder_without_cross_talk() {
         use std::sync::mpsc;

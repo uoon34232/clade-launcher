@@ -1540,7 +1540,6 @@ mod tests {
         assert!(matches!(store.get(&inst.id), Err(InstanceError::Io(_))));
         assert_eq!(store.list().unwrap().problems.len(), 1);
 
-        #[cfg(windows)]
         {
             let target = d.path().join("outside-target");
             fs::create_dir_all(&target).unwrap();

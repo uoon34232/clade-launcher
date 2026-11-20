@@ -86,7 +86,6 @@ async fn drain<R: tokio::io::AsyncRead + Unpin>(mut r: R, tail: Arc<Mutex<Vec<u8
     }
 }
 
-#[cfg(windows)]
 fn attach_kill_on_close_job(
     child: &tokio::process::Child,
 ) -> Option<std::os::windows::io::OwnedHandle> {
@@ -148,7 +147,6 @@ async fn run_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = c.spawn()?;
-    #[cfg(windows)]
     let job_guard = attach_kill_on_close_job(&child);
     let tail = Arc::new(Mutex::new(Vec::new()));
     let readers: Vec<_> = [
@@ -168,7 +166,6 @@ async fn run_command(
         s = child.wait() => s?,
         () = cancel.cancelled() => {
             let _ = child.kill().await;
-            #[cfg(windows)]
             drop(job_guard);
             let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
             for r in readers {
@@ -178,7 +175,6 @@ async fn run_command(
         }
         () = tokio::time::sleep(timeout) => {
             let _ = child.kill().await;
-            #[cfg(windows)]
             drop(job_guard);
             let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
             for r in readers {
@@ -187,7 +183,6 @@ async fn run_command(
             return Err(io::Error::new(io::ErrorKind::TimedOut, "the installer took too long"));
         }
     };
-    #[cfg(windows)]
     drop(job_guard);
     for r in readers {
         let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
@@ -1062,7 +1057,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[tokio::test]
     async fn job_object_terminates_grandchild_processes_on_cancel_and_timeout() {
         let d = tempfile::tempdir().unwrap();

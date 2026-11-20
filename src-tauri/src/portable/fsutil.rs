@@ -11,15 +11,7 @@ const RETRY_DELAYS_MS: &[u64] = &[10, 25, 50, 100, 200, 400, 750];
 /// or `ERROR_SHARING_VIOLATION` = 32) commonly triggered by Windows Defender or Search Indexer
 /// right after a file handle closes.
 pub fn is_transient_win_lock(err: &io::Error) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(err.raw_os_error(), Some(5 | 32))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = err;
-        false
-    }
+    matches!(err.raw_os_error(), Some(5 | 32))
 }
 
 fn clear_readonly(path: &Path) {
@@ -33,7 +25,6 @@ fn clear_readonly(path: &Path) {
     }
 }
 
-#[cfg(windows)]
 fn wide_null(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str()
@@ -48,30 +39,23 @@ pub fn rename_with_retry(src: &Path, dst: &Path) -> io::Result<()> {
     let mut attempt = 0usize;
     loop {
         let res = {
-            #[cfg(windows)]
-            {
-                use windows_sys::Win32::Storage::FileSystem::{
-                    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-                };
-                let src_w = wide_null(src);
-                let dst_w = wide_null(dst);
-                // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
-                let ok = unsafe {
-                    MoveFileExW(
-                        src_w.as_ptr(),
-                        dst_w.as_ptr(),
-                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                    )
-                };
-                if ok != 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                fs::rename(src, dst)
+            use windows_sys::Win32::Storage::FileSystem::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+            let src_w = wide_null(src);
+            let dst_w = wide_null(dst);
+            // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
+            let ok = unsafe {
+                MoveFileExW(
+                    src_w.as_ptr(),
+                    dst_w.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
             }
         };
         match res {
@@ -91,32 +75,15 @@ pub fn move_new_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     let mut attempt = 0usize;
     loop {
         let res = {
-            #[cfg(windows)]
-            {
-                use windows_sys::Win32::Storage::FileSystem::{
-                    MoveFileExW, MOVEFILE_WRITE_THROUGH,
-                };
-                let src_w = wide_null(src);
-                let dst_w = wide_null(dst);
-                // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
-                let ok =
-                    unsafe { MoveFileExW(src_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-                if ok != 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                if fs::symlink_metadata(dst).is_ok() {
-                    Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "destination exists",
-                    ))
-                } else {
-                    fs::rename(src, dst)
-                }
+            use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+            let src_w = wide_null(src);
+            let dst_w = wide_null(dst);
+            // SAFETY: Both buffers are NUL-terminated UTF-16 and outlive the call.
+            let ok = unsafe { MoveFileExW(src_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
             }
         };
         match res {
@@ -216,36 +183,27 @@ pub fn read_bounded(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
 /// Allocation unit (cluster size) in bytes for the volume holding `path`, clamped to a sane
 /// `4 KiB..=1 MiB` range. Matters on exFAT USB drives with 128–256 KiB clusters.
 pub fn cluster_size_bytes(path: &Path) -> u64 {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
-        let mut dir = path;
-        while !dir.exists() {
-            let Some(p) = dir.parent() else {
-                return 4096;
-            };
-            dir = p;
-        }
-        let root_anc = dir.ancestors().last().unwrap_or(dir);
-        let wide = wide_null(root_anc);
-        let mut spc = 0u32;
-        let mut bps = 0u32;
-        let mut free_c = 0u32;
-        let mut total_c = 0u32;
-        // SAFETY: `wide` is NUL-terminated and all out pointers are valid scalars.
-        let ok = unsafe {
-            GetDiskFreeSpaceW(wide.as_ptr(), &mut spc, &mut bps, &mut free_c, &mut total_c)
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
+    let mut dir = path;
+    while !dir.exists() {
+        let Some(p) = dir.parent() else {
+            return 4096;
         };
-        if ok != 0 && spc > 0 && bps > 0 {
-            return (u64::from(spc) * u64::from(bps)).clamp(4096, 1024 * 1024);
-        }
-        4096
+        dir = p;
     }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        4096
+    let root_anc = dir.ancestors().last().unwrap_or(dir);
+    let wide = wide_null(root_anc);
+    let mut spc = 0u32;
+    let mut bps = 0u32;
+    let mut free_c = 0u32;
+    let mut total_c = 0u32;
+    // SAFETY: `wide` is NUL-terminated and all out pointers are valid scalars.
+    let ok =
+        unsafe { GetDiskFreeSpaceW(wide.as_ptr(), &mut spc, &mut bps, &mut free_c, &mut total_c) };
+    if ok != 0 && spc > 0 && bps > 0 {
+        return (u64::from(spc) * u64::from(bps)).clamp(4096, 1024 * 1024);
     }
+    4096
 }
 
 /// Writes `bytes` to `path` so readers only ever see the old or the new content, never a
@@ -280,45 +238,31 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// True if `p` is a symlink, junction or any other reparse point.
 pub fn is_link(p: &Path) -> io::Result<bool> {
     let md = fs::symlink_metadata(p)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        Ok(md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(md.file_type().is_symlink())
-    }
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    Ok(md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
 }
 
 pub(crate) fn strip_prefix_portable(target: &Path, base: &Path) -> Option<PathBuf> {
     if let Ok(rest) = target.strip_prefix(base) {
         return Some(rest.to_path_buf());
     }
-    #[cfg(windows)]
-    {
-        let mut t_comps = target.components();
-        for b_comp in base.components() {
-            let t_comp = t_comps.next()?;
-            let eq = b_comp
-                .as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&t_comp.as_os_str().to_string_lossy());
-            if !eq {
-                return None;
-            }
+    let mut t_comps = target.components();
+    for b_comp in base.components() {
+        let t_comp = t_comps.next()?;
+        let eq = b_comp
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&t_comp.as_os_str().to_string_lossy());
+        if !eq {
+            return None;
         }
-        let mut out = PathBuf::new();
-        for rem in t_comps {
-            out.push(rem.as_os_str());
-        }
-        Some(out)
     }
-    #[cfg(not(windows))]
-    {
-        None
+    let mut out = PathBuf::new();
+    for rem in t_comps {
+        out.push(rem.as_os_str());
     }
+    Some(out)
 }
 
 /// Fails if `base` itself or any existing component between `base` and `target` is a link.

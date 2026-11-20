@@ -1861,7 +1861,6 @@ mod tests {
         assert_eq!(resolved_instances, empty.root.instances_dir());
         assert!(resolved_instances.is_dir());
 
-        #[cfg(windows)]
         {
             let outside = e._d.path().join("outside-target");
             fs::create_dir_all(&outside).unwrap();

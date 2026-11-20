@@ -82,11 +82,7 @@ fn norm_components(p: &Path) -> Option<Vec<String>> {
         match c {
             Component::Prefix(x) => out.push(x.as_os_str().to_string_lossy().to_lowercase()),
             Component::RootDir => out.push("/".into()),
-            Component::Normal(n) => out.push(if cfg!(windows) {
-                n.to_string_lossy().to_lowercase()
-            } else {
-                n.to_string_lossy().into_owned()
-            }),
+            Component::Normal(n) => out.push(n.to_string_lossy().to_lowercase()),
             Component::CurDir => {}
             Component::ParentDir => return None, // `..` is never acceptable in a path we pass on
         }
@@ -470,7 +466,6 @@ impl InstallerCommand {
             .envs(&self.env)
             .args(&self.args)
             .current_dir(&self.cwd);
-        #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -1020,12 +1015,9 @@ mod tests {
         );
         assert!(!is_inside(base, Path::new(r"F:\Launcher\..\Other")));
         assert!(!is_inside(base, Path::new(r"E:\Launcher\x")));
-        if cfg!(windows) {
-            assert!(is_inside(base, Path::new(r"f:\launcher\CACHE")));
-        }
+        assert!(is_inside(base, Path::new(r"f:\launcher\CACHE")));
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_real_child_process_sees_only_the_scrubbed_environment() {
         let (_d, root, _j, sys) = setup();
@@ -1385,7 +1377,6 @@ mod tests {
         assert!(trip.check().is_err());
     }
 
-    #[cfg(windows)]
     #[test]
     fn sweep_stale_continues_past_a_locked_session_and_cleans_siblings() {
         use std::os::windows::fs::OpenOptionsExt;

@@ -10,29 +10,19 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(windows)]
 use std::time::Duration;
 
-use raw_window_handle::HasWindowHandle;
-#[cfg(windows)]
-use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::Serialize;
-#[cfg(windows)]
-use tauri::PhysicalSize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalSize, State};
 
 /// Event announcing a change to the framed game embedding state.
 pub const EMBED_EVENT: &str = "game-embed-state";
 
-#[cfg(windows)]
 const POLL_IDLE: Duration = Duration::from_millis(16);
-#[cfg(windows)]
 const POLL_ACTIVE: Duration = Duration::from_millis(24);
-#[cfg(windows)]
 const FALLBACK_TOP_PX: i32 = 44;
-#[cfg(windows)]
 const FALLBACK_MARGIN_PX: i32 = 18;
-#[cfg(windows)]
 const FALLBACK_RADIUS_PX: u32 = 0;
 
 /// Physical stage rectangle inside Clade's main window where the game window sits.
@@ -59,7 +49,6 @@ impl StageBounds {
         }
     }
 
-    #[cfg(windows)]
     fn fallback_from_window(w: &tauri::WebviewWindow) -> Self {
         let scale = w.scale_factor().unwrap_or(1.0).clamp(0.5, 4.0);
         let size = w
@@ -85,19 +74,14 @@ pub struct GameEmbedStatus {
 
 struct ActiveSession {
     instance_id: String,
-    #[cfg_attr(not(windows), allow(dead_code))]
     pid: u32,
     game_win: AtomicU64,
     attached: AtomicBool,
     maximized: AtomicBool,
-    #[cfg_attr(not(windows), allow(dead_code))]
     attach_win_rect: Mutex<Option<(i32, i32, i32, i32)>>,
-    #[cfg_attr(not(windows), allow(dead_code))]
     pre_expand_win_rect: Mutex<Option<(i32, i32, i32, i32)>>,
-    #[cfg_attr(not(windows), allow(dead_code))]
     close_requested: AtomicBool,
     close_attempts: AtomicU8,
-    #[cfg_attr(not(windows), allow(dead_code))]
     focus_requested: AtomicBool,
     stop: Arc<AtomicBool>,
 }
@@ -134,7 +118,6 @@ impl ActiveSession {
 /// Snapshot saved when detaching a framed game window so host geometry can be restored cleanly.
 struct FinishedEmbed {
     was_attached: bool,
-    #[cfg_attr(not(windows), allow(dead_code))]
     attach_win_rect: Option<(i32, i32, i32, i32)>,
 }
 
@@ -222,7 +205,6 @@ impl Default for EmbedState {
 pub fn host_window_id(window: &tauri::WebviewWindow) -> Option<u64> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
-        #[cfg(windows)]
         RawWindowHandle::Win32(h) => Some(h.hwnd.get() as usize as u64),
         _ => None,
     }
@@ -256,7 +238,6 @@ pub fn set_game_stage_bounds(
 ) {
     let bounds = StageBounds::clamped(x, y, width, height, radius);
     state.set_bounds(bounds);
-    #[cfg(windows)]
     if let Some(session) = state.current_session() {
         let mc_id = session.game_win.load(Ordering::Acquire);
         if session.attached.load(Ordering::Acquire) && mc_id != 0 {
@@ -268,8 +249,6 @@ pub fn set_game_stage_bounds(
             }
         }
     }
-    #[cfg(not(windows))]
-    let _ = app;
 }
 
 #[tauri::command]
@@ -284,31 +263,26 @@ pub fn toggle_game_maximize(app: AppHandle, state: State<'_, EmbedState>) -> Gam
     session.maximized.store(next, Ordering::Release);
 
     if let Some(w) = app.get_webview_window("main") {
-        #[cfg(windows)]
-        {
-            // Expand to the monitor work area instead of Win32 SW_MAXIMIZE so DWM never paints
-            // duplicate native caption buttons on top of Clade's custom header strip.
-            let _ = w.set_resizable(!next);
-            if let Some(host_id) = host_window_id(&w) {
-                let mc_id = session.game_win.load(Ordering::Acquire);
-                let app_clone = app.clone();
-                let session_clone = session.clone();
-                let _ = app.run_on_main_thread(move || {
-                    let host_hwnd = host_id as usize as win32::HWND;
-                    let mc_hwnd = mc_id as usize as win32::HWND;
-                    win32::set_work_area_expanded(host_hwnd, next, &session_clone);
-                    if mc_id != 0 {
-                        win32::sync_host_clipping(
-                            host_hwnd,
-                            mc_hwnd,
-                            Some(active_bounds(&app_clone).0),
-                        );
-                    }
-                });
-            }
+        // Expand to the monitor work area instead of Win32 SW_MAXIMIZE so DWM never paints
+        // duplicate native caption buttons on top of Clade's custom header strip.
+        let _ = w.set_resizable(!next);
+        if let Some(host_id) = host_window_id(&w) {
+            let mc_id = session.game_win.load(Ordering::Acquire);
+            let app_clone = app.clone();
+            let session_clone = session.clone();
+            let _ = app.run_on_main_thread(move || {
+                let host_hwnd = host_id as usize as win32::HWND;
+                let mc_hwnd = mc_id as usize as win32::HWND;
+                win32::set_work_area_expanded(host_hwnd, next, &session_clone);
+                if mc_id != 0 {
+                    win32::sync_host_clipping(
+                        host_hwnd,
+                        mc_hwnd,
+                        Some(active_bounds(&app_clone).0),
+                    );
+                }
+            });
         }
-        #[cfg(not(windows))]
-        let _ = w;
     }
     let status = session.status();
     let _ = app.emit(EMBED_EVENT, &status);
@@ -338,20 +312,15 @@ pub fn on_host_resized(app: &AppHandle) {
     if !session.attached.load(Ordering::Acquire) {
         return;
     }
-    #[cfg(windows)]
-    {
-        let mc_id = session.game_win.load(Ordering::Acquire);
-        if mc_id != 0 {
-            if let Some(host_id) = app
-                .get_webview_window("main")
-                .and_then(|w| host_window_id(&w))
-            {
-                win32::dispatch_host_clipping(app, host_id, mc_id, Some(active_bounds(app).0));
-            }
+    let mc_id = session.game_win.load(Ordering::Acquire);
+    if mc_id != 0 {
+        if let Some(host_id) = app
+            .get_webview_window("main")
+            .and_then(|w| host_window_id(&w))
+        {
+            win32::dispatch_host_clipping(app, host_id, mc_id, Some(active_bounds(app).0));
         }
     }
-    #[cfg(not(windows))]
-    let _ = session;
 }
 
 /// Sends a graceful close signal to the embedded game window on the first close click.
@@ -396,10 +365,7 @@ pub fn start_session(app: AppHandle, instance_id: String, pid: u32) {
     let _ = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            #[cfg(windows)]
             run_watcher_win32(app, session, host_id);
-            #[cfg(not(windows))]
-            let _ = (app, session, host_id);
         });
 }
 
@@ -414,28 +380,22 @@ pub fn end_session(app: &AppHandle, instance_id: &str) {
     let _ = app.emit(EMBED_EVENT, GameEmbedStatus::default());
     if ended.was_attached {
         if let Some(w) = app.get_webview_window("main") {
-            #[cfg(windows)]
-            {
-                let _ = w.set_resizable(true);
-                if let Some(host_id) = host_window_id(&w) {
-                    let attach_rect = ended.attach_win_rect;
-                    let _ = app.run_on_main_thread(move || {
-                        let host_hwnd = host_id as usize as win32::HWND;
-                        win32::sync_host_clipping(host_hwnd, std::ptr::null_mut(), None);
-                        win32::set_corner_preference(host_hwnd, false);
-                        if let Some((x, y, width, height)) = attach_rect {
-                            win32::set_window_rect(host_hwnd, x, y, width, height);
-                        }
-                    });
-                }
+            let _ = w.set_resizable(true);
+            if let Some(host_id) = host_window_id(&w) {
+                let attach_rect = ended.attach_win_rect;
+                let _ = app.run_on_main_thread(move || {
+                    let host_hwnd = host_id as usize as win32::HWND;
+                    win32::sync_host_clipping(host_hwnd, std::ptr::null_mut(), None);
+                    win32::set_corner_preference(host_hwnd, false);
+                    if let Some((x, y, width, height)) = attach_rect {
+                        win32::set_window_rect(host_hwnd, x, y, width, height);
+                    }
+                });
             }
-            #[cfg(not(windows))]
-            let _ = (w, ended.attach_win_rect);
         }
     }
 }
 
-#[cfg(windows)]
 fn mark_attached(app: &AppHandle, session: &ActiveSession, win_id: u64) {
     session.game_win.store(win_id, Ordering::Release);
     if !session.attached.swap(true, Ordering::AcqRel) {
@@ -460,7 +420,6 @@ fn mark_attached(app: &AppHandle, session: &ActiveSession, win_id: u64) {
     }
 }
 
-#[cfg(windows)]
 fn active_bounds(app: &AppHandle) -> (StageBounds, u64) {
     let state = app.state::<EmbedState>();
     let (maybe, seq) = state.current_bounds();
@@ -472,7 +431,6 @@ fn active_bounds(app: &AppHandle) -> (StageBounds, u64) {
     (bounds, seq)
 }
 
-#[cfg(windows)]
 fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
     let host_hwnd = host_id as usize as win32::HWND;
     let mut last_seq = u64::MAX;
@@ -526,7 +484,6 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 
 // ===================================================================================== Windows FFI
 
-#[cfg(windows)]
 mod win32 {
     use super::StageBounds;
     use tauri::AppHandle;

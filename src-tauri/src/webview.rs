@@ -73,7 +73,6 @@ fn set_bundled_folder(dir: &std::path::Path) {
     std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", dir);
 }
 
-#[cfg(windows)]
 mod win10_acl {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
@@ -325,14 +324,8 @@ mod win10_acl {
 /// `ALL RESTRICTED APPLICATION PACKAGES` (`S-1-15-2-2`) hold inheritable read and execute (`RX`)
 /// permissions on `dir` so WebView2's AppContainer renderer can load from it on Windows 10.
 /// Returns `Ok(true)` when ACLs were updated and `Ok(false)` when they were already present.
-#[cfg(windows)]
 pub fn ensure_appcontainer_rx_acl(dir: &std::path::Path) -> Result<bool, String> {
     win10_acl::ensure_appcontainer_rx_acl(dir)
-}
-
-#[cfg(not(windows))]
-pub fn ensure_appcontainer_rx_acl(_dir: &std::path::Path) -> Result<bool, String> {
-    Ok(false)
 }
 
 fn select_runtime_with(
@@ -402,19 +395,12 @@ pub fn select_runtime(root: &PortableRoot) -> RuntimeSource {
 }
 
 /// Verifies a WebView2 runtime can actually be loaded; returns its version.
-#[cfg(windows)]
 pub fn runtime_version() -> Result<String, String> {
     wry::webview_version().map_err(|e| e.to_string())
 }
 
-#[cfg(not(windows))]
-pub fn runtime_version() -> Result<String, String> {
-    Ok("n/a".into())
-}
-
 /// Suspends the hidden WebView2 instance so Chromium drops its working set and stops timers/GPU
 /// activity while Minecraft runs with the launcher window hidden.
-#[cfg(windows)]
 pub fn suspend_hidden_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -449,12 +435,8 @@ pub fn suspend_hidden_window(app: &tauri::AppHandle) {
     });
 }
 
-#[cfg(not(windows))]
-pub fn suspend_hidden_window(_app: &tauri::AppHandle) {}
-
 /// Lowers WebView2's memory target while the launcher window stays open unfocused behind a running
 /// game.
-#[cfg(windows)]
 pub fn throttle_unfocused_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -479,12 +461,8 @@ pub fn throttle_unfocused_window(app: &tauri::AppHandle) {
     });
 }
 
-#[cfg(not(windows))]
-pub fn throttle_unfocused_window(_app: &tauri::AppHandle) {}
-
 /// Restores normal memory usage, resumes from suspension, and marks the WebView2 controller
 /// visible again when the launcher window returns to the screen.
-#[cfg(windows)]
 pub fn resume_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -516,9 +494,6 @@ pub fn resume_window(app: &tauri::AppHandle) {
         }
     });
 }
-
-#[cfg(not(windows))]
-pub fn resume_window(_app: &tauri::AppHandle) {}
 
 /// Disposable Chromium component-updater and telemetry directories inside `data/webview2/EBWebView`
 /// that serve no purpose in a local Tauri UI (DRM modules, speech models, URL blocklists, CRX
@@ -684,7 +659,6 @@ mod tests {
         std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
     }
 
-    #[cfg(windows)]
     fn inspect_rx_on_path(path: &Path, sid_str: &str) -> Result<(u32, bool), String> {
         use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
         use windows_sys::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
@@ -720,7 +694,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn appcontainer_rx_acl_is_granted_idempotently_and_inherited_by_children() {
         let tmp = tempfile::tempdir().unwrap();
