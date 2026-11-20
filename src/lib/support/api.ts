@@ -9,6 +9,12 @@ export interface DiagnosticsExport {
   name: string;
 }
 
+export interface UpdateCheckResult {
+  status: "up_to_date" | "update_available";
+  currentVersion: string;
+  latestVersion: string | null;
+}
+
 export const supportApi = {
   openCladeFolder: async (): Promise<void> => {
     await call("open_clade_folder");
@@ -34,8 +40,36 @@ export const supportApi = {
     const raw = await call("clear_retired_vaults");
     return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
   },
+  checkForUpdates: async (): Promise<UpdateCheckResult> => {
+    const raw = await call("check_for_updates");
+    if (typeof raw !== "object" || raw === null) throw new Error("unexpected update reply");
+    const r = raw as Record<string, unknown>;
+    const status = r.status === "update_available" || r.status === "up_to_date" ? r.status : null;
+    const currentVersion = typeof r.currentVersion === "string" ? r.currentVersion : "";
+    const latestVersion =
+      typeof r.latestVersion === "string"
+        ? r.latestVersion
+        : r.latestVersion === null
+          ? null
+          : undefined;
+    if (!status || !currentVersion || latestVersion === undefined) {
+      throw new Error("unexpected update reply");
+    }
+    return { status, currentVersion, latestVersion };
+  },
+  openReleasePage: async (tag?: string | null): Promise<void> => {
+    await call("open_release_page", tag ? { tag } : {});
+  },
 };
 
 type FullSupportApi = typeof supportApi;
-export type SupportApi = Omit<FullSupportApi, "retiredVaultsCount" | "clearRetiredVaults"> &
-  Partial<Pick<FullSupportApi, "retiredVaultsCount" | "clearRetiredVaults">>;
+export type SupportApi = Omit<
+  FullSupportApi,
+  "retiredVaultsCount" | "clearRetiredVaults" | "checkForUpdates" | "openReleasePage"
+> &
+  Partial<
+    Pick<
+      FullSupportApi,
+      "retiredVaultsCount" | "clearRetiredVaults" | "checkForUpdates" | "openReleasePage"
+    >
+  >;

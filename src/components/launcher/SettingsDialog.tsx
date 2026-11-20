@@ -42,6 +42,13 @@ interface Props {
 
 type ConfirmAction = "reset" | "retired-vaults" | null;
 
+type UpdateUiState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "up_to_date" }
+  | { kind: "available"; latestVersion: string }
+  | { kind: "error"; error: unknown };
+
 /**
  * Launcher settings: global launcher behaviour only, and intentionally short. Anything that belongs
  * to one profile lives in that profile's settings; anything about a player lives in the account's.
@@ -53,9 +60,14 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
   // A pending confirmation ("Reset settings?" or "Clear archived vaults?") must not be dismissed
   // by a stray click or Escape.
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  // Only checked on an explicit click; never triggers a network call automatically.
+  const [updateState, setUpdateState] = useState<UpdateUiState>({ kind: "idle" });
   const locked = confirmAction !== null;
   const close = (next: boolean) => {
-    if (!next) setConfirmAction(null);
+    if (!next) {
+      setConfirmAction(null);
+      setUpdateState({ kind: "idle" });
+    }
     onOpenChange(next);
   };
 
@@ -85,6 +97,8 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
         support={support}
         confirmAction={confirmAction}
         setConfirmAction={setConfirmAction}
+        updateState={updateState}
+        setUpdateState={setUpdateState}
         onDone={() => close(false)}
       />
     </Modal>
@@ -96,17 +110,49 @@ function SettingsBody({
   support,
   confirmAction,
   setConfirmAction,
+  updateState,
+  setUpdateState,
   onDone,
 }: {
   open: boolean;
   support: SupportApi;
   confirmAction: ConfirmAction;
   setConfirmAction: (v: ConfirmAction) => void;
+  updateState: UpdateUiState;
+  setUpdateState: (v: UpdateUiState) => void;
   onDone: () => void;
 }) {
   const t = useT();
   const s = useUiSettings();
   const isAdvanced = s.uiMode === "advanced";
+
+  const checkUpdates = () => {
+    if (!support.checkForUpdates || updateState.kind === "checking" || confirmAction !== null) {
+      return;
+    }
+    playSound("click");
+    setUpdateState({ kind: "checking" });
+    support.checkForUpdates().then(
+      (res) => {
+        if (res.status === "update_available" && res.latestVersion) {
+          setUpdateState({ kind: "available", latestVersion: res.latestVersion });
+        } else {
+          setUpdateState({ kind: "up_to_date" });
+        }
+      },
+      (e: unknown) => {
+        setUpdateState({ kind: "error", error: e });
+      },
+    );
+  };
+
+  const openRelease = (tag: string) => {
+    if (!support.openReleasePage || confirmAction !== null) return;
+    playSound("click");
+    support.openReleasePage(tag).catch((e: unknown) => {
+      setUpdateState({ kind: "error", error: e });
+    });
+  };
 
   return (
     <>
@@ -126,8 +172,8 @@ function SettingsBody({
           />
         </div>
       </div>
-      <div className="border-graphite/10 mt-1 flex items-center justify-between gap-4 border-t pt-2">
-        <div className="flex items-center gap-4">
+      <div className="border-graphite/10 mt-1 flex items-center justify-between gap-3 border-t pt-2">
+        <div className="flex shrink-0 items-center gap-4">
           <p className="text-ink-muted/75 text-[0.75rem] leading-snug">
             <span className="block">Clade</span>
             <span className="block">{COPYRIGHT_LINE}</span>
@@ -135,17 +181,64 @@ function SettingsBody({
           </p>
           <CatEgg />
         </div>
-        <button
-          type="button"
-          className={BUTTON_SOFT}
-          disabled={confirmAction !== null}
-          onClick={() => {
-            playSound("click");
-            onDone();
-          }}
-        >
-          {t("common.done")}
-        </button>
+        <div className="flex min-w-0 items-center justify-end gap-2">
+          {support.checkForUpdates && (
+            <div className="flex min-w-0 items-center gap-2">
+              {updateState.kind === "up_to_date" && (
+                <span role="status" className="text-ink-muted truncate text-[0.8125rem]">
+                  {t("settings.updatesUpToDate")}
+                </span>
+              )}
+              {updateState.kind === "available" && (
+                <span
+                  role="status"
+                  className="text-clay-deep truncate text-[0.8125rem] font-medium"
+                >
+                  {t("settings.updateAvailable", { version: updateState.latestVersion })}
+                </span>
+              )}
+              {updateState.kind === "error" && (
+                <span role="alert" className="text-clay-deep truncate text-[0.8125rem]">
+                  {describeError("settings", updateState.error)}
+                </span>
+              )}
+              {updateState.kind === "available" && support.openReleasePage ? (
+                <button
+                  type="button"
+                  disabled={confirmAction !== null}
+                  onClick={() => openRelease(updateState.latestVersion)}
+                  className={`${BUTTON_SMALL_SOFT} shrink-0 whitespace-nowrap`}
+                >
+                  {t("settings.openRelease")}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={updateState.kind === "checking" || confirmAction !== null}
+                  onClick={checkUpdates}
+                  className={`${BUTTON_SMALL_QUIET} shrink-0 whitespace-nowrap`}
+                >
+                  {updateState.kind === "checking"
+                    ? t("settings.checkingUpdates")
+                    : updateState.kind === "up_to_date" || updateState.kind === "error"
+                      ? t("settings.checkUpdatesAgain")
+                      : t("settings.checkUpdates")}
+                </button>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            className={`${BUTTON_SOFT} shrink-0`}
+            disabled={confirmAction !== null}
+            onClick={() => {
+              playSound("click");
+              onDone();
+            }}
+          >
+            {t("common.done")}
+          </button>
+        </div>
       </div>
     </>
   );

@@ -375,6 +375,12 @@ export const ru: Record<MessageKey, Message> = {
     many: "Удалено {count} архивных хранилищ.",
     other: "Удалено {count} архивного хранилища.",
   },
+  "settings.checkUpdates": "Проверить обновления",
+  "settings.checkUpdatesAgain": "Повторить",
+  "settings.checkingUpdates": "Проверка…",
+  "settings.updatesUpToDate": "Обновлений нет",
+  "settings.updateAvailable": "Доступна {version}",
+  "settings.openRelease": "Открыть релиз",
   "settings.cat": "Кот",
   "onboarding.step": "Шаг {current} из {total}",
   "onboarding.skip": "Пропустить",
@@ -396,6 +402,10 @@ export const ru: Record<MessageKey, Message> = {
     "Не удалось создать файл диагностики. Проверь, что на диске есть место и он не защищён от записи.",
   "error.settings.retired_vaults_clear_failed":
     "Не удалось удалить архивные хранилища. Проверь, что папка Clade не защищена от записи и не занята.",
+  "error.settings.offline": "Нет сети. Повтори попытку.",
+  "error.settings.update_rate_limited": "Слишком часто. Попробуй позже.",
+  "error.settings.update_check_failed": "Не удалось проверить обновления.",
+  "error.settings.browser_unavailable": "Не удалось открыть страницу релиза.",
   "error.settings.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
   "error.settings.unsupported_value": "Такая настройка не поддерживается.",

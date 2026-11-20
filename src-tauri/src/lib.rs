@@ -41,6 +41,7 @@ pub mod startup_text;
 pub mod support_cmd;
 pub mod system;
 pub mod ui_settings;
+pub mod update_check;
 pub mod vault;
 pub mod vault_recovery;
 pub mod versions;
@@ -304,6 +305,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(settings_state)
+        .manage(update_check::UpdateState::new())
         .manage(glass::GlassState::new())
         .manage(profiles_state)
         .manage(accounts_state)
@@ -330,6 +332,8 @@ pub fn run() {
             support_cmd::export_diagnostics,
             support_cmd::retired_vaults_count,
             support_cmd::clear_retired_vaults,
+            update_check::check_for_updates,
+            update_check::open_release_page,
             profiles::list_profiles,
             profiles::select_profile,
             profiles::get_version_catalog,

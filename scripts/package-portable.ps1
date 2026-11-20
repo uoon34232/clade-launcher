@@ -106,12 +106,14 @@ if (-not $SkipBuild) {
     # The C code that is compiled into the binary (the TLS library) records its source paths too; MSVC's
     # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered.
     $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
+    if ($Tag) { $env:CLADE_RELEASE_TAG = $Tag } else { Remove-Item -LiteralPath Env:CLADE_RELEASE_TAG -ErrorAction SilentlyContinue }
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE) { throw 'pnpm install failed' }
     pnpm tauri build --no-bundle --target $target '--' --locked --config $cargoCfg
     if ($LASTEXITCODE) { throw 'tauri build failed' }
   } finally {
     Remove-Item -LiteralPath Env:CFLAGS -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:CLADE_RELEASE_TAG -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $cargoCfg) { Remove-Item -LiteralPath $cargoCfg -Force -ErrorAction SilentlyContinue }
     Pop-Location
   }

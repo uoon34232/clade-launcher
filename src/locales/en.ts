@@ -364,6 +364,12 @@ export const en = {
     one: "Deleted {count} archived vault.",
     other: "Deleted {count} archived vaults.",
   },
+  "settings.checkUpdates": "Check for updates",
+  "settings.checkUpdatesAgain": "Check again",
+  "settings.checkingUpdates": "Checking…",
+  "settings.updatesUpToDate": "Up to date",
+  "settings.updateAvailable": "{version} available",
+  "settings.openRelease": "Open release",
   "settings.cat": "Cat",
   "onboarding.step": "Step {current} of {total}",
   "onboarding.skip": "Skip",
@@ -385,6 +391,10 @@ export const en = {
     "The diagnostics file couldn't be created. Check that the drive has space and isn't read-only.",
   "error.settings.retired_vaults_clear_failed":
     "Archived vaults couldn't be deleted. Check that the Clade folder isn't read-only or in use.",
+  "error.settings.offline": "No connection. Try again.",
+  "error.settings.update_rate_limited": "Too many checks. Try later.",
+  "error.settings.update_check_failed": "Couldn't check for updates.",
+  "error.settings.browser_unavailable": "Couldn't open the release page.",
   "error.settings.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
   "error.settings.unsupported_value": "That setting isn't supported.",
