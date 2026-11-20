@@ -30,7 +30,7 @@ A profile is one Minecraft setup: a version, its worlds, its settings and, if yo
 
 Create a **Vanilla** profile for any Minecraft version Mojang has published, from the newest release back to the old betas. Or create a **Modded** profile and choose Fabric, Forge, NeoForge or Quilt. Clade installs the version and the loader for you. The mods themselves are yours to add: Clade never downloads or manages them.
 
-Profiles are completely separate. Keeping a heavily modded world next to a clean Vanilla one is safe. Each profile can be renamed at any time without moving or renaming its folder, switched to another Minecraft or compatible loader version in place while keeping its worlds and options, duplicated into a separate copy before trying an update, and opened straight to its `game/` folder from Clade. Clade opens in a calm **Simple** mode by default; switching to **Advanced** mode in Settings unlocks snapshot/historical version filters, manual loader version selection, and per-profile game memory, initial window size, and allowlisted JVM flags. If a folder inside `instances/` ever has a damaged or unreadable `instance.json`, Clade leaves its files untouched and shows a warning so it never disappears silently while your other profiles keep working.
+Profiles are completely separate. Keeping a heavily modded world next to a clean Vanilla one is safe. Each profile can be renamed at any time without moving or renaming its folder, switched to another Minecraft or compatible loader version in place while keeping its worlds and options, duplicated into a separate copy before trying an update, and opened straight to its `game/` folder from Clade. Clade opens in a calm **Simple** mode by default; switching to **Advanced** mode in Settings unlocks snapshot/historical version filters, manual loader version selection, and per-profile game memory, initial window size, and allowlisted JVM flags. If a folder inside `instances/` ever has a damaged or unreadable `instance.json`, Clade leaves its files untouched and shows a warning so it never disappears silently while your other profiles keep working. Removing a profile from Clade moves its folder into `instances/.removed/` without deleting anything, and you can restore it in one click at any time.
 
 <p align="center"><img src="docs/media/create-profile.gif" alt="Creating a profile: choosing Vanilla or Modded, a Minecraft version and a loader" width="720"></p>
 
@@ -40,7 +40,7 @@ Add as many Microsoft accounts as you like and switch between them from the bar 
 
 You sign in on Microsoft's own page in your browser. Clade never sees your password. There is no cracked, guest or offline mode.
 
-Your saved sign-ins are encrypted with a passphrase you choose, and it cannot be recovered. If you forget it, choose **Forgot passphrase?** on the unlock screen, then **Start fresh**: Clade archives the old encrypted store inside its own folder (`data/retired-vaults/`, nothing is deleted) and you sign in to your accounts again with a new passphrase. Your profiles, worlds, playtime and settings are kept. Starting fresh does not sign you out at Microsoft. Clearing out old archived stores is manual for now.
+Your saved sign-ins are encrypted with a passphrase you choose, and it cannot be recovered. If you forget it, choose **Forgot passphrase?** on the unlock screen, then **Start fresh**: Clade archives the old encrypted store inside its own folder (`data/retired-vaults/`, nothing is deleted) and you sign in to your accounts again with a new passphrase. Your profiles, worlds, playtime and settings are kept. Starting fresh does not sign you out at Microsoft. Once you have signed in again, you can delete old archived stores from Settings -> Support.
 
 <p align="center"><img src="docs/media/account-menu.gif" alt="Switching accounts and opening an account card" width="720"></p>
 
@@ -60,13 +60,13 @@ Clade speaks English and Russian. Change the language in Settings and the whole 
 
 Clade is in active pre-release development.
 
-Implemented today: creating and renaming profiles, Simple and Advanced interface modes, per-profile memory, window size, and allowlisted JVM flags, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game, removing a profile from Clade without deleting its files, surfacing unreadable profile folders as warnings without touching their files, and the English and Russian interface.
+Implemented today: creating, renaming and duplicating profiles, switching Minecraft or loader versions in place, Simple and Advanced interface modes, per-profile memory, window size and allowlisted JVM flags, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game (framed inside Clade, with Clade kept open, or with Clade hidden), removing a profile without deleting its files and restoring removed profiles in one click, surfacing unreadable profile folders as warnings without touching their files, clearing archived sign-in vaults with confirmation, manual update checking in Settings, and the English and Russian interface.
 
 Sign-in, Java provisioning, launching and zero-footprint portability have been verified with a real Microsoft/Minecraft account on Windows 11 x64, covering Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and there is no stable `1.0` release yet.
 
 ## Download
 
-Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
+Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview.4`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview.4)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
 
 To verify the download in PowerShell against the `.sha256` file published next to the ZIP:
 
