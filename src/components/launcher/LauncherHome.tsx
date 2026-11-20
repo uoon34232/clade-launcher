@@ -264,18 +264,12 @@ export function LauncherHome({
     const measure = () => {
       const dpr = window.devicePixelRatio || 1;
       const rect = el.getBoundingClientRect();
-      const width = Math.max(0, Math.round(rect.width * dpr));
-      const height = Math.max(0, Math.round(rect.height * dpr));
+      const x = Math.round(rect.left * dpr);
+      const y = Math.round(rect.top * dpr);
+      const width = Math.max(0, Math.round(rect.right * dpr) - x);
+      const height = Math.max(0, Math.round(rect.bottom * dpr) - y);
       if (width < 64 || height < 64) return;
-      const radiusCss =
-        Number.parseFloat(window.getComputedStyle(el).borderTopLeftRadius || "16") || 16;
-      const next = {
-        x: Math.round(rect.left * dpr),
-        y: Math.round(rect.top * dpr),
-        width,
-        height,
-        radius: Math.max(0, Math.round(radiusCss * dpr)),
-      };
+      const next = { x, y, width, height, radius: 0 };
       const key = `${next.x},${next.y},${next.width},${next.height},${next.radius}`;
       if (key === last) return;
       last = key;
@@ -424,15 +418,20 @@ export function LauncherHome({
           onToggleMaximize={toggleMaximize}
         />
         <div
-          ref={stageRef}
-          data-testid="game-stage"
           aria-hidden={!embed.active}
           className={
             embed.active
-              ? "bg-graphite/95 ring-graphite/15 pointer-events-none absolute top-11 right-3.5 bottom-3.5 left-3.5 rounded-2xl shadow-[0_24px_60px_-20px_rgb(43_38_34/0.55)] ring-1"
-              : "pointer-events-none invisible absolute top-11 right-3.5 bottom-3.5 left-3.5 rounded-2xl"
+              ? "bg-sand/85 ring-graphite/12 pointer-events-none absolute top-11 right-3 bottom-3 left-3 rounded-xl p-1.5 shadow-[0_20px_48px_-18px_rgb(43_38_34/0.4)] ring-1"
+              : "pointer-events-none invisible absolute top-11 right-3 bottom-3 left-3 rounded-xl p-1.5"
           }
-        />
+        >
+          <div
+            ref={stageRef}
+            data-testid="game-stage"
+            aria-hidden={!embed.active}
+            className={embed.active ? "ring-graphite/15 h-full w-full ring-1" : "h-full w-full"}
+          />
+        </div>
         {!embed.active && (
           <section className="absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]">
             <Hero

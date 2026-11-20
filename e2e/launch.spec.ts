@@ -259,7 +259,7 @@ test.describe("framed game mode (inside Clade)", () => {
     };
     expect(bounds.width).toBeGreaterThan(0);
     expect(bounds.height).toBeGreaterThan(0);
-    expect(bounds.radius).toBeGreaterThan(0);
+    expect(bounds.radius).toBe(0);
 
     await playButton(page).click();
     await backend.playing("survival");
