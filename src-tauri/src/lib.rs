@@ -378,8 +378,10 @@ pub fn run() {
             #[cfg(not(windows))]
             let show_after_build = {
                 let show = cfg.visible;
-                // Keep unrealized while tao attaches its Wayland CSD headerbar for decorations=false.
+                // Keep unrealized while tao attaches its Wayland CSD headerbar for decorations=false,
+                // and request an RGBA visual so "Transparency effects" can toggle window alpha live.
                 cfg.visible = false;
+                cfg.transparent = true;
                 cfg.additional_browser_args = None;
                 show
             };

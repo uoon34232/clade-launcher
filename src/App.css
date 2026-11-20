@@ -166,6 +166,7 @@
 
 .bg-sway,
 .bg-bob {
+  will-change: transform;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-direction: alternate;
@@ -182,6 +183,7 @@
 }
 [data-bg-paused="true"] .bg-sway,
 [data-bg-paused="true"] .bg-bob {
+  will-change: auto;
   animation-play-state: paused !important;
 }
 [data-bg-hidden="true"] .bg-sway,

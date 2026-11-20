@@ -63,7 +63,7 @@ pub struct UiSettingsDto {
     pub reduced_motion: String,
     /// `system`, `on` or `off`: the window-material ("Transparency effects") choice.
     pub transparency: String,
-    /// True where the native window backdrop material is available (Windows 11).
+    /// True where the native window translucency/backdrop material is supported (Windows / Linux).
     pub transparency_supported: bool,
     /// False until the first-run introduction was finished or skipped.
     pub onboarding_done: bool,
@@ -102,7 +102,7 @@ impl UiSettingsDto {
             ui_mode: s.ui.ui_mode.clone(),
             reduced_motion: s.ui.reduced_motion.clone(),
             transparency: s.ui.transparency.clone(),
-            transparency_supported: cfg!(windows),
+            transparency_supported: cfg!(any(windows, target_os = "linux")),
             onboarding_done: s.ui.onboarding_done,
             memory_mb: s.minecraft.memory_mb,
             memory: MemoryInfo {
@@ -440,7 +440,7 @@ mod tests {
                 ui_mode: "simple".into(),
                 reduced_motion: "system".into(),
                 transparency: "system".into(),
-                transparency_supported: cfg!(windows),
+                transparency_supported: cfg!(any(windows, target_os = "linux")),
                 onboarding_done: false,
                 memory_mb: None,
                 memory: dto.memory.clone(),

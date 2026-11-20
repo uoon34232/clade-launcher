@@ -391,10 +391,7 @@ fn select_runtime_with(
 }
 
 #[cfg(any(target_os = "linux", test))]
-const LINUX_NVIDIA_WEBKIT_ENV: &[(&str, &str)] = &[
-    ("__NV_DISABLE_EXPLICIT_SYNC", "1"),
-    ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
-];
+const LINUX_NVIDIA_WEBKIT_ENV: &[(&str, &str)] = &[("__NV_DISABLE_EXPLICIT_SYNC", "1")];
 
 #[cfg(any(target_os = "linux", test))]
 fn apply_linux_webkit_env_with(nvidia_present: bool) {
@@ -403,8 +400,8 @@ fn apply_linux_webkit_env_with(nvidia_present: bool) {
     }
     for &(key, val) in LINUX_NVIDIA_WEBKIT_ENV {
         // Called once at startup while single-threaded, before GTK/WebKitGTK initializes.
-        // Respects any explicit value the user set in their environment.
-        // portability-allow: guards WebKitGTK against Wayland protocol error 71 and blank surfaces on NVIDIA drivers
+        // Respects any explicit value the user set in their environment, leaving DMA-BUF enabled.
+        // portability-allow: guards WebKitGTK against Wayland protocol error 71 on NVIDIA drivers
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, val);
         }
@@ -1101,9 +1098,11 @@ mod tests {
             .iter()
             .map(|&(k, _)| (k, std::env::var_os(k)))
             .collect();
+        let dmabuf_saved = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
         for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
             std::env::remove_var(k);
         }
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
 
         apply_linux_webkit_env_with(false);
         for &(k, _) in LINUX_NVIDIA_WEBKIT_ENV {
@@ -1120,9 +1119,16 @@ mod tests {
             Ok("0"),
             "explicit user override must be preserved"
         );
+
+        std::env::remove_var("__NV_DISABLE_EXPLICIT_SYNC");
+        apply_linux_webkit_env_with(true);
         assert_eq!(
-            std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(),
+            std::env::var("__NV_DISABLE_EXPLICIT_SYNC").as_deref(),
             Ok("1")
+        );
+        assert!(
+            std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none(),
+            "GPU DMA-BUF acceleration must stay enabled by default"
         );
 
         for (k, prev) in saved {
@@ -1131,6 +1137,11 @@ mod tests {
             } else {
                 std::env::remove_var(k);
             }
+        }
+        if let Some(v) = dmabuf_saved {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", v);
+        } else {
+            std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
         }
     }
 }
