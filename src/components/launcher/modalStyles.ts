@@ -23,3 +23,4 @@ export const BUTTON_SMALL_SOFT = `${BUTTON_SMALL} bg-sand-soft text-graphite hov
 export const BUTTON_SMALL_GHOST = `${BUTTON_SMALL} text-ink-muted ring-1 ring-inset ring-graphite/15 hover:bg-graphite/5 hover:text-graphite hover:ring-graphite/25`;
 export const BUTTON_SMALL_DANGER = `${BUTTON_SMALL} text-clay-deep hover:bg-clay/10`;
 export const BUTTON_SMALL_QUIET = `${BUTTON_SMALL} text-ink-muted hover:text-graphite`;
+export const BUTTON_SMALL_PRIMARY = `${BUTTON_SMALL} dock-item--primary bg-clay px-4 font-semibold text-[#fbf6ee] shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_6px_18px_-8px_rgb(181_96_74/0.7)] hover:bg-[#c26c55] focus-visible:ring-clay/60 focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:hover:bg-clay`;

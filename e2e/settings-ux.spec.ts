@@ -850,3 +850,108 @@ test.describe("the profile menu with many profiles", () => {
     expect(lb.y + lb.height).toBeLessThanOrEqual(lm.y + lm.height + 0.5);
   });
 });
+
+test.describe("clearing archived vaults", () => {
+  test("hides the button when no archived vaults exist", async ({ page, openApp }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    await expect(dialog.getByRole("button", { name: /Clear archived vaults/ })).toHaveCount(0);
+  });
+
+  test.describe("with archived vaults", () => {
+    test.use({
+      backendConfig: {
+        ...DEFAULT_CONFIG,
+        retiredVaults: 2,
+        ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      },
+    });
+
+    test("fits 960x600 in English and Russian (Simple and Advanced), asks first, handles failure and clears archives", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      const clearBtn = dialog.getByRole("button", { name: "Clear archived vaults (2)" });
+      await expect(clearBtn).toBeVisible();
+      expect(
+        await dialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+
+      // Confirmation locks dismissal, fits 960x600, and Keep archives returns focus.
+      await clearBtn.click();
+      await expect(dialog.getByText(/Delete 2 archived vaults\?/)).toBeVisible();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeDisabled();
+      expect(
+        await dialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+      await page.mouse.click(8, 8);
+      await expect(dialog).toBeVisible();
+
+      await dialog.getByRole("button", { name: text("settings.clearRetiredVaultsKeep") }).click();
+      await expect(clearBtn).toBeFocused();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      expect(await backend.calls("clear_retired_vaults")).toHaveLength(0);
+
+      // Check Simple mode and Russian layout fit (including open confirmation) as well.
+      await dialog
+        .getByRole("radiogroup", { name: text("settings.mode") })
+        .getByRole("radio", { name: text("settings.mode.simple") })
+        .click();
+      await expect(clearBtn).toBeVisible();
+      await dialog
+        .getByRole("radiogroup", { name: text("settings.mode") })
+        .getByRole("radio", { name: text("settings.mode.advanced") })
+        .click();
+      await dialog.getByRole("radio", { name: "Русский" }).click();
+      const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+      const ruClearBtn = ruDialog.getByRole("button", { name: "Удалить архивные хранилища (2)" });
+      await expect(ruClearBtn).toBeVisible();
+      expect(
+        await ruDialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+      await ruClearBtn.click();
+      expect(
+        await ruDialog.evaluate((el) => ({
+          vertical: el.scrollHeight <= el.clientHeight + 1,
+          horizontal: el.scrollWidth <= el.clientWidth + 1,
+        })),
+      ).toEqual({ vertical: true, horizontal: true });
+      await ruDialog
+        .getByRole("button", { name: textRu("settings.clearRetiredVaultsKeep") })
+        .click();
+
+      // Switch back to English and verify failure -> retry -> permanent deletion.
+      await ruDialog.getByRole("radio", { name: "English" }).click();
+      await backend.failNext("clear_retired_vaults", "retired_vaults_clear_failed");
+      await clearBtn.click();
+      await dialog.getByRole("button", { name: text("settings.clearRetiredVaultsDo") }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.retired_vaults_clear_failed"),
+      );
+      await expect(clearBtn).toBeVisible();
+
+      await clearBtn.click();
+      await dialog.getByRole("button", { name: text("settings.clearRetiredVaultsDo") }).click();
+      await expect(dialog.getByRole("status")).toHaveText("Deleted 2 archived vaults.");
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: /Clear archived vaults/ })).toHaveCount(0);
+      expect((await backend.state()).retiredVaults).toBe(0);
+    });
+  });
+});

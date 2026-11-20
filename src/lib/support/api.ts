@@ -26,6 +26,16 @@ export const supportApi = {
     if (!/^[\w.-]{1,80}$/.test(name)) throw new Error("unexpected diagnostics reply");
     return { name };
   },
+  retiredVaultsCount: async (): Promise<number> => {
+    const raw = await call("retired_vaults_count");
+    return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+  },
+  clearRetiredVaults: async (): Promise<number> => {
+    const raw = await call("clear_retired_vaults");
+    return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+  },
 };
 
-export type SupportApi = typeof supportApi;
+type FullSupportApi = typeof supportApi;
+export type SupportApi = Omit<FullSupportApi, "retiredVaultsCount" | "clearRetiredVaults"> &
+  Partial<Pick<FullSupportApi, "retiredVaultsCount" | "clearRetiredVaults">>;

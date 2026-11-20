@@ -350,6 +350,20 @@ export const en = {
     "Reset settings to their defaults? Your profiles, worlds, accounts and playtime stay as they are.",
   "settings.resetKeep": "Keep settings",
   "settings.resetDo": "Reset",
+  "settings.clearRetiredVaults": "Clear archived vaults ({count})",
+  "settings.clearingRetiredVaults": "Clearing…",
+  "settings.clearRetiredVaultsConfirm": {
+    by: "count",
+    one: "Delete {count} archived vault? Active accounts, profiles and worlds stay untouched.",
+    other: "Delete {count} archived vaults? Active accounts, profiles and worlds stay untouched.",
+  },
+  "settings.clearRetiredVaultsKeep": "Keep archives",
+  "settings.clearRetiredVaultsDo": "Delete",
+  "settings.retiredVaultsCleared": {
+    by: "count",
+    one: "Deleted {count} archived vault.",
+    other: "Deleted {count} archived vaults.",
+  },
   "settings.cat": "Cat",
   "onboarding.step": "Step {current} of {total}",
   "onboarding.skip": "Skip",
@@ -369,6 +383,8 @@ export const en = {
   "error.settings.unknown": "That didn't work.",
   "error.settings.diagnostics_failed":
     "The diagnostics file couldn't be created. Check that the drive has space and isn't read-only.",
+  "error.settings.retired_vaults_clear_failed":
+    "Archived vaults couldn't be deleted. Check that the Clade folder isn't read-only or in use.",
   "error.settings.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
   "error.settings.unsupported_value": "That setting isn't supported.",

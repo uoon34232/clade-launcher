@@ -409,6 +409,7 @@ describe("structured backend errors are worded in the current language", () => {
         "invalid_resolution",
         "invalid_jvm_args",
         "diagnostics_failed",
+        "retired_vaults_clear_failed",
         // removing or duplicating a profile
         "already_running",
         "busy",
@@ -472,6 +473,7 @@ describe("structured backend errors are worded in the current language", () => {
         "unsupported_folder_path",
         "invalid_memory",
         "diagnostics_failed",
+        "retired_vaults_clear_failed",
         "open_failed",
         "storage",
       ]),
