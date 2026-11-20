@@ -65,7 +65,7 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
   return (
     <div
       ref={strip}
-      data-tauri-drag-region
+      {...(!maximized ? { "data-tauri-drag-region": true } : {})}
       className="absolute inset-x-0 top-0 z-20 flex h-11 justify-end px-2 pt-1.5"
     >
       {/* The wordmark is a button (not a drag region); the empty strip around it still drags the window. */}
