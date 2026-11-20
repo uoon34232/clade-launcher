@@ -92,7 +92,24 @@ fn trim_trailing_dots(slice: &str, min_len: usize) -> usize {
     end
 }
 
-/// Replaces the launcher root with `<clade>`, Windows drive paths with `<path>`, and UNC paths
+fn consume_path_span(text: &str, i: usize, prefix_len: usize, prev: Option<char>) -> usize {
+    if prev == Some('"') {
+        if let Some(p) = text[i + prefix_len..]
+            .find(['"', '\r', '\n'])
+            .filter(|&p| text.as_bytes()[i + prefix_len + p] == b'"')
+        {
+            return prefix_len + p;
+        }
+    }
+    let raw_len: usize = text[i + prefix_len..]
+        .chars()
+        .take_while(|c| !is_unquoted_path_delimiter(*c))
+        .map(char::len_utf8)
+        .sum();
+    trim_trailing_dots(&text[i..i + prefix_len + raw_len], prefix_len)
+}
+
+/// Replaces the launcher root with `<clade>`, drive/home paths with `<path>`, and UNC paths
 /// with `<unc-path>` before displaying technical startup error details.
 pub fn redact_detail(detail: &str, root: Option<&Path>) -> String {
     let mut text = strip_verbatim_prefixes(detail);
@@ -127,22 +144,7 @@ pub fn redact_detail(detail: &str, root: Option<&Path>) -> String {
                 .next()
                 .is_some_and(|c| !is_unquoted_path_delimiter(c))
         {
-            let span = if prev == Some('"') {
-                text[i + 2..]
-                    .find(['"', '\r', '\n'])
-                    .filter(|&p| text.as_bytes()[i + 2 + p] == b'"')
-                    .map(|p| 2 + p)
-            } else {
-                None
-            }
-            .unwrap_or_else(|| {
-                let raw_len: usize = text[i + 2..]
-                    .chars()
-                    .take_while(|c| !is_unquoted_path_delimiter(*c))
-                    .map(char::len_utf8)
-                    .sum();
-                trim_trailing_dots(&text[i..i + 2 + raw_len], 3)
-            });
+            let span = consume_path_span(&text, i, 2, prev);
             out.push_str("<unc-path>");
             i += span;
             continue;
@@ -154,25 +156,22 @@ pub fn redact_detail(detail: &str, root: Option<&Path>) -> String {
             && bytes[i + 1] == b':'
             && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/')
         {
-            let span = if prev == Some('"') {
-                text[i + 3..]
-                    .find(['"', '\r', '\n'])
-                    .filter(|&p| text.as_bytes()[i + 3 + p] == b'"')
-                    .map(|p| 3 + p)
-            } else {
-                None
-            }
-            .unwrap_or_else(|| {
-                let raw_len: usize = text[i + 3..]
-                    .chars()
-                    .take_while(|c| !is_unquoted_path_delimiter(*c))
-                    .map(char::len_utf8)
-                    .sum();
-                trim_trailing_dots(&text[i..i + 3 + raw_len], 3)
-            });
+            let span = consume_path_span(&text, i, 3, prev);
             out.push_str("<path>");
             i += span;
             continue;
+        }
+
+        if boundary {
+            if let Some(prefix) = ["/home/", "/Users/", "/run/media/", "/media/", "/mnt/"]
+                .iter()
+                .find(|p| text[i..].starts_with(**p))
+            {
+                let span = consume_path_span(&text, i, prefix.len(), prev);
+                out.push_str("<path>");
+                i += span;
+                continue;
+            }
         }
 
         let ch = text[i..].chars().next().unwrap_or(' ');
@@ -334,7 +333,33 @@ pub fn wake_running_instance(root: &Path) -> bool {
     false
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn wake_socket_path(root: &Path) -> Option<std::path::PathBuf> {
+    let sock = root.join("data").join("wake.sock");
+    (sock.as_os_str().len() < 104).then_some(sock)
+}
+
+#[cfg(unix)]
+pub fn wake_running_instance(root: &Path) -> bool {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let Some(sock) = wake_socket_path(root) else {
+        return false;
+    };
+    for attempt in 0..5 {
+        if let Ok(mut stream) = UnixStream::connect(&sock) {
+            return stream.write_all(b"w").is_ok();
+        }
+        if attempt + 1 < 5 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    false
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn wake_running_instance(_root: &Path) -> bool {
     false
 }
@@ -428,7 +453,43 @@ pub fn spawn_wake_listener(root: &Path, on_wake: impl Fn() + Send + Sync + 'stat
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub fn spawn_wake_listener<F>(root: &Path, on_wake: F)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let Some(sock) = wake_socket_path(root) else {
+        tracing::warn!("wake socket path exceeds Unix sun_path limit; skipping wake listener");
+        return;
+    };
+    if let Some(parent) = sock.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::remove_file(&sock);
+    let Ok(listener) = UnixListener::bind(&sock) else {
+        tracing::warn!("could not bind Unix wake socket");
+        return;
+    };
+    let _ = fs::set_permissions(&sock, fs::Permissions::from_mode(0o600));
+    let spawned = std::thread::Builder::new()
+        .name("clade-wake".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1];
+                let _ = stream.take(1).read(&mut buf);
+                on_wake();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not spawn wake listener thread");
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn spawn_wake_listener(_root: &Path, _on_wake: impl Fn() + Send + Sync + 'static) {}
 
 /// Logs go to `logs/clade.log` inside the folder. One rotation keeps the stick tidy.
@@ -497,6 +558,18 @@ mod tests {
         assert!(!unc_err.contains("nas"), "{unc_err}");
         assert!(!unc_err.contains("alice"), "{unc_err}");
         assert_eq!(unc_err, "share error on <unc-path> and <unc-path>.");
+
+        let unix_root = Path::new("/home/alice/Clade");
+        let unix_err = redact_detail(
+            "failed at /home/alice/Clade/data/clade.lock and \"/run/media/alice/USB Stick/secret.txt\" or /home/bob/notes.txt",
+            Some(unix_root),
+        );
+        assert!(!unix_err.contains("bob"), "{unix_err}");
+        assert!(!unix_err.contains("USB"), "{unix_err}");
+        assert_eq!(
+            unix_err,
+            "failed at <clade>/data/clade.lock and \"<path>\" or <path>"
+        );
     }
 
     #[test]
@@ -515,7 +588,7 @@ mod tests {
         assert_ne!(c1, other);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn wake_listener_and_client_round_trip_per_folder_without_cross_talk() {
         use std::sync::mpsc;

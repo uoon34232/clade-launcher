@@ -136,6 +136,7 @@ impl GlassState {
         changed
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn set_system_effects(&self, enabled: Option<bool>) {
         let encoded = match enabled {
             None => EFFECTS_UNKNOWN,

@@ -409,7 +409,7 @@ pub fn runtime_version() -> Result<String, String> {
 
 #[cfg(not(windows))]
 pub fn runtime_version() -> Result<String, String> {
-    Ok("n/a".into())
+    tauri::webview_version().map_err(|e| e.to_string())
 }
 
 /// Suspends the hidden WebView2 instance so Chromium drops its working set and stops timers/GPU

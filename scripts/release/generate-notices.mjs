@@ -347,6 +347,8 @@ function section(title, rust, npm, sources, components) {
   return out;
 }
 
+const DEFAULT_TARGET = "x86_64-pc-windows-msvc";
+
 /** Assembles the whole notices file. Pure: everything it needs is passed in. */
 export function renderNotices({
   rust,
@@ -357,7 +359,10 @@ export function renderNotices({
   fontPackages,
   sources = [],
   components = [],
+  target = DEFAULT_TARGET,
 }) {
+  const isWindows = target.includes("windows");
+  const binaryName = isWindows ? "Clade.exe" : "Clade";
   const out = [];
   out.push("Clade Launcher: third-party notices");
   out.push("");
@@ -375,7 +380,7 @@ export function renderNotices({
   );
   out.push("that are part of the distributed program are listed.");
   out.push("");
-  out.push(`Rust crates linked into Clade.exe: ${rust.length}`);
+  out.push(`Rust crates linked into ${binaryName}: ${rust.length}`);
   out.push(`JavaScript packages in the bundled interface: ${npm.length}`);
   out.push(`Fonts: ${fontPackages.map((p) => `${p.name} ${p.version}`).join(", ") || "none"}`);
   out.push("");
@@ -388,22 +393,32 @@ export function renderNotices({
   out.push("Components that are not covered by a generated list");
   out.push(line("="));
   out.push("");
-  out.push(
-    "- Microsoft Edge WebView2 Fixed Version Runtime (runtimes/webview2/). Redistributed under Microsoft's",
-  );
-  out.push(
-    "  WebView2 Fixed Version licence terms, shipped as licenses/WebView2-Fixed-Version-License.txt. The",
-  );
-  out.push(
-    "  runtime is Microsoft's software and may itself contain components from other parties under their",
-  );
-  out.push("  own licences; those are Microsoft's to list and are not repeated here.");
-  out.push(
-    "- The Rust standard library, statically linked (MIT OR Apache-2.0), and the Microsoft Visual C++",
-  );
-  out.push(
-    "  runtime, statically linked under Microsoft's redistribution terms for the C runtime.",
-  );
+  if (isWindows) {
+    out.push(
+      "- Microsoft Edge WebView2 Fixed Version Runtime (runtimes/webview2/). Redistributed under Microsoft's",
+    );
+    out.push(
+      "  WebView2 Fixed Version licence terms, shipped as licenses/WebView2-Fixed-Version-License.txt. The",
+    );
+    out.push(
+      "  runtime is Microsoft's software and may itself contain components from other parties under their",
+    );
+    out.push("  own licences; those are Microsoft's to list and are not repeated here.");
+    out.push(
+      "- The Rust standard library, statically linked (MIT OR Apache-2.0), and the Microsoft Visual C++",
+    );
+    out.push(
+      "  runtime, statically linked under Microsoft's redistribution terms for the C runtime.",
+    );
+  } else {
+    out.push(
+      "- System WebKitGTK 4.1 and GTK 3 shared libraries loaded from the host Linux system; they remain",
+    );
+    out.push(
+      "  under their upstream and distribution licences (LGPL / BSD / MIT) and are not bundled here.",
+    );
+    out.push("- The Rust standard library, statically linked (MIT OR Apache-2.0).");
+  }
   out.push(
     "- Minecraft, its libraries and assets, Java runtimes and mod loaders are NOT part of this package.",
   );
@@ -426,17 +441,10 @@ export function renderNotices({
 
 // ------------------------------------------------------------------------------------- main
 
-function readCargoMetadata(tauriDir) {
+function readCargoMetadata(tauriDir, target = DEFAULT_TARGET) {
   const raw = execFileSync(
     "cargo",
-    [
-      "metadata",
-      "--format-version",
-      "1",
-      "--locked",
-      "--filter-platform",
-      "x86_64-pc-windows-msvc",
-    ],
+    ["metadata", "--format-version", "1", "--locked", "--filter-platform", target],
     {
       cwd: tauriDir,
       encoding: "utf8",
@@ -449,7 +457,11 @@ function readCargoMetadata(tauriDir) {
 
 const BUNDLED_HELPERS = ["vite"];
 
-export function generate(root, { cargoMetadata = null, licenseSources = null } = {}) {
+export function generate(
+  root,
+  { cargoMetadata = null, licenseSources = null, target = DEFAULT_TARGET } = {},
+) {
+  const isWindows = target.includes("windows");
   const pkg = readPackage(root);
   const roots = frontendRoots(join(root, "src"));
   const forbidden = forbiddenFrontendRoots(roots, pkg);
@@ -458,7 +470,7 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
       `refusing to include dev/test tooling in THIRD-PARTY-NOTICES.txt (imported in shipped src/): ${forbidden.join(", ")}`,
     );
   }
-  const metadata = cargoMetadata ?? readCargoMetadata(join(root, "src-tauri"));
+  const metadata = cargoMetadata ?? readCargoMetadata(join(root, "src-tauri"), target);
   const rust = rustRuntimePackages(metadata);
   // Small pieces of build tooling that are copied into the interface bundle (Vite's preload helper).
   const { packages: npm, missing } = npmRuntimePackages(root, {
@@ -467,9 +479,9 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
   });
   const fontPackages = npm.filter((p) => p.name.startsWith("@fontsource"));
   const sources = licenseSources ?? loadLicenseSources();
-  // Components that are linked into Clade.exe without being a Rust crate or an npm package of their own.
+  // Components that are linked into the target binary without being a Rust crate or an npm package of their own.
   const components = sources
-    .filter((src) => src.component)
+    .filter((src) => src.component && (isWindows || src.targets?.includes(target)))
     .map((src) => ({
       name: src.component,
       version: "",
@@ -486,6 +498,7 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
       fontPackages,
       sources,
       components,
+      target,
     }),
     counts: {
       rust: rust.length,
@@ -501,12 +514,20 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
 }
 
 function main(argv) {
-  const out = argv[argv.indexOf("--out") + 1];
-  if (argv.indexOf("--out") < 0 || !out) {
-    console.error("usage: generate-notices.mjs --out <file> [--strict]");
+  const outIdx = argv.indexOf("--out");
+  const out = outIdx >= 0 ? argv[outIdx + 1] : undefined;
+  const targetIdx = argv.indexOf("--target");
+  const target = targetIdx >= 0 ? argv[targetIdx + 1] : DEFAULT_TARGET;
+  if (
+    outIdx < 0 ||
+    !out ||
+    out.startsWith("-") ||
+    (targetIdx >= 0 && (!target || target.startsWith("-")))
+  ) {
+    console.error("usage: generate-notices.mjs --out <file> [--target <triple>] [--strict]");
     process.exit(2);
   }
-  const { text, counts, missing, uncoveredNames } = generate(resolve("."));
+  const { text, counts, missing, uncoveredNames } = generate(resolve("."), { target });
   writeFileSync(resolve(out), text, "utf8");
   console.log(
     `notices: ${counts.rust} Rust crates, ${counts.npm} JavaScript packages, ${counts.components} linked components, ${counts.uncovered} without a licence text`,

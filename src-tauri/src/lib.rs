@@ -375,6 +375,10 @@ pub fn run() {
             if placement.is_some() {
                 cfg.center = false;
             }
+            #[cfg(not(windows))]
+            {
+                cfg.additional_browser_args = None;
+            }
             let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
                 .maximizable(false)

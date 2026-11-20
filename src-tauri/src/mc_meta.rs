@@ -47,6 +47,18 @@ pub const WINDOWS_X64: Target = Target {
     os_version: "10.0",
 };
 
+pub const LINUX_X64: Target = Target {
+    os: "linux",
+    arch_bits: "64",
+    os_version: "",
+};
+
+#[cfg(windows)]
+pub const HOST_TARGET: Target = WINDOWS_X64;
+
+#[cfg(not(windows))]
+pub const HOST_TARGET: Target = LINUX_X64;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MetaError {
     #[error("the version metadata is not valid JSON")]
@@ -392,12 +404,17 @@ fn coordinate_classifier(name: &str) -> Option<&str> {
 }
 
 fn is_target_native_classifier(classifier: &str, target: &Target) -> bool {
-    target.os == "windows"
-        && target.arch_bits == "64"
-        && matches!(
+    match (target.os, target.arch_bits) {
+        ("windows", "64") => matches!(
             classifier,
             "natives-windows" | "natives-windows-64" | "natives-windows-x86_64"
-        )
+        ),
+        ("linux", "64") => matches!(
+            classifier,
+            "natives-linux" | "natives-linux-64" | "natives-linux-x86_64"
+        ),
+        _ => false,
+    }
 }
 
 fn parse_library(lib: &Value, target: &Target) -> Result<Vec<Library>, MetaError> {
@@ -1508,5 +1525,67 @@ mod tests {
                 "{bad_size}"
             );
         }
+    }
+
+    #[test]
+    fn linux_x64_target_selects_linux_natives_and_filters_other_os_rules() {
+        let doc = json!({
+            "id": "1.21.4",
+            "mainClass": "net.minecraft.client.main.Main",
+            "downloads": {"client": {"url": "https://piston-data.mojang.com/c.jar", "sha1": H, "size": 7}},
+            "assetIndex": {"id": "19", "url": "https://piston-meta.mojang.com/i.json", "sha1": H, "size": 3, "totalSize": 10},
+            "javaVersion": {"component": "java-runtime-delta", "majorVersion": 21},
+            "libraries": [
+                {"name": "com.google.code.gson:gson:2.10.1", "downloads": {"artifact": art("com/google/code/gson/gson/2.10.1/gson-2.10.1.jar")}},
+                {"name": "org.lwjgl:lwjgl:3.3.3:natives-windows", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar")}, "rules": [{"action": "allow", "os": {"name": "windows"}}]},
+                {"name": "org.lwjgl:lwjgl:3.3.3:natives-linux", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar")}, "rules": [{"action": "allow", "os": {"name": "linux"}}]},
+                {"name": "org.lwjgl:lwjgl:3.3.3:natives-macos", "downloads": {"artifact": art("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-macos.jar")}, "rules": [{"action": "allow", "os": {"name": "osx"}}]},
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+                 "natives": {"linux": "natives-linux", "windows": "natives-windows-${arch}"},
+                 "extract": {"exclude": ["META-INF/"]},
+                 "downloads": {
+                    "artifact": art("org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4.jar"),
+                    "classifiers": {
+                        "natives-windows-64": art("org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows-64.jar"),
+                        "natives-linux": art("org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-linux.jar"),
+                    }
+                 }}
+            ],
+            "arguments": {
+                "jvm": [
+                    {"rules": [{"action": "allow", "os": {"name": "windows"}}], "value": "-XX:HeapDumpPath=MojangTricks.heapdump"},
+                    {"rules": [{"action": "allow", "os": {"name": "osx"}}], "value": "-XstartOnFirstThread"},
+                    "-cp", "${classpath}"
+                ],
+                "game": []
+            }
+        });
+        let plan = parse_version(doc.to_string().as_bytes(), &LINUX_X64).unwrap();
+        assert_eq!(
+            names(&plan),
+            [
+                "com.google.code.gson:gson:2.10.1",
+                "org.lwjgl:lwjgl:3.3.3:natives-linux",
+                "org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+                "org.lwjgl.lwjgl:lwjgl-platform:2.9.4:natives-linux",
+            ]
+        );
+        let natives: Vec<_> = plan.natives().map(|l| l.artifact.path.as_str()).collect();
+        assert_eq!(
+            natives,
+            [
+                "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar",
+                "org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-linux.jar",
+            ]
+        );
+        let jvm: Vec<String> = plan
+            .arguments
+            .as_ref()
+            .unwrap()
+            .jvm
+            .iter()
+            .flat_map(|a| a.values(&LINUX_X64))
+            .collect();
+        assert_eq!(jvm, ["-cp", "${classpath}"]);
     }
 }

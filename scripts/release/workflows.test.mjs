@@ -215,10 +215,11 @@ describe("the release workflow", () => {
 });
 
 describe("normal CI", () => {
-  it("keeps its three required check names", () => {
+  it("keeps its required check names", () => {
     for (const name of [
       "Frontend (typecheck, lint, unit tests, build)",
       "Rust (fmt, clippy, tests)",
+      "Rust Linux (fmt, clippy, tests)",
       "E2E (Playwright, Chromium)",
     ])
       expect(ci).toContain(`name: ${name}`);
@@ -245,6 +246,9 @@ describe("normal CI", () => {
     expect(frontend).toMatch(/node scripts\/release\/check-versions\.mjs/);
     expect(frontend).toMatch(
       /node scripts\/release\/generate-notices\.mjs --out "\$env:RUNNER_TEMP\/THIRD-PARTY-NOTICES\.txt" --strict/,
+    );
+    expect(frontend).toMatch(
+      /node scripts\/release\/generate-notices\.mjs --target x86_64-unknown-linux-gnu --out "\$env:RUNNER_TEMP\/THIRD-PARTY-NOTICES-linux\.txt" --strict/,
     );
   });
 });

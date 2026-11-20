@@ -39,6 +39,7 @@ export interface FixtureUiSettings {
   uiMode: "simple" | "advanced";
   reducedMotion: "system" | "on" | "off";
   transparency: "system" | "on" | "off";
+  transparencySupported: boolean;
   onboardingDone: boolean;
   memoryMb: number | null;
   /** What the (synthetic) computer allows, in MiB. */
@@ -224,6 +225,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     uiMode: "simple",
     reducedMotion: "system",
     transparency: "system",
+    transparencySupported: true,
     // Most tests are not about the introduction, so it counts as already seen; its own tests turn it on.
     onboardingDone: true,
     memoryMb: null,

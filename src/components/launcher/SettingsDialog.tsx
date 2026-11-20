@@ -253,22 +253,24 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
             />
           </Row>
 
-          <Row id="transparency-label" label={t("settings.transparency")} stacked>
-            <Segmented<TransparencyMode>
-              compact
-              label={t("settings.transparency")}
-              value={ui.transparency}
-              onChange={(mode) => {
-                playSound("select");
-                void saveTransparency(mode);
-              }}
-              options={[
-                { value: "system", label: t("settings.transparency.system") },
-                { value: "on", label: t("settings.transparency.on") },
-                { value: "off", label: t("settings.transparency.off") },
-              ]}
-            />
-          </Row>
+          {ui.transparencySupported && (
+            <Row id="transparency-label" label={t("settings.transparency")} stacked>
+              <Segmented<TransparencyMode>
+                compact
+                label={t("settings.transparency")}
+                value={ui.transparency}
+                onChange={(mode) => {
+                  playSound("select");
+                  void saveTransparency(mode);
+                }}
+                options={[
+                  { value: "system", label: t("settings.transparency.system") },
+                  { value: "on", label: t("settings.transparency.on") },
+                  { value: "off", label: t("settings.transparency.off") },
+                ]}
+              />
+            </Row>
+          )}
         </>
       )}
     </ModalSection>

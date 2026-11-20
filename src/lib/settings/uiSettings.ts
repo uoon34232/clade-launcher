@@ -43,8 +43,10 @@ export interface UiSettings {
   uiMode: UiMode;
   /** Whether decorative motion follows Windows, is always reduced, or is never reduced. */
   reducedMotion: MotionMode;
-  /** The "Transparency effects" choice: follow Windows, on, or off. Separate from reduced motion. */
+  /** The "Transparency effects" choice: follow the OS, on, or off. Separate from reduced motion. */
   transparency: TransparencyMode;
+  /** True where native window backdrop effects exist (Windows); hidden on Linux. */
+  transparencySupported: boolean;
   /** True once the first-run introduction was finished or skipped. */
   onboardingDone: boolean;
   /** The global game memory in MiB, or `null` for the automatic policy. */
@@ -65,6 +67,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   uiMode: "simple",
   reducedMotion: "system",
   transparency: "system",
+  transparencySupported: true,
   // A backend that cannot be read must never trap anyone in the introduction, so the fallback is
   // "already seen". The real backend reports the true value.
   onboardingDone: true,
@@ -139,6 +142,10 @@ export function parseUiSettings(raw: unknown): UiSettings {
     uiMode: oneOf(o.uiMode, ["simple", "advanced"], "simple"),
     reducedMotion: oneOf(o.reducedMotion, ["system", "on", "off"], "system"),
     transparency: oneOf(o.transparency, ["system", "on", "off"], "system"),
+    transparencySupported:
+      typeof o.transparencySupported === "boolean"
+        ? o.transparencySupported
+        : DEFAULT_UI_SETTINGS.transparencySupported,
     onboardingDone:
       typeof o.onboardingDone === "boolean" ? o.onboardingDone : DEFAULT_UI_SETTINGS.onboardingDone,
     memoryMb: typeof o.memoryMb === "number" && o.memoryMb > 0 ? Math.round(o.memoryMb) : null,

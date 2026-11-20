@@ -699,6 +699,27 @@ test.describe("transparency effects with Windows High Contrast", () => {
   });
 });
 
+test.describe("transparency effects when unsupported by the platform", () => {
+  test.use({
+    backendConfig: {
+      ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced", transparencySupported: false },
+    },
+  });
+
+  test("hides the Transparency effects row while keeping Reduced motion", async ({
+    page,
+    openApp,
+  }) => {
+    await openApp();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "off");
+    const dialog = await openSettings(page);
+    await expect(dialog.getByRole("radiogroup", { name: text("settings.motion") })).toBeVisible();
+    await expect(
+      dialog.getByRole("radiogroup", { name: text("settings.transparency") }),
+    ).toHaveCount(0);
+  });
+});
+
 test.describe("the account menu material", () => {
   const menuStyle = (page: Page) =>
     page.evaluate(() => {
