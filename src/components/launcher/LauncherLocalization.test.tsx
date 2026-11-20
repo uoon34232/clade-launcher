@@ -10,7 +10,7 @@ import { chooseLanguage } from "@/lib/i18n/language";
 import { BackendError } from "@/lib/ipc";
 import type { LaunchApi } from "@/lib/launch/api";
 import type { ProfileSummary, ProfilesApi, ProfilesSnapshot } from "@/lib/profiles/api";
-import { loadUiSettings } from "@/lib/settings/uiSettings";
+import { loadUiSettings, resetUiSettings, saveUiMode } from "@/lib/settings/uiSettings";
 import { appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 
 const invoke = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
@@ -84,6 +84,12 @@ function apis(snapshot: ProfilesSnapshot, accounts: AccountsSnapshot = ACCOUNTS)
     setMemory: vi.fn<ProfilesApi["setMemory"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
+    setResolution: vi.fn<ProfilesApi["setResolution"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
+    setJvmArgs: vi.fn<ProfilesApi["setJvmArgs"]>(() =>
+      Promise.reject(new Error("not used in this test")),
+    ),
     setVersion: vi.fn<ProfilesApi["setVersion"]>(() =>
       Promise.reject(new Error("not used in this test")),
     ),
@@ -127,7 +133,8 @@ function apis(snapshot: ProfilesSnapshot, accounts: AccountsSnapshot = ACCOUNTS)
 
 const flush = async () => act(async () => void (await Promise.resolve()));
 
-beforeEach(() => {
+beforeEach(async () => {
+  await resetUiSettings();
   globalThis.ResizeObserver ??= class {
     observe() {}
     unobserve() {}
@@ -205,6 +212,7 @@ describe("the home screen in Russian", () => {
 
   it("opens the account menu, the profile menu and Create profile in Russian", async () => {
     setLocale("ru");
+    await saveUiMode("advanced");
     await renderHome();
     fireEvent.click(within(dock()).getByRole("button", { name: /Аккаунт: Alex/ }));
     expect(await screen.findByRole("menuitem", { name: "+ Добавить аккаунт" })).toBeTruthy();
@@ -263,6 +271,9 @@ describe("switching the language live", () => {
     // the same modal is still open, now in Russian, and the control still has focus
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(within(dialog()).getByText("Настройки")).toBeTruthy();
+    expect(within(dialog()).getByRole("radiogroup", { name: "Режим" })).toBeTruthy();
+    expect(within(dialog()).getByRole("radio", { name: "Простой" })).toBeTruthy();
+    expect(within(dialog()).getByRole("radio", { name: "Расширенный" })).toBeTruthy();
     expect(within(dialog()).getByText("Звуковые эффекты")).toBeTruthy();
     expect(within(dialog()).getByText("Громкость")).toBeTruthy();
     expect(within(dialog()).getByRole("radiogroup", { name: "Язык" })).toBeTruthy();

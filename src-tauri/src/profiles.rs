@@ -25,7 +25,8 @@ use tauri_plugin_opener::OpenerExt;
 use crate::coded_error::{param, params, CodedError};
 use crate::instances::{
     Instance, InstanceError, InstanceId, InstanceStore, LoaderVersionSpec, NewInstance, Profile,
-    SetupState,
+    Resolution, SetupState, MAX_RESOLUTION_HEIGHT, MAX_RESOLUTION_WIDTH, MIN_RESOLUTION_HEIGHT,
+    MIN_RESOLUTION_WIDTH,
 };
 use crate::loader_options::{self, LoaderOptions, Status};
 use crate::loaders::{Channel, LoaderKind};
@@ -102,6 +103,8 @@ pub struct ProfileDto {
     pub ready: bool,
     pub playtime_seconds: u64,
     pub memory_mb: Option<u32>,
+    pub resolution: Option<Resolution>,
+    pub jvm_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +258,17 @@ impl ProfileError {
                 ("minecraft", minecraft.clone().into()),
             ])),
             Self::Instance(InstanceError::BadName(_)) => CodedError::new("invalid_name", message),
+            Self::Instance(InstanceError::BadJvmArg(_)) => {
+                CodedError::new("invalid_jvm_args", message)
+            }
+            Self::Instance(InstanceError::BadResolution(_)) => {
+                CodedError::new("invalid_resolution", message).with(params([
+                    ("minWidth", MIN_RESOLUTION_WIDTH.into()),
+                    ("maxWidth", MAX_RESOLUTION_WIDTH.into()),
+                    ("minHeight", MIN_RESOLUTION_HEIGHT.into()),
+                    ("maxHeight", MAX_RESOLUTION_HEIGHT.into()),
+                ]))
+            }
             Self::Instance(InstanceError::NotFound(_) | InstanceError::BadId(_)) => {
                 CodedError::new("not_found", message)
             }
@@ -304,6 +318,8 @@ pub fn snapshot(root: &PortableRoot, selected: Option<InstanceId>) -> std::io::R
                     .map(|t| t.total_seconds)
                     .unwrap_or(0),
                 memory_mb: i.memory_mb,
+                resolution: i.resolution,
+                jvm_args: i.extra_jvm_args.clone(),
             }
         })
         .collect();
@@ -734,6 +750,48 @@ pub(crate) async fn set_profile_memory_inner(
     .map_err(|e| CodedError::storage(format!("profile memory task failed: {e}")))?
 }
 
+pub(crate) async fn set_profile_resolution_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    id: &str,
+    resolution: Option<Resolution>,
+) -> Result<ProfilesDto, CodedError> {
+    let iid = InstanceId::new(id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let held = claim_profile_lock(&state.locks, &iid)?;
+    let root = state.root.clone();
+    let selected = settings.last_instance();
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        InstanceStore::new(&root)
+            .set_resolution(&iid, resolution)
+            .map_err(|e| ProfileError::Instance(e).coded())?;
+        snapshot(&root, selected).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile resolution task failed: {e}")))?
+}
+
+pub(crate) async fn set_profile_jvm_args_inner(
+    state: &ProfilesState,
+    settings: &SettingsState,
+    id: &str,
+    args: Vec<String>,
+) -> Result<ProfilesDto, CodedError> {
+    let iid = InstanceId::new(id).map_err(|e| CodedError::new("not_found", e.to_string()))?;
+    let held = claim_profile_lock(&state.locks, &iid)?;
+    let root = state.root.clone();
+    let selected = settings.last_instance();
+    tokio::task::spawn_blocking(move || {
+        let _held = held;
+        InstanceStore::new(&root)
+            .set_jvm_args(&iid, args)
+            .map_err(|e| ProfileError::Instance(e).coded())?;
+        snapshot(&root, selected).map_err(CodedError::storage)
+    })
+    .await
+    .map_err(|e| CodedError::storage(format!("profile jvm args task failed: {e}")))?
+}
+
 pub(crate) async fn duplicate_profile_inner(
     state: &ProfilesState,
     settings: &SettingsState,
@@ -910,6 +968,26 @@ pub async fn duplicate_profile(
 }
 
 #[tauri::command]
+pub async fn set_profile_resolution(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+    resolution: Option<Resolution>,
+) -> Result<ProfilesDto, CodedError> {
+    set_profile_resolution_inner(&state, &settings, &id, resolution).await
+}
+
+#[tauri::command]
+pub async fn set_profile_jvm_args(
+    state: State<'_, ProfilesState>,
+    settings: State<'_, SettingsState>,
+    id: String,
+    args: Vec<String>,
+) -> Result<ProfilesDto, CodedError> {
+    set_profile_jvm_args_inner(&state, &settings, &id, args).await
+}
+
+#[tauri::command]
 pub async fn open_profile_folder(
     app: tauri::AppHandle,
     state: State<'_, ProfilesState>,
@@ -1038,6 +1116,7 @@ mod tests {
             },
             java: JavaChoice::Auto,
             memory_mb: None,
+            resolution: None,
             extra_jvm_args: vec![],
         }
     }
@@ -1413,10 +1492,17 @@ mod tests {
             ready: false,
             playtime_seconds: 5,
             memory_mb: Some(4096),
+            resolution: Some(Resolution {
+                width: 1280,
+                height: 720,
+            }),
+            jvm_args: vec!["-XX:+UseStringDeduplication".into()],
         })
         .unwrap();
         assert_eq!(json["playtimeSeconds"], 5);
         assert_eq!(json["memoryMb"], 4096);
+        assert_eq!(json["resolution"]["width"], 1280);
+        assert_eq!(json["jvmArgs"][0], "-XX:+UseStringDeduplication");
         assert_eq!(json["loader"], "neoforge");
         assert_eq!(json["loaderVersion"], "21.4.158");
         let cat = serde_json::to_value(catalog_dto(

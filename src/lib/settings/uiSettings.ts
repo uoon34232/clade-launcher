@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isLocale, type Locale } from "@/lib/i18n/core";
 
+export type UiMode = "simple" | "advanced";
 export type MotionMode = "system" | "on" | "off";
 /** Whether the translucent window material follows Windows, is always tried, or is never used. */
 export type TransparencyMode = "system" | "on" | "off";
@@ -38,6 +39,8 @@ export interface UiSettings {
   language: Locale | null;
   /** The Windows display language (a locale name such as `ru-RU`), for the first-run default. */
   systemLocale: string | null;
+  /** Whether the interface hides advanced tuning options (`simple`) or exposes them (`advanced`). */
+  uiMode: UiMode;
   /** Whether decorative motion follows Windows, is always reduced, or is never reduced. */
   reducedMotion: MotionMode;
   /** The "Transparency effects" choice: follow Windows, on, or off. Separate from reduced motion. */
@@ -59,6 +62,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   lastPhrase: null,
   language: null,
   systemLocale: null,
+  uiMode: "simple",
   reducedMotion: "system",
   transparency: "system",
   // A backend that cannot be read must never trap anyone in the introduction, so the fallback is
@@ -132,6 +136,7 @@ export function parseUiSettings(raw: unknown): UiSettings {
       /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8}){0,3}$/.test(o.systemLocale)
         ? o.systemLocale
         : null,
+    uiMode: oneOf(o.uiMode, ["simple", "advanced"], "simple"),
     reducedMotion: oneOf(o.reducedMotion, ["system", "on", "off"], "system"),
     transparency: oneOf(o.transparency, ["system", "on", "off"], "system"),
     onboardingDone:
@@ -254,6 +259,8 @@ async function change(
   }
 }
 
+export const saveUiMode = (mode: UiMode) => change("set_ui_mode", { mode }, { uiMode: mode });
+
 export const saveReducedMotion = (mode: MotionMode) =>
   change("set_reduced_motion", { mode }, { reducedMotion: mode });
 
@@ -285,6 +292,7 @@ export const resetUiSettings = () =>
       soundEnabled: DEFAULT_UI_SETTINGS.soundEnabled,
       soundVolume: DEFAULT_UI_SETTINGS.soundVolume,
       language: null,
+      uiMode: "simple",
       reducedMotion: "system",
       transparency: "system",
       memoryMb: null,

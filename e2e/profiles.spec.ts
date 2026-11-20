@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { DEFAULT_CONFIG } from "./support/fixtures";
 import { expect, test } from "./support/test";
 import { playButton, profileTrigger, text } from "./support/ui";
 
@@ -108,28 +109,65 @@ test.describe("create profile: Vanilla", () => {
     ]);
   });
 
-  test("lists releases, snapshots and historical versions separately", async ({
+  test("in Simple mode hides version filters and loader version picker, creating Modded with recommended version", async ({
     page,
+    backend,
     openApp,
   }) => {
     await openApp();
     const dialog = await openCreate(page);
-    const version = dialog.getByRole("combobox", { name: text("create.mcVersion") });
+    await expect(dialog.getByRole("radiogroup", { name: text("create.filterLabel") })).toHaveCount(
+      0,
+    );
+    await dialog.getByLabel(text("create.name")).fill("Simple Fabric");
+    await dialog.getByRole("radio", { name: text("profile.modded") }).click();
+    await expect(
+      dialog.getByRole("radiogroup", { name: text("create.loaderLabel") }),
+    ).toBeVisible();
+    await expect(dialog.getByRole("combobox", { name: text("create.loaderVersion") })).toHaveCount(
+      0,
+    );
 
-    await version.click();
-    await expect(page.getByRole("option")).toHaveCount(4);
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("listbox")).toHaveCount(0);
+    await dialog.getByRole("button", { name: text("create.submit") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const [call] = await backend.calls("create_profile");
+    expect((call?.args as { request: unknown }).request).toEqual({
+      name: "Simple Fabric",
+      minecraft: "1.21.4",
+      profile: {
+        type: "modded",
+        loader: "fabric",
+        loader_version: { mode: "pinned", version: "0.16.9" },
+      },
+    });
+  });
 
-    await dialog.getByRole("radio", { name: text("create.filter.snapshots") }).click();
-    await version.click();
-    await expect(page.getByRole("option", { name: /^24w50a/ })).toBeVisible();
-    await page.keyboard.press("Escape");
+  test.describe("with Advanced mode version filters", () => {
+    test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
 
-    await dialog.getByRole("radio", { name: text("create.filter.historical") }).click();
-    await version.click();
-    await expect(page.getByRole("option", { name: /^b1\.7\.3/ })).toBeVisible();
-    await expect(page.getByRole("option", { name: /^a1\.2\.6/ })).toBeVisible();
+    test("lists releases, snapshots and historical versions separately", async ({
+      page,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openCreate(page);
+      const version = dialog.getByRole("combobox", { name: text("create.mcVersion") });
+
+      await version.click();
+      await expect(page.getByRole("option")).toHaveCount(4);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("listbox")).toHaveCount(0);
+
+      await dialog.getByRole("radio", { name: text("create.filter.snapshots") }).click();
+      await version.click();
+      await expect(page.getByRole("option", { name: /^24w50a/ })).toBeVisible();
+      await page.keyboard.press("Escape");
+
+      await dialog.getByRole("radio", { name: text("create.filter.historical") }).click();
+      await version.click();
+      await expect(page.getByRole("option", { name: /^b1\.7\.3/ })).toBeVisible();
+      await expect(page.getByRole("option", { name: /^a1\.2\.6/ })).toBeVisible();
+    });
   });
 
   test("asks for a name, and refuses a name that is already used", async ({
@@ -190,6 +228,8 @@ test.describe("create profile: Vanilla", () => {
 });
 
 test.describe("create profile: Modded", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   test("offers Fabric, Forge, NeoForge and Quilt with their recommended versions", async ({
     page,
     openApp,

@@ -57,6 +57,8 @@ pub struct UiSettingsDto {
     pub language: Option<String>,
     /// The Windows display language (a locale name such as `ru-RU`), for the first-run default.
     pub system_locale: Option<String>,
+    /// `simple` or `advanced`.
+    pub ui_mode: String,
     /// `system`, `on` or `off`.
     pub reduced_motion: String,
     /// `system`, `on` or `off`: the window-material ("Transparency effects") choice.
@@ -95,6 +97,7 @@ impl UiSettingsDto {
             last_phrase: s.ui.last_phrase.clone(),
             language: s.ui.language.clone(),
             system_locale: crate::system::system_locale(),
+            ui_mode: s.ui.ui_mode.clone(),
             reduced_motion: s.ui.reduced_motion.clone(),
             transparency: s.ui.transparency.clone(),
             onboarding_done: s.ui.onboarding_done,
@@ -282,6 +285,22 @@ fn unsupported() -> CodedError {
 }
 
 #[tauri::command]
+pub async fn set_ui_mode(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    mode: String,
+) -> Result<(), CodedError> {
+    if !crate::settings::UI_MODES.contains(&mode.as_str()) {
+        return Err(unsupported());
+    }
+    apply_blocking(&app, &state, false, move |s| {
+        let before = s.ui.ui_mode.clone();
+        s.set_ui_mode(&mode) && s.ui.ui_mode != before
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn set_reduced_motion(
     app: AppHandle,
     state: State<'_, SettingsState>,
@@ -415,6 +434,7 @@ mod tests {
                 last_phrase: None,
                 language: None,
                 system_locale: dto.system_locale.clone(),
+                ui_mode: "simple".into(),
                 reduced_motion: "system".into(),
                 transparency: "system".into(),
                 onboarding_done: false,
@@ -521,6 +541,7 @@ mod tests {
             last_phrase: Some("welcome-back".into()),
             language: Some("ru".into()),
             system_locale: Some("ru-RU".into()),
+            ui_mode: "advanced".into(),
             reduced_motion: "on".into(),
             transparency: "off".into(),
             onboarding_done: true,
@@ -536,6 +557,7 @@ mod tests {
             version: "0.1.0".into(),
         })
         .unwrap();
+        assert_eq!(json["uiMode"], "advanced");
         assert_eq!(json["reducedMotion"], "on");
         assert_eq!(json["transparency"], "off");
         assert_eq!(json["onboardingDone"], true);

@@ -172,6 +172,7 @@ fn build_for(
         java: &java,
         identity: &identity(),
         memory_mb: memory,
+        resolution: None,
         extra_jvm_args: extra,
         sys: &sys,
         temp_dir: &temp,
@@ -869,6 +870,7 @@ fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
             java: &java,
             identity: &identity(),
             memory_mb: 2048,
+            resolution: None,
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &bad_temp,
@@ -1144,6 +1146,7 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
                 access_token: Secret::new("WIRING-CHECK-NOT-A-CREDENTIAL".into()),
             },
             memory_mb: 2048,
+            resolution: None,
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &temp,
@@ -1228,4 +1231,45 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
         failures.is_empty(),
         "profiles that did not start: {failures:?}"
     );
+}
+
+#[test]
+fn custom_resolution_activates_mojang_feature_rule_and_substitutes_dimensions() {
+    let e = env();
+    install(
+        &e.root,
+        "1.21.4",
+        &modern_vanilla(),
+        &VANILLA_LIBS,
+        Some(("19", modern_index())),
+    );
+    let store = InstanceStore::new(&e.root);
+    let inst = store
+        .create(NewInstance::vanilla("Windowed", "1.21.4").unwrap(), 1)
+        .unwrap();
+    let dirs = store.dirs(&inst.id);
+    let resolved = resolve(&e.root, "1.21.4").unwrap();
+    let java = java_for(&e.root, 21);
+    let sys = SystemEnv::from_process();
+    let temp = e.root.game_tmp_dir().join(inst.id.as_str());
+
+    let cmd = build(&BuildInput {
+        root: &e.root,
+        dirs: &dirs,
+        resolved: &resolved,
+        java: &java,
+        identity: &identity(),
+        memory_mb: 4096,
+        resolution: Some(crate::instances::Resolution {
+            width: 1280,
+            height: 720,
+        }),
+        extra_jvm_args: &["-XX:+UseStringDeduplication".to_owned()],
+        sys: &sys,
+        temp_dir: &temp,
+    })
+    .unwrap();
+    assert_eq!(after(&cmd.args, "--width"), "1280");
+    assert_eq!(after(&cmd.args, "--height"), "720");
+    assert!(cmd.args.contains(&"-XX:+UseStringDeduplication".to_owned()));
 }

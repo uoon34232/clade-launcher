@@ -131,12 +131,25 @@ pub enum Arg {
     Conditional { rules: Value, values: Vec<String> },
 }
 
+/// Launcher feature flags evaluated against Mojang `rules[].features` blocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LaunchFeatures {
+    pub has_custom_resolution: bool,
+}
+
 impl Arg {
     /// The strings this entry contributes on `target` (launcher features are all off).
     pub fn values(&self, target: &Target) -> Vec<String> {
+        self.values_with_features(target, &LaunchFeatures::default())
+    }
+
+    /// The strings this entry contributes on `target` with explicit launcher feature flags.
+    pub fn values_with_features(&self, target: &Target, features: &LaunchFeatures) -> Vec<String> {
         match self {
             Arg::Plain(s) => vec![s.clone()],
-            Arg::Conditional { rules, values } if rules_allow(Some(rules), target) => {
+            Arg::Conditional { rules, values }
+                if rules_allow_features(Some(rules), target, features) =>
+            {
                 values.clone()
             }
             Arg::Conditional { .. } => Vec::new(),
@@ -235,7 +248,7 @@ fn windows_version_matches(pattern: &str, version: &str) -> bool {
     }
 }
 
-fn rule_matches(rule: &Value, target: &Target) -> bool {
+fn rule_matches(rule: &Value, target: &Target, features: &LaunchFeatures) -> bool {
     if let Some(os) = rule.get("os") {
         if let Some(name) = os.get("name").and_then(Value::as_str) {
             if name != target.os {
@@ -253,10 +266,15 @@ fn rule_matches(rule: &Value, target: &Target) -> bool {
             }
         }
     }
-    if let Some(features) = rule.get("features").and_then(Value::as_object) {
-        // Every launcher feature (demo user, custom resolution, quick play...) is off.
-        if features.values().any(|v| v.as_bool() != Some(false)) {
-            return false;
+    if let Some(req_features) = rule.get("features").and_then(Value::as_object) {
+        for (k, v) in req_features {
+            let actual = match k.as_str() {
+                "has_custom_resolution" => features.has_custom_resolution,
+                _ => false,
+            };
+            if v.as_bool() != Some(actual) {
+                return false;
+            }
         }
     }
     true
@@ -265,12 +283,20 @@ fn rule_matches(rule: &Value, target: &Target) -> bool {
 /// Mojang's rule semantics: no rules means allowed; otherwise the last matching rule decides,
 /// and if none matches the item is not allowed.
 pub fn rules_allow(rules: Option<&Value>, target: &Target) -> bool {
+    rules_allow_features(rules, target, &LaunchFeatures::default())
+}
+
+pub fn rules_allow_features(
+    rules: Option<&Value>,
+    target: &Target,
+    features: &LaunchFeatures,
+) -> bool {
     let Some(rules) = rules.and_then(Value::as_array).filter(|r| !r.is_empty()) else {
         return true;
     };
     let mut allowed = false;
     for r in rules {
-        if rule_matches(r, target) {
+        if rule_matches(r, target, features) {
             allowed = r.get("action").and_then(Value::as_str) == Some("allow");
         }
     }

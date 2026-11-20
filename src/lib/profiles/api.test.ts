@@ -65,6 +65,8 @@ describe("parsers validate backend data instead of trusting it", () => {
     });
     expect(s.profiles[2].loader).toBeNull();
     expect(s.profiles[0].memoryMb).toBeNull();
+    expect(s.profiles[0].resolution).toBeNull();
+    expect(s.profiles[0].jvmArgs).toEqual([]);
     expect(s.selected).toBe("a");
     expect(s.totalPlaytimeSeconds).toBe(99720);
     expect(s.unreadable).toEqual([]);
@@ -107,6 +109,37 @@ describe("parsers validate backend data instead of trusting it", () => {
     ]);
     expect(s.unreadable).toEqual(["corrupt-a", "broken-b"]);
     expect(parseProfiles({ profiles: [], unreadable: "not-an-array" }).unreadable).toEqual([]);
+  });
+
+  it("profiles: validates resolution bounds and jvmArgs strings", () => {
+    const mk = (id: string, resolution: unknown, jvmArgs: unknown) => ({
+      id,
+      name: id,
+      minecraft: "1.21.4",
+      kind: "vanilla",
+      resolution,
+      jvmArgs,
+    });
+    const s = parseProfiles({
+      profiles: [
+        mk("ok", { width: 1280, height: 720 }, ["-XX:+UseStringDeduplication", "-ea"]),
+        mk("small", { width: 100, height: 720 }, [
+          "",
+          42,
+          "x".repeat(600),
+          "-Dfml.readTimeout=120",
+        ]),
+        mk("float", { width: 1280.5, height: 720 }, "not-an-array"),
+        mk("big", { width: 9999, height: 4320 }, null),
+      ],
+    });
+    expect(s.profiles[0].resolution).toEqual({ width: 1280, height: 720 });
+    expect(s.profiles[0].jvmArgs).toEqual(["-XX:+UseStringDeduplication", "-ea"]);
+    expect(s.profiles[1].resolution).toBeNull();
+    expect(s.profiles[1].jvmArgs).toEqual(["-Dfml.readTimeout=120"]);
+    expect(s.profiles[2].resolution).toBeNull();
+    expect(s.profiles[2].jvmArgs).toEqual([]);
+    expect(s.profiles[3].resolution).toBeNull();
   });
 
   it("catalog: only known kinds, and an unknown origin counts as stale", () => {
@@ -160,6 +193,10 @@ describe("calls", () => {
     await expect(profilesApi.versionCatalog()).rejects.toThrow();
     await expect(profilesApi.rename("survival", "Hardcore")).rejects.toThrow(/not available/);
     await expect(profilesApi.setMemory("survival", 6144)).rejects.toThrow(/not available/);
+    await expect(
+      profilesApi.setResolution("survival", { width: 1280, height: 720 }),
+    ).rejects.toThrow(/not available/);
+    await expect(profilesApi.setJvmArgs("survival", ["-ea"])).rejects.toThrow(/not available/);
     await expect(profilesApi.setVersion("survival", "1.21.4")).rejects.toThrow(/not available/);
     await expect(profilesApi.duplicate("survival")).rejects.toThrow(/not available/);
     await expect(profilesApi.openFolder("survival")).rejects.toThrow(/not available/);
@@ -186,6 +223,9 @@ describe("calls", () => {
     await profilesApi.rename("survival", "Hardcore");
     await profilesApi.setMemory("survival", 6144);
     await profilesApi.setMemory("survival", null);
+    await profilesApi.setResolution("survival", { width: 1280, height: 720 });
+    await profilesApi.setResolution("survival", null);
+    await profilesApi.setJvmArgs("survival", ["-XX:+UseStringDeduplication"]);
     await profilesApi.setVersion("survival", "1.21.4");
     await profilesApi.setVersion("survival", "1.21.4", { mode: "pinned", version: "0.19.5" });
     await profilesApi.duplicate("survival");
@@ -200,6 +240,9 @@ describe("calls", () => {
       ["rename_profile", { id: "survival", name: "Hardcore" }],
       ["set_profile_memory", { id: "survival", mb: 6144 }],
       ["set_profile_memory", { id: "survival", mb: null }],
+      ["set_profile_resolution", { id: "survival", resolution: { width: 1280, height: 720 } }],
+      ["set_profile_resolution", { id: "survival", resolution: null }],
+      ["set_profile_jvm_args", { id: "survival", args: ["-XX:+UseStringDeduplication"] }],
       ["set_profile_version", { id: "survival", minecraft: "1.21.4", loaderVersion: null }],
       [
         "set_profile_version",

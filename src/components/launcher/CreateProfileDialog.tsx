@@ -29,6 +29,7 @@ import {
   type ProfilesSnapshot,
   type VersionCatalog,
 } from "@/lib/profiles/api";
+import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
 import { BUTTON_PRIMARY, BUTTON_QUIET, FIELD, LABEL } from "./modalStyles";
@@ -95,6 +96,8 @@ interface FormProps {
 
 function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormProps) {
   const t = useT();
+  const ui = useUiSettings();
+  const isAdvanced = ui.uiMode === "advanced";
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [filter, setFilter] = useState<VersionFilter>("releases");
@@ -145,14 +148,27 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     };
   }, [reload, api]);
 
+  const activeFilter: VersionFilter = isAdvanced ? filter : "releases";
+  const entries = useMemo(
+    () => (catalog.status === "ready" ? catalog.data.entries : []),
+    [catalog],
+  );
+  const shown = useMemo(() => filterVersions(entries, activeFilter), [entries, activeFilter]);
+  const selectedMc =
+    catalog.status === "ready"
+      ? mc && shown.some((e) => e.id === mc)
+        ? mc
+        : defaultVersion(catalog.data, shown, activeFilter)
+      : mc;
+
   // Compatible loaders for the chosen Minecraft version, only while the profile is Modded.
   useEffect(() => {
-    if (type !== "modded" || !mc) return;
+    if (type !== "modded" || !selectedMc) return;
     let cancelled = false;
-    api.loaderOptions(mc).then(
+    api.loaderOptions(selectedMc).then(
       (options) => {
         if (cancelled) return;
-        setLoaderResult({ mc, options });
+        setLoaderResult({ mc: selectedMc, options });
         setLoader((prev) => {
           const ok = (k: LoaderKind | null) =>
             k !== null && options.some((o) => o.loader === k && o.status === "ok");
@@ -161,26 +177,21 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
         setLoaderVersion(null);
       },
       () => {
-        if (!cancelled) setLoaderResult({ mc, options: null });
+        if (!cancelled) setLoaderResult({ mc: selectedMc, options: null });
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [type, mc, api]);
+  }, [type, selectedMc, api]);
 
-  const entries = useMemo(
-    () => (catalog.status === "ready" ? catalog.data.entries : []),
-    [catalog],
-  );
-  const shown = useMemo(() => filterVersions(entries, filter), [entries, filter]);
-  const loaderForMc = loaderResult?.mc === mc ? loaderResult : null; // a result for another version does not count
+  const loaderForMc = loaderResult?.mc === selectedMc ? loaderResult : null; // a result for another version does not count
   const options = loaderForMc?.options ?? [];
   const loaderFailed = loaderForMc !== null && loaderForMc.options === null;
-  const loadingLoaders = type === "modded" && !!mc && loaderForMc === null;
+  const loadingLoaders = type === "modded" && !!selectedMc && loaderForMc === null;
   const current = loader ? options.find((o) => o.loader === loader) : undefined;
   const chosenLoaderVersion = current
-    ? loaderVersion && current.versions.some((v) => v.version === loaderVersion)
+    ? isAdvanced && loaderVersion && current.versions.some((v) => v.version === loaderVersion)
       ? loaderVersion
       : current.recommended
     : null;
@@ -191,7 +202,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     !submitting &&
     !nameError &&
     catalog.status === "ready" &&
-    !!mc &&
+    !!selectedMc &&
     (type === "vanilla" ||
       (!loadingLoaders && !!loader && !!chosenLoaderVersion && current?.status === "ok"));
 
@@ -205,10 +216,10 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
   const submit = (e: { preventDefault: () => void }) => {
     e.preventDefault();
     setNameTouched(true);
-    if (!canSubmit || !mc) return;
+    if (!canSubmit || !selectedMc) return;
     const request: NewProfileRequest = {
       name: name.trim(),
-      minecraft: mc,
+      minecraft: selectedMc,
       profile:
         type === "vanilla"
           ? { type: "vanilla" }
@@ -236,8 +247,8 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     .filter((o) => o.status !== "ok")
     .map((o) =>
       o.status === "none"
-        ? mc
-          ? t("create.loaderNone", { loader: LOADER_NAMES[o.loader], minecraft: mc })
+        ? selectedMc
+          ? t("create.loaderNone", { loader: LOADER_NAMES[o.loader], minecraft: selectedMc })
           : t("create.loaderNoneAny", { loader: LOADER_NAMES[o.loader] })
         : t("create.loaderUnchecked", { loader: LOADER_NAMES[o.loader] }),
     );
@@ -280,23 +291,25 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
           <span id="mc-version-label" className={LABEL}>
             {t("create.mcVersion")}
           </span>
-          <Segmented
-            variant="plain"
-            label={t("create.filterLabel")}
-            value={filter}
-            onChange={(f) => {
-              playSound("click");
-              changeFilter(f);
-            }}
-            options={(Object.keys(FILTER_KEYS) as VersionFilter[]).map((f) => ({
-              value: f,
-              label: t(FILTER_KEYS[f]),
-            }))}
-          />
+          {isAdvanced && (
+            <Segmented
+              variant="plain"
+              label={t("create.filterLabel")}
+              value={filter}
+              onChange={(f) => {
+                playSound("click");
+                changeFilter(f);
+              }}
+              options={(Object.keys(FILTER_KEYS) as VersionFilter[]).map((f) => ({
+                value: f,
+                label: t(FILTER_KEYS[f]),
+              }))}
+            />
+          )}
         </div>
         {catalog.status === "ready" ? (
           <Select
-            value={mc}
+            value={selectedMc}
             onValueChange={(v) => {
               if (typeof v === "string") {
                 playSound("select");
@@ -411,56 +424,60 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
               />
             </div>
 
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <span id="loader-version-label" className={LABEL}>
-                {t("create.loaderVersion")}
-              </span>
-              <Select
-                value={chosenLoaderVersion}
-                disabled={!current || current.status !== "ok"}
-                onValueChange={(v) => {
-                  if (typeof v === "string") {
-                    playSound("select");
-                    setLoaderVersion(v);
-                  }
-                }}
-                items={(current?.versions ?? []).map((v) => ({
-                  value: v.version,
-                  label:
-                    v.version === current?.recommended
-                      ? t("create.versionRecommended", { version: v.version })
-                      : v.version,
-                }))}
-              >
-                <SelectTrigger
-                  aria-labelledby="loader-version-label"
-                  className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+            {isAdvanced ? (
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <span id="loader-version-label" className={LABEL}>
+                  {t("create.loaderVersion")}
+                </span>
+                <Select
+                  value={chosenLoaderVersion}
+                  disabled={!current || current.status !== "ok"}
+                  onValueChange={(v) => {
+                    if (typeof v === "string") {
+                      playSound("select");
+                      setLoaderVersion(v);
+                    }
+                  }}
+                  items={(current?.versions ?? []).map((v) => ({
+                    value: v.version,
+                    label:
+                      v.version === current?.recommended
+                        ? t("create.versionRecommended", { version: v.version })
+                        : v.version,
+                  }))}
                 >
-                  <SelectValue
-                    placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
-                  />
-                </SelectTrigger>
-                <SelectContent
-                  alignItemWithTrigger={false}
-                  sideOffset={6}
-                  className="max-h-60 rounded-xl p-1"
-                >
-                  {(current?.versions ?? []).map((v) => (
-                    <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
-                      <span className="flex-1">{v.version}</span>
-                      <span className="text-cream/45 pr-4 text-[0.75rem]">
-                        {v.version === current?.recommended
-                          ? t("create.channel.recommended")
-                          : t(CHANNEL_NOTE[v.channel])}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {current?.stale && (
-                <p className="text-ink-muted text-[0.8125rem]">{t("create.staleLoaders")}</p>
-              )}
-            </div>
+                  <SelectTrigger
+                    aria-labelledby="loader-version-label"
+                    className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+                  >
+                    <SelectValue
+                      placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
+                    />
+                  </SelectTrigger>
+                  <SelectContent
+                    alignItemWithTrigger={false}
+                    sideOffset={6}
+                    className="max-h-60 rounded-xl p-1"
+                  >
+                    {(current?.versions ?? []).map((v) => (
+                      <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
+                        <span className="flex-1">{v.version}</span>
+                        <span className="text-cream/45 pr-4 text-[0.75rem]">
+                          {v.version === current?.recommended
+                            ? t("create.channel.recommended")
+                            : t(CHANNEL_NOTE[v.channel])}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {current?.stale && (
+                  <p className="text-ink-muted text-[0.8125rem]">{t("create.staleLoaders")}</p>
+                )}
+              </div>
+            ) : current?.stale ? (
+              <p className="text-ink-muted text-[0.8125rem]">{t("create.staleLoaders")}</p>
+            ) : null}
           </div>
         </div>
       </div>

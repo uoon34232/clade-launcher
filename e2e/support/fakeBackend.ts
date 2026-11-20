@@ -105,7 +105,12 @@ function install(cfg: BackendConfig): void {
   const knownAccount = (id: unknown) => state.accounts.some((a) => a.id === id);
 
   const profilesSnapshot = () => ({
-    profiles: clone(state.profiles).map((p) => ({ ...p, memoryMb: p.memoryMb ?? null })),
+    profiles: clone(state.profiles).map((p) => ({
+      ...p,
+      memoryMb: p.memoryMb ?? null,
+      resolution: p.resolution ?? null,
+      jvmArgs: p.jvmArgs ?? [],
+    })),
     selected: state.selected,
     totalPlaytimeSeconds: state.profiles.reduce((s, p) => s + p.playtimeSeconds, 0),
     unreadable: clone(state.unreadable),
@@ -123,6 +128,99 @@ function install(cfg: BackendConfig): void {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "") || "profile";
+
+  const FORBIDDEN_JVM_PREFIXES = [
+    "-javaagent",
+    "-agentlib",
+    "-agentpath",
+    "-xrun",
+    "-jar",
+    "-cp",
+    "-classpath",
+    "--class-path",
+    "-p",
+    "--module-path",
+    "--upgrade-module-path",
+    "--patch-module",
+    "-xbootclasspath",
+    "-xx:onerror",
+    "-xx:onoutofmemoryerror",
+    "-xx:errorfile",
+    "-xx:heapdumppath",
+    "-xx:logfile",
+    "-xx:sharedarchivefile",
+    "-xx:archiveclassesatexit",
+    "-duser.home",
+    "-duser.dir",
+    "-djava.io.tmpdir",
+    "-djava.library.path",
+    "-djava.class.path",
+    "-djdk.module.path",
+    "-dlog4j.configurationfile",
+    "-dlog4j2.formatmsgnolookups",
+    "-xmx",
+    "-xms",
+    "-xx:maxram",
+    "-xx:initialram",
+  ];
+  const FORBIDDEN_XX_OPTS = new Set([
+    "onerror",
+    "onoutofmemoryerror",
+    "errorfile",
+    "heapdumppath",
+    "logfile",
+    "sharedarchivefile",
+    "archiveclassesatexit",
+  ]);
+  const isAllowedJvmArg = (a: string): boolean => {
+    const xxRest = a.startsWith("-XX:+")
+      ? a.slice(5)
+      : a.startsWith("-XX:-")
+        ? a.slice(5)
+        : a.startsWith("-XX:")
+          ? a.slice(4)
+          : null;
+    if (xxRest !== null) {
+      const eq = xxRest.indexOf("=");
+      const opt = eq === -1 ? xxRest : xxRest.slice(0, eq);
+      const val = eq === -1 ? null : xxRest.slice(eq + 1);
+      if (!opt || !/^[A-Za-z0-9_]+$/.test(opt) || val === "") return false;
+      const optLower = opt.toLowerCase();
+      return (
+        !FORBIDDEN_XX_OPTS.has(optLower) &&
+        !optLower.startsWith("maxram") &&
+        !optLower.startsWith("initialram")
+      );
+    }
+    if (a.startsWith("-Xss") || a.startsWith("-Xmn")) {
+      const rest = a.slice(4);
+      return rest.length > 0 && /^[A-Za-z0-9]+$/.test(rest);
+    }
+    if (a.startsWith("-D")) {
+      const rest = a.slice(2);
+      const eq = rest.indexOf("=");
+      const key = eq === -1 ? rest : rest.slice(0, eq);
+      return key.length > 0 && /^[A-Za-z0-9._-]+$/.test(key);
+    }
+    if (a === "-ea" || a === "-da" || a === "-esa" || a === "-dsa") return true;
+    for (const pfx of ["--add-opens=", "--add-exports=", "--enable-native-access="]) {
+      if (a.startsWith(pfx)) return a.length > pfx.length;
+    }
+    return false;
+  };
+  const validJvmArgs = (raw: unknown): raw is string[] => {
+    if (!Array.isArray(raw) || raw.length > 64) return false;
+    for (const item of raw) {
+      if (typeof item !== "string" || item.length === 0 || item.length > 512) return false;
+      // eslint-disable-next-line no-control-regex
+      if (/[\u0000-\u001f\u007f\s]/.test(item) || !item.startsWith("-")) return false;
+      const lower = item.toLowerCase();
+      if (FORBIDDEN_JVM_PREFIXES.some((p) => lower.startsWith(p)) || !isAllowedJvmArg(item)) {
+        return false;
+      }
+    }
+    return true;
+  };
 
   const handle = (cmd: string, args: Record<string, unknown>): unknown => {
     const planned = failures.get(cmd);
@@ -165,6 +263,15 @@ function install(cfg: BackendConfig): void {
       case "set_last_phrase":
         state.ui.lastPhrase = args.id as string;
         return null;
+      case "set_ui_mode": {
+        const mode = args.mode;
+        if (mode !== "simple" && mode !== "advanced") {
+          return fail("unsupported_value", "that setting value is not supported");
+        }
+        state.ui.uiMode = mode;
+        announce();
+        return null;
+      }
       case "set_reduced_motion":
         state.ui.reducedMotion = args.mode as "system" | "on" | "off";
         announce();
@@ -201,6 +308,7 @@ function install(cfg: BackendConfig): void {
         state.ui.soundEnabled = true;
         state.ui.soundVolume = 0.5;
         state.ui.language = null;
+        state.ui.uiMode = "simple";
         state.ui.reducedMotion = "system";
         state.ui.transparency = "system";
         state.ui.memoryMb = null;
@@ -269,6 +377,48 @@ function install(cfg: BackendConfig): void {
             params: { min, max },
           });
         target.memoryMb = mb === null ? null : Math.round(mb);
+        return profilesSnapshot();
+      }
+      case "set_profile_resolution": {
+        const id = args.id as string;
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const res = args.resolution as { width?: unknown; height?: unknown } | null | undefined;
+        if (res !== null && res !== undefined) {
+          const w = res.width;
+          const h = res.height;
+          if (
+            typeof w !== "number" ||
+            typeof h !== "number" ||
+            !Number.isInteger(w) ||
+            !Number.isInteger(h) ||
+            w < 320 ||
+            w > 7680 ||
+            h < 240 ||
+            h > 4320
+          ) {
+            return fail("invalid_resolution", "Invalid window resolution.", {
+              params: { minWidth: 320, maxWidth: 7680, minHeight: 240, maxHeight: 4320 },
+            });
+          }
+          target.resolution = { width: w, height: h };
+        } else {
+          target.resolution = null;
+        }
+        return profilesSnapshot();
+      }
+      case "set_profile_jvm_args": {
+        const id = args.id as string;
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) return fail("not_found", "No such profile.");
+        if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        if (!validJvmArgs(args.args)) {
+          return fail("invalid_jvm_args", "Invalid JVM argument.");
+        }
+        target.jvmArgs = clone(args.args);
         return profilesSnapshot();
       }
       case "set_profile_version": {
@@ -401,6 +551,8 @@ function install(cfg: BackendConfig): void {
           ready: false,
           playtimeSeconds: 0,
           memoryMb: null,
+          resolution: null,
+          jvmArgs: [],
         });
         state.selected = id;
         return profilesSnapshot();

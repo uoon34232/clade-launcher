@@ -108,6 +108,17 @@ export const ru: Record<MessageKey, Message> = {
   "profileModal.duplicating": "Дублирование…",
   "profileModal.memoryDefault": "По умолчанию",
   "profileModal.memoryDefaultNote": "Как в настройках лаунчера ({value} на этом компьютере).",
+  "profileModal.resolution": "Размер окна",
+  "profileModal.resolutionDefault": "Стандартный",
+  "profileModal.resolutionFixed": "Заданный",
+  "profileModal.resolutionDefaultNote": "Запускается со стандартным размером окна Minecraft.",
+  "profileModal.resolutionWidth": "Ширина окна",
+  "profileModal.resolutionHeight": "Высота окна",
+  "profileModal.applyResolution": "Применить размер",
+  "profileModal.jvmArgs": "Аргументы JVM",
+  "profileModal.jvmArgsPlaceholder": "напр. -XX:+UseStringDeduplication",
+  "profileModal.jvmArgsNote": "Флаги через пробел (-XX:, -D, -Xss, -Xmn). Память задаётся выше.",
+  "profileModal.applyJvmArgs": "Применить флаги",
   "profileModal.files": "Файлы",
   "profileModal.filesNoteVanilla":
     "Миры, ресурспаки, скриншоты и настройки хранятся в папке профиля.",
@@ -285,6 +296,9 @@ export const ru: Record<MessageKey, Message> = {
 
   // ---- settings
   "settings.title": "Настройки",
+  "settings.mode": "Режим",
+  "settings.mode.simple": "Простой",
+  "settings.mode.advanced": "Расширенный",
   "settings.sound": "Звуковые эффекты",
   "settings.volume": "Громкость",
   "settings.language": "Язык",
@@ -483,6 +497,10 @@ export const ru: Record<MessageKey, Message> = {
   "error.profile.busy": "Этот профиль сейчас готовится. Дождись завершения.",
   "error.profile.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
+  "error.profile.invalid_resolution":
+    "Выбери размер окна от {minWidth}×{minHeight} до {maxWidth}×{maxHeight}.",
+  "error.profile.invalid_jvm_args":
+    "Разрешены только безопасные флаги JVM (-XX:, -D, -Xss, -Xmn, --add-opens=); памятью и путями управляет Clade.",
   "error.profile.not_found": "Этого профиля больше нет.",
   "error.profile.duplicate_failed":
     "Не удалось дублировать профиль. Проверь свободное место на диске и закрой всё, что использует его папку.",

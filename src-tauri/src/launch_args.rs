@@ -29,11 +29,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::instances::InstanceDirs;
+use crate::instances::{InstanceDirs, Resolution};
 use crate::loader_install::SystemEnv;
 use crate::mc_meta::{
-    parse_asset_index, parse_version, Arg, AssetIndexRef, JavaRequirement, Library, LogConfig,
-    MetaError, Role, VersionPlan, WINDOWS_X64,
+    parse_asset_index, parse_version, Arg, AssetIndexRef, JavaRequirement, LaunchFeatures, Library,
+    LogConfig, MetaError, Role, VersionPlan, WINDOWS_X64,
 };
 use crate::ms_auth::Secret;
 use crate::portable::PortableRoot;
@@ -403,6 +403,7 @@ pub struct BuildInput<'a> {
     pub java: &'a ManagedJava,
     pub identity: &'a Identity,
     pub memory_mb: u32,
+    pub resolution: Option<Resolution>,
     /// The profile's own JVM arguments (validated when the profile was saved).
     pub extra_jvm_args: &'a [String],
     pub sys: &'a SystemEnv,
@@ -613,21 +614,54 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
     ] {
         vars.insert(k, v);
     }
+    if let Some(res) = i.resolution {
+        vars.insert("resolution_width", res.width.to_string());
+        vars.insert("resolution_height", res.height.to_string());
+    }
+    let features = LaunchFeatures {
+        has_custom_resolution: i.resolution.is_some(),
+    };
 
     // JVM arguments from the metadata (or the defaults older versions never listed).
-    let mut jvm_template: Vec<String> = r.jvm.iter().flat_map(|a| a.values(&WINDOWS_X64)).collect();
+    let mut jvm_template: Vec<String> = r
+        .jvm
+        .iter()
+        .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
+        .collect();
     if !jvm_template.iter().any(|a| a.contains("${classpath}")) {
         jvm_template = default_jvm()
             .iter()
-            .flat_map(|a| a.values(&WINDOWS_X64))
+            .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
             .chain(jvm_template)
             .collect();
     }
-    let game_template: Vec<String> = match (&r.legacy_args, r.game.is_empty()) {
-        (_, false) => r.game.iter().flat_map(|a| a.values(&WINDOWS_X64)).collect(),
+    let mut game_template: Vec<String> = match (&r.legacy_args, r.game.is_empty()) {
+        (_, false) => r
+            .game
+            .iter()
+            .flat_map(|a| a.values_with_features(&WINDOWS_X64, &features))
+            .collect(),
         (Some(s), true) => s.split_whitespace().map(str::to_owned).collect(),
         (None, true) => return Err(LaunchError::Incomplete("no game arguments")),
     };
+    if let Some(res) = i.resolution {
+        if !game_template
+            .iter()
+            .any(|a| a.contains("${resolution_width}") || a == "--width")
+        {
+            game_template.extend([
+                "--width".to_owned(),
+                res.width.to_string(),
+                "--height".to_owned(),
+                res.height.to_string(),
+            ]);
+        } else if !game_template
+            .iter()
+            .any(|a| a.contains("${resolution_height}") || a == "--height")
+        {
+            game_template.extend(["--height".to_owned(), res.height.to_string()]);
+        }
+    }
 
     let mut unknown = Vec::new();
     let home = i.dirs.home_dir();

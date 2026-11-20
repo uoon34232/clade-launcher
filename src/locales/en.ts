@@ -108,6 +108,17 @@ export const en = {
   "profileModal.duplicating": "Duplicating…",
   "profileModal.memoryDefault": "Launcher default",
   "profileModal.memoryDefaultNote": "Follows Settings ({value} on this computer).",
+  "profileModal.resolution": "Window size",
+  "profileModal.resolutionDefault": "Game default",
+  "profileModal.resolutionFixed": "Fixed size",
+  "profileModal.resolutionDefaultNote": "Starts with Minecraft’s standard window size.",
+  "profileModal.resolutionWidth": "Window width",
+  "profileModal.resolutionHeight": "Window height",
+  "profileModal.applyResolution": "Apply size",
+  "profileModal.jvmArgs": "JVM arguments",
+  "profileModal.jvmArgsPlaceholder": "e.g. -XX:+UseStringDeduplication",
+  "profileModal.jvmArgsNote": "Space-separated flags (-XX:, -D, -Xss, -Xmn). Memory is set above.",
+  "profileModal.applyJvmArgs": "Apply flags",
   "profileModal.files": "Files",
   "profileModal.filesNoteVanilla":
     "Worlds, resource packs, screenshots and options live in this profile’s folder.",
@@ -280,6 +291,9 @@ export const en = {
 
   // ---- settings
   "settings.title": "Settings",
+  "settings.mode": "Mode",
+  "settings.mode.simple": "Simple",
+  "settings.mode.advanced": "Advanced",
   "settings.sound": "Sound effects",
   "settings.volume": "Volume",
   "settings.language": "Language",
@@ -479,6 +493,10 @@ export const en = {
   "error.profile.busy": "This profile is being set up. Wait for it to finish.",
   "error.profile.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
+  "error.profile.invalid_resolution":
+    "Choose a window size between {minWidth}×{minHeight} and {maxWidth}×{maxHeight}.",
+  "error.profile.invalid_jvm_args":
+    "Only safe JVM flags (-XX:, -D, -Xss, -Xmn, --add-opens=) are allowed; memory and paths are managed by Clade.",
   "error.profile.not_found": "That profile no longer exists.",
   "error.profile.duplicate_failed":
     "Could not duplicate the profile. Check available disk space and close anything using its folder.",
