@@ -53,12 +53,18 @@ Before you run it: the Preview targets **Windows 10 (64-bit) and Windows 11 (64-
 - Exported diagnostics redact the known Minecraft profile names and UUIDs.
 - Windows QA tooling: a Windows Sandbox harness (offline, online, online with GPU), an environment report and a before/after portability audit.
 - Launching has been validated on a development PC with a real GPU for modern Vanilla, Vanilla 1.12.2 (Java 8), Fabric, Forge, NeoForge and Quilt, including duplicate-launch protection, hiding and showing the window, surviving a closed launcher, and recovery after a crashed game.
+- Framed game window mode (**Inside Clade**): by default, Clade reparents the native Minecraft window directly into Clade's frameless host window (`SetParent` and Win32 region cutouts so WebView2 never occludes the game, Minimize / Maximize-Restore / Close header strip, automatic window geometry restore on exit), alongside **Keep Clade open** and **Hide Clade**.
+- **Simple** and **Advanced** interface modes: Clade opens in a calm Simple mode by default; switching to Advanced mode in Settings unlocks snapshot and historical version filters, manual loader version choice, reduced-motion and Windows 11 Mica transparency controls, launch/exit window behavior, diagnostics export, and per-profile memory, initial window size (`320×240`–`7680×4320`), and allowlisted JVM arguments.
+- In-place version switching and profile duplication: switch a profile to another Minecraft or compatible loader version while keeping its worlds and settings, or duplicate any profile into an independent copy before testing changes.
+- Restoring removed profiles: restore any profile kept under `instances/.removed/` in one click (with automatic name and folder collision resolution) from the profile menu or empty-state banner, or open `instances/.removed/` in File Explorer while keeping Clade's rule that no command ever deletes profile files.
+- Clearing archived sign-in vaults: explicitly delete old archived vaults under `data/retired-vaults/` from Settings -> Support (with confirmation, shown only when archived vaults exist) without touching the active `vault.bin`.
+- Manual update check in Settings: **Check for updates** queries GitHub Releases strictly on click (zero background requests, isolated `api.github.com` policy) and opens the canonical release page when a newer version is available.
+- Smaller release binary and WebView2 disk footprint: code-split modal surfaces, WebView2 cache and V8 heap limits, and startup cleanup of disposable Chromium component-updater bloat in `data/webview2`.
 
 ### Known limitations
 
 - 64-bit Windows 10 and Windows 11 (`x64`) only. On Windows 10, FAT32 and exFAT drives do not support persistent ACLs, so Clade cannot grant the bundled WebView2 runtime's AppContainer permissions on those drives and falls back to the PC's installed Evergreen WebView2 runtime; prefer NTFS if a clean Windows 10 PC may not have WebView2 installed.
 - Not code-signed. SmartScreen may warn, and Smart App Control in enforcement mode may block `Clade.exe` outright.
-- No self-update yet: download a new release to update.
+- No automatic self-update yet: use **Check for updates** in Settings and extract the new portable ZIP.
 - Skin and cape changes are new and have not yet been tried against a real Minecraft account, so report anything odd.
 - Launching needs a network connection once the saved Minecraft sign-in has expired. There is no offline mode.
-- Archived vaults under `data/retired-vaults/` are not cleaned up by Clade; delete them yourself when you no longer need them.
