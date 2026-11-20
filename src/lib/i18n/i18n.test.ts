@@ -415,6 +415,7 @@ describe("structured backend errors are worded in the current language", () => {
         "remove_failed",
         "remove_refused",
         "duplicate_failed",
+        "restore_failed",
       ],
       ...[
         "passphrase_mismatch",
@@ -444,6 +445,7 @@ describe("structured backend errors are worded in the current language", () => {
       "remove_refused",
       "not_found",
       "duplicate_failed",
+      "restore_failed",
     ];
     expect(wanted("profile", profileCodes)).toEqual([]);
     // "Start fresh" (vault_recovery.rs) and the unlock errors

@@ -70,11 +70,13 @@ describe("parsers validate backend data instead of trusting it", () => {
     expect(s.selected).toBe("a");
     expect(s.totalPlaytimeSeconds).toBe(99720);
     expect(s.unreadable).toEqual([]);
+    expect(s.removed).toEqual([]);
     expect(parseProfiles(null)).toEqual({
       profiles: [],
       selected: null,
       totalPlaytimeSeconds: 0,
       unreadable: [],
+      removed: [],
     });
   });
 
@@ -201,6 +203,8 @@ describe("calls", () => {
     await expect(profilesApi.duplicate("survival")).rejects.toThrow(/not available/);
     await expect(profilesApi.openFolder("survival")).rejects.toThrow(/not available/);
     await expect(profilesApi.openInstancesFolder()).rejects.toThrow(/not available/);
+    await expect(profilesApi.restore("survival-100-abcd1234")).rejects.toThrow(/not available/);
+    await expect(profilesApi.openRemovedFolder()).rejects.toThrow(/not available/);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -231,6 +235,8 @@ describe("calls", () => {
     await profilesApi.duplicate("survival");
     await profilesApi.openFolder("survival");
     await profilesApi.openInstancesFolder();
+    await profilesApi.restore("survival-100-abcd1234");
+    await profilesApi.openRemovedFolder();
     expect(invoke.mock.calls).toEqual([
       ["list_profiles", undefined],
       ["select_profile", { id: "my-world" }],
@@ -255,6 +261,8 @@ describe("calls", () => {
       ["duplicate_profile", { id: "survival" }],
       ["open_profile_folder", { id: "survival" }],
       ["open_instances_folder", undefined],
+      ["restore_profile", { folder: "survival-100-abcd1234" }],
+      ["open_removed_profiles_folder", undefined],
     ]);
   });
 

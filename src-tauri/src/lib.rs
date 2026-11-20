@@ -341,6 +341,8 @@ pub fn run() {
             profiles::set_profile_jvm_args,
             profiles::open_profile_folder,
             profiles::open_instances_folder,
+            profiles::restore_profile,
+            profiles::open_removed_profiles_folder,
             accounts_api::list_accounts,
             accounts_api::select_account,
             accounts_api::remove_account,

@@ -26,6 +26,8 @@ interface Props {
   /** Remove the selected profile from Clade (its files are kept). */
   onRemoveProfile: () => void;
   removeDisabled?: boolean;
+  removedCount?: number;
+  onOpenRemovedProfiles?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -51,6 +53,8 @@ export function LauncherDock(p: Props) {
           verifyDisabled={p.verifyDisabled}
           onRemove={p.onRemoveProfile}
           removeDisabled={p.removeDisabled}
+          removedCount={p.removedCount}
+          onOpenRemoved={p.onOpenRemovedProfiles}
         />
         <PlayButton onClick={p.onPlay} state={p.playState} />
         <SettingsButton onClick={p.onOpenSettings} />

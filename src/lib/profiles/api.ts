@@ -52,12 +52,25 @@ export interface ProfileSummary {
   jvmArgs?: readonly string[];
 }
 
+export interface RemovedProfileSummary {
+  folder: string;
+  name: string;
+  minecraft: string;
+  kind: "vanilla" | "modded";
+  loader: LoaderKind | null;
+  loaderVersion: string | null;
+  playtimeSeconds: number;
+  removedAt: number | null;
+}
+
 export interface ProfilesSnapshot {
   profiles: ProfileSummary[];
   selected: string | null;
   totalPlaytimeSeconds: number;
   /** Folder names inside instances/ whose profile metadata could not be read (files are kept untouched). */
   unreadable?: readonly string[];
+  /** Profiles moved to instances/.removed/ that can be restored in one click. */
+  removed?: readonly RemovedProfileSummary[];
 }
 
 export interface CatalogEntry {
@@ -181,6 +194,27 @@ export function parseProfiles(raw: unknown): ProfilesSnapshot {
   for (const u of Array.isArray(o.unreadable) ? o.unreadable : []) {
     if (typeof u === "string" && u.length > 0) unreadable.push(u);
   }
+  const removed: RemovedProfileSummary[] = [];
+  for (const r of Array.isArray(o.removed) ? o.removed : []) {
+    if (!isObj(r)) continue;
+    const folder = str(r.folder);
+    const name = str(r.name);
+    const minecraft = str(r.minecraft);
+    if (!folder || !name || !minecraft || (r.kind !== "vanilla" && r.kind !== "modded")) continue;
+    removed.push({
+      folder,
+      name,
+      minecraft,
+      kind: r.kind,
+      loader: isLoader(r.loader) ? r.loader : null,
+      loaderVersion: str(r.loaderVersion),
+      playtimeSeconds: Math.max(0, num(r.playtimeSeconds)),
+      removedAt:
+        typeof r.removedAt === "number" && Number.isFinite(r.removedAt) && r.removedAt > 0
+          ? r.removedAt
+          : null,
+    });
+  }
   const selected = str(o.selected);
   return {
     profiles,
@@ -188,6 +222,7 @@ export function parseProfiles(raw: unknown): ProfilesSnapshot {
       selected && profiles.some((p) => p.id === selected) ? selected : (profiles[0]?.id ?? null),
     totalPlaytimeSeconds: Math.max(0, num(o.totalPlaytimeSeconds)),
     unreadable,
+    removed,
   };
 }
 
@@ -357,6 +392,12 @@ export const profilesApi = {
    * says why not (the profile is running or being set up, or the folder could not be moved).
    */
   remove: async (id: string) => parseProfiles(await call("remove_profile", { id })),
+  /** Restores a retained profile from `instances/.removed/<folder>` back into `instances/`. */
+  restore: async (folder: string) => parseProfiles(await call("restore_profile", { folder })),
+  /** Opens `instances/.removed/` inside the Clade folder in File Explorer. */
+  openRemovedFolder: async (): Promise<void> => {
+    await call("open_removed_profiles_folder");
+  },
   /** Progress events of a running preparation. Returns a function that stops listening. */
   onPrepareProgress: async (callback: (p: PrepareProgress) => void): Promise<() => void> => {
     if (!inTauri()) return () => undefined;
@@ -367,4 +408,5 @@ export const profilesApi = {
   },
 };
 
-export type ProfilesApi = typeof profilesApi;
+export type ProfilesApi = Omit<typeof profilesApi, "restore" | "openRemovedFolder"> &
+  Partial<Pick<typeof profilesApi, "restore" | "openRemovedFolder">>;

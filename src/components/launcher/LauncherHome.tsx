@@ -104,6 +104,9 @@ const ProfileDialog = lazyModal(() =>
 const RemoveProfileDialog = lazyModal(() =>
   import("./RemoveProfileDialog").then((m) => ({ default: m.RemoveProfileDialog })),
 );
+const RemovedProfilesDialog = lazyModal(() =>
+  import("./RemovedProfilesDialog").then((m) => ({ default: m.RemovedProfilesDialog })),
+);
 const SettingsDialog = lazyModal(() =>
   import("./SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
 );
@@ -128,6 +131,7 @@ type Surface =
   | { kind: "settings" }
   | { kind: "prepare"; id: string; verify?: boolean }
   | { kind: "remove-profile"; id: string }
+  | { kind: "removed-profiles" }
   | { kind: "sign-in"; accountId: string | null }
   | { kind: "account"; id: string };
 
@@ -377,6 +381,7 @@ export function LauncherHome({
       ? (snapshot.profiles.find((p) => p.id === surface.id) ?? null)
       : null;
   const unreadable = snapshot.unreadable ?? [];
+  const removed = snapshot.removed ?? [];
   if (unreadable.length === 0 && instancesError !== null) setInstancesError(null);
   const run = selectedProfile ? runs[selectedProfile.id] : undefined;
   const playState: PlayState =
@@ -473,6 +478,31 @@ export function LauncherHome({
             </div>
           </div>
         )}
+        {!embed.active &&
+          snapshot.profiles.length === 0 &&
+          unreadable.length === 0 &&
+          removed.length > 0 && (
+            <div
+              role="status"
+              className="dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
+            >
+              <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
+                <span className="text-ink-muted">
+                  {t("removedProfiles.emptyNotice", { count: removed.length })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSound("click");
+                    setSurface({ kind: "removed-profiles" });
+                  }}
+                  className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-clay/45 cursor-default rounded-md font-medium underline underline-offset-3 transition-colors outline-none focus-visible:ring-2"
+                >
+                  {t("removedProfiles.openAction")}
+                </button>
+              </div>
+            </div>
+          )}
         {!embed.active && (
           <LauncherDock
             accounts={accounts.accounts}
@@ -499,6 +529,8 @@ export function LauncherHome({
             onRemoveProfile={() =>
               selectedProfile && setSurface({ kind: "remove-profile", id: selectedProfile.id })
             }
+            removedCount={removed.length}
+            onOpenRemovedProfiles={() => setSurface({ kind: "removed-profiles" })}
             onPlay={play}
             playState={playState}
             onOpenSettings={() => setSurface({ kind: "settings" })}
@@ -566,6 +598,15 @@ export function LauncherHome({
                   setSnapshot(next); // the backend's list and a valid selection; no restart needed
                   close();
                 }}
+                api={api}
+              />
+            )}
+            {mounted["removed-profiles"] && (
+              <RemovedProfilesDialog
+                open={surface.kind === "removed-profiles"}
+                removed={removed}
+                onClose={close}
+                onRestored={setSnapshot}
                 api={api}
               />
             )}

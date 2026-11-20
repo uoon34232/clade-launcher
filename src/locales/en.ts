@@ -82,12 +82,26 @@ export const en = {
     other: "{count} profile folders couldn’t be read ({folders}). Their files were left untouched.",
   } satisfies Message,
   "profile.verify": "Verify files",
+  "profile.removedMenu": "Removed profiles ({count})…",
   "profile.remove": "Remove from Clade…",
   "removeProfile.title": "Remove “{profile}” from Clade?",
   "removeProfile.body":
     "The profile will disappear from Clade, but its worlds, mods, settings, screenshots and other files will be kept inside the Clade folder. Nothing will be permanently deleted.",
   "removeProfile.confirm": "Remove from Clade",
   "removeProfile.working": "Removing…",
+  "removedProfiles.emptyNotice": {
+    by: "count",
+    one: "1 removed profile is kept in this Clade folder.",
+    other: "{count} removed profiles are kept in this Clade folder.",
+  } satisfies Message,
+  "removedProfiles.openAction": "Restore…",
+  "removedProfiles.title": "Removed profiles",
+  "removedProfiles.description":
+    "Worlds, mods, and settings stay untouched inside Clade. Restore brings a profile back; open the folder if you want to delete files yourself.",
+  "removedProfiles.restore": "Restore",
+  "removedProfiles.restoring": "Restoring…",
+  "removedProfiles.openFolder": "Open folder",
+  "removedProfiles.empty": "No removed profiles.",
   "profile.vanilla": "Vanilla",
   "profile.modded": "Modded",
 
@@ -501,6 +515,8 @@ export const en = {
   "error.profile.invalid_jvm_args":
     "Only safe JVM flags (-XX:, -D, -Xss, -Xmn, --add-opens=) are allowed; memory and paths are managed by Clade.",
   "error.profile.not_found": "That profile no longer exists.",
+  "error.profile.restore_failed":
+    "Couldn’t restore the profile. Make sure none of its files are open in another program.",
   "error.profile.duplicate_failed":
     "Could not duplicate the profile. Check available disk space and close anything using its folder.",
   "error.profile.open_failed": "Windows couldn't open that folder.",

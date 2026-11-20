@@ -22,6 +22,7 @@ interface Control {
     profiles: BackendConfig["profiles"];
     selected: string | null;
     unreadable: string[];
+    removed: NonNullable<BackendConfig["removed"]>;
     accounts: BackendConfig["accounts"];
     active: string | null;
     appearance: BackendConfig["appearance"];
@@ -56,6 +57,7 @@ function install(cfg: BackendConfig): void {
     profiles: clone(cfg.profiles),
     selected: cfg.selected,
     unreadable: clone(cfg.unreadable ?? []),
+    removed: clone(cfg.removed ?? []),
     accounts: clone(cfg.accounts),
     active: cfg.active,
     appearance: clone(cfg.appearance),
@@ -126,6 +128,16 @@ function install(cfg: BackendConfig): void {
     selected: state.selected,
     totalPlaytimeSeconds: state.profiles.reduce((s, p) => s + p.playtimeSeconds, 0),
     unreadable: clone(state.unreadable),
+    removed: clone(state.removed).map((r) => ({
+      folder: r.folder,
+      name: r.name,
+      minecraft: r.minecraft,
+      kind: r.kind,
+      loader: r.loader,
+      loaderVersion: r.loaderVersion,
+      playtimeSeconds: r.playtimeSeconds,
+      removedAt: r.removedAt ?? null,
+    })),
   });
   const accountsSnapshot = () => ({
     accounts: clone(state.accounts),
@@ -344,15 +356,67 @@ function install(cfg: BackendConfig): void {
         state.selected = args.id as string;
         return null;
       // "Remove from Clade": the real command moves the folder to instances/.removed/ and deletes
-      // nothing. Here the profile just leaves the list, with a valid selection (the next one, or none).
+      // nothing. Here the profile moves from `state.profiles` into `state.removed`.
       case "remove_profile": {
         const id = args.id as string;
-        if (!state.profiles.some((p) => p.id === id)) return fail("not_found", "No such profile.");
+        const idx = state.profiles.findIndex((p) => p.id === id);
+        if (idx === -1) return fail("not_found", "No such profile.");
         if (state.runs[id]) return fail("already_running", "This profile is running.");
-        state.profiles = state.profiles.filter((p) => p.id !== id);
+        const [removed] = state.profiles.splice(idx, 1);
+        state.removed.unshift({
+          ...clone(removed),
+          folder: `${removed.id}-1700000000-${state.removed.length + 1}`,
+          removedAt: 1_700_000_000 + state.removed.length,
+        });
         state.selected = state.profiles[0]?.id ?? null;
         return profilesSnapshot();
       }
+      case "restore_profile": {
+        const folder = args.folder as string;
+        const idx = state.removed.findIndex((r) => r.folder === folder);
+        if (idx === -1) return fail("not_found", "No such profile.");
+        const [item] = state.removed.splice(idx, 1);
+        let finalName = item.name;
+        if (
+          state.profiles.some((p) => p.name.trim().toLowerCase() === finalName.trim().toLowerCase())
+        ) {
+          const stem = finalName.trim().replace(/\s+\(([2-9]\d*|\d{2,})\)$/, "");
+          let n = 2;
+          while (
+            state.profiles.some(
+              (p) => p.name.trim().toLowerCase() === `${stem} (${n})`.toLowerCase(),
+            )
+          ) {
+            n += 1;
+          }
+          finalName = `${stem} (${n})`;
+        }
+        const baseId =
+          finalName.toLowerCase() === item.name.toLowerCase() ? item.id : slug(finalName);
+        let targetId = baseId;
+        let k = 2;
+        while (state.profiles.some((p) => p.id === targetId)) {
+          targetId = `${baseId}-${k}`;
+          k += 1;
+        }
+        state.profiles.push({
+          id: targetId,
+          name: finalName,
+          minecraft: item.minecraft,
+          kind: item.kind,
+          loader: item.loader,
+          loaderVersion: item.loaderVersion,
+          ready: item.ready,
+          playtimeSeconds: item.playtimeSeconds,
+          memoryMb: item.memoryMb ?? null,
+          resolution: item.resolution ?? null,
+          jvmArgs: item.jvmArgs ?? [],
+        });
+        state.selected = targetId;
+        return profilesSnapshot();
+      }
+      case "open_removed_profiles_folder":
+        return null;
       case "rename_profile": {
         const id = args.id as string;
         const target = state.profiles.find((p) => p.id === id);

@@ -31,7 +31,9 @@ export function profileLabel(p: Pick<ProfileSummary, "name">): string {
 }
 
 /** Second line in the profile menu: the build, plus the loader version when known. */
-export function profileDetail(p: ProfileSummary): string {
+export function profileDetail(
+  p: Pick<ProfileSummary, "kind" | "loader" | "minecraft" | "loaderVersion">,
+): string {
   return p.kind === "modded" && p.loaderVersion
     ? `${buildLabel(p)} · ${p.loaderVersion}`
     : buildLabel(p);

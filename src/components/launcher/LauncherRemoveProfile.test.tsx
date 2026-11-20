@@ -64,11 +64,45 @@ function setup(
     cancelPrepare: vi.fn<ProfilesApi["cancelPrepare"]>(() => Promise.resolve()),
     remove: vi.fn<ProfilesApi["remove"]>((id) => {
       if (opts.failWith) return Promise.reject(opts.failWith);
+      const gone = current.profiles.find((p) => p.id === id);
       const profiles = current.profiles.filter((p) => p.id !== id);
+      const removed = gone
+        ? [
+            {
+              folder: `${gone.id}-1700000000-01020304`,
+              name: gone.name,
+              minecraft: gone.minecraft,
+              kind: gone.kind,
+              loader: gone.loader,
+              loaderVersion: gone.loaderVersion,
+              playtimeSeconds: gone.playtimeSeconds,
+              removedAt: 1_700_000_000,
+            },
+            ...(current.removed ?? []),
+          ]
+        : (current.removed ?? []);
       // the backend keeps a valid selection: the next remaining profile, or none
-      current = { ...current, profiles, selected: profiles[0]?.id ?? null };
+      current = { ...current, profiles, removed, selected: profiles[0]?.id ?? null };
       return Promise.resolve(current);
     }),
+    restore: vi.fn<NonNullable<ProfilesApi["restore"]>>((folder) => {
+      const list = [...(current.removed ?? [])];
+      const idx = list.findIndex((r) => r.folder === folder);
+      if (idx === -1) return Promise.reject(new BackendError("missing", "not_found"));
+      const [item] = list.splice(idx, 1);
+      const id = item.folder.replace(/-\d+-[0-9a-f]+$/, "");
+      const restored = profile(id, item.name);
+      current = {
+        ...current,
+        profiles: [...current.profiles, restored],
+        removed: list,
+        selected: restored.id,
+      };
+      return Promise.resolve(current);
+    }),
+    openRemovedFolder: vi.fn<NonNullable<ProfilesApi["openRemovedFolder"]>>(() =>
+      Promise.resolve(),
+    ),
     onPrepareProgress: vi.fn<ProfilesApi["onPrepareProgress"]>(() =>
       Promise.resolve(() => undefined),
     ),
@@ -244,5 +278,47 @@ describe("Remove from Clade", () => {
   it("the interface has no way to erase a profile's files: the only call is remove", () => {
     const names = Object.keys(setup(snap("a", profile("a", "Alpha"))).api);
     expect(names.filter((n) => /delete|erase|purge/i.test(n))).toEqual([]);
+  });
+
+  it("restores a removed profile from the menu and from the empty-profile banner, and opens the retained folder", async () => {
+    const { api } = setup(snap("a", profile("a", "Alpha"), profile("b", "Beta")));
+    await flush();
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from Clade…" }));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Remove from Clade" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await openMenu(/Profile: Beta/);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Removed profiles (1)…" }));
+    const removedDialog = await screen.findByRole("dialog", { name: "Removed profiles" });
+    expect(removedDialog.textContent).toContain("Alpha");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    expect(api.openRemovedFolder).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.restore).toHaveBeenCalledWith("a-1700000000-01020304");
+    expect(screen.getByRole("button", { name: "Profile: Alpha. Change profile" })).toBeTruthy();
+
+    // Remove both profiles: the empty-state notice leads into the restore dialog too.
+    for (const label of [/Profile: Alpha/, /Profile: Beta/]) {
+      await openMenu(label);
+      fireEvent.click(screen.getByRole("menuitem", { name: "Remove from Clade…" }));
+      await screen.findByRole("dialog");
+      fireEvent.click(screen.getByRole("button", { name: "Remove from Clade" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+    expect(screen.getByText("2 removed profiles are kept in this Clade folder.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Restore…" }));
+    await screen.findByRole("dialog", { name: "Removed profiles" });
+    const restoreButtons = screen.getAllByRole("button", { name: "Restore" });
+    expect(restoreButtons).toHaveLength(2);
+    fireEvent.click(restoreButtons[0]);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Restore" })).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "Profile: Beta. Change profile" })).toBeTruthy();
   });
 });
