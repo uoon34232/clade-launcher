@@ -592,10 +592,11 @@ test.describe("transparency effects", () => {
       .poll(() =>
         page.evaluate(() => {
           const m = getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!);
-          return [m.backdropFilter, m.backgroundColor];
+          const o = getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')!);
+          return [m.backdropFilter, m.backgroundColor, o.backdropFilter];
         }),
       )
-      .toEqual(["none", "rgb(246, 240, 230)"]);
+      .toEqual(["none", "rgb(246, 240, 230)", "none"]);
 
     await g.getByRole("radio", { name: text("settings.transparency.on") }).click();
     await expect(html(page)).toHaveAttribute("data-glass", "on");
@@ -605,6 +606,18 @@ test.describe("transparency effects", () => {
     }));
     expect(on.dockFilter).toBe("none"); // the blur is the window material's, never a CSS filter (it costs GPU)
     expect(on.pageBase).toMatch(/^rgba\(243, 237, 227, 0\.\d+\)$/);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const m = getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!);
+          const o = getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')!);
+          return [m.backdropFilter, o.backdropFilter];
+        }),
+      )
+      .toEqual([
+        expect.stringMatching(/^blur\(\d+px\)$/),
+        expect.stringMatching(/^blur\(\d+px\)$/),
+      ]);
 
     await g.getByRole("radio", { name: text("settings.transparency.system") }).click();
     await expect(html(page)).toHaveAttribute("data-glass", "on");

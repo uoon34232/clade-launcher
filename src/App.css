@@ -553,7 +553,7 @@ html[data-motion="reduce"] .wordmark .wm-fade {
 /* ------------------------------------------------------------------------------------------------
    Window material ("glass"). One set of surface tokens; the classic opaque look is the default and
    `data-glass="on"` (set from the backend's resolved state, see lib/glass.ts) swaps the values, so
-   components keep a single structure (`glass-dock`, `glass-modal`, `glass-menu`, `page-base`).
+   components keep a single structure (`glass-dock`, `glass-modal`, `glass-overlay`, `glass-menu`, `page-base`).
    Off means off: nothing below applies without the attribute, there is no backdrop-filter, and every
    fill is opaque. Transparency never depends on reduced motion: no rule here animates anything, so
    the material is static whether or not motion is reduced.
@@ -569,6 +569,7 @@ html[data-motion="reduce"] .wordmark .wm-fade {
   /* modals: Settings, accounts, profiles, confirmations (denser than the page, for reading) */
   --glass-modal-bg: #f6f0e6;
   --glass-modal-filter: none;
+  --glass-overlay-filter: none;
   --glass-modal-edge: 0 0 0 1px rgb(43 38 34 / 0.1);
   --glass-modal-shadow: 0 40px 90px -30px rgb(43 38 34 / 0.55);
   /* the account menu: the dock's graphite, as a popover (portaled, but still inside <html>, so it
@@ -579,10 +580,10 @@ html[data-motion="reduce"] .wordmark .wm-fade {
   /* tiny light response on hover */
   --glass-spec: none;
 }
-/* No CSS backdrop-filter in the glass look: the blur comes from the window material itself, which the
-   compositor draws for free. Measured in the real window, a blur(14px) behind the dock added about 12
-   points of CPU while the animated background runs, and one behind a modal about 8, for no visible gain
-   (the colour fields behind are already soft). The tokens stay so a heavier look can be tried again. */
+/* Dock and dock popovers skip CSS backdrop-filter: the blur comes from the window material itself,
+   which the compositor draws for free. Open modals (`glass-overlay` + `glass-modal`) apply CSS blur
+   so the main-screen headline behind a translucent dialog is frosted instead of bleeding sharply
+   through. */
 html[data-glass="on"] {
   --page-base: rgb(243 237 227 / 0.8);
   --glass-dock-bg: rgb(43 38 34 / 0.76);
@@ -590,7 +591,8 @@ html[data-glass="on"] {
   --glass-dock-edge: inset 0 1px 0 rgb(255 255 255 / 0.2), inset 0 0 0 1px rgb(255 255 255 / 0.09);
   --glass-dock-shadow: 0 26px 60px -26px rgb(43 38 34 / 0.55), 0 2px 8px -2px rgb(43 38 34 / 0.2);
   --glass-modal-bg: rgb(246 240 230 / 0.92);
-  --glass-modal-filter: none;
+  --glass-modal-filter: blur(20px);
+  --glass-overlay-filter: blur(10px);
   --glass-modal-edge:
     inset 0 1px 0 rgb(255 255 255 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.5),
     0 0 0 2px rgb(43 38 34 / 0.06);
@@ -630,6 +632,10 @@ html[data-glass="on"] body {
   -webkit-backdrop-filter: var(--glass-modal-filter);
   backdrop-filter: var(--glass-modal-filter);
   box-shadow: var(--glass-modal-edge), var(--glass-modal-shadow);
+}
+.glass-overlay {
+  -webkit-backdrop-filter: var(--glass-overlay-filter);
+  backdrop-filter: var(--glass-overlay-filter);
 }
 /* Quiet scrollbars on the light surfaces (dialogs, the cape list): a thin rounded graphite thumb
    inset from the edge, no track, no arrows, no bright system look. Only colour changes on hover. */
@@ -672,7 +678,8 @@ html[data-glass="on"] .dock-item:hover:not(:disabled) {
 /* Windows High Contrast: always the plain, opaque, system-coloured look */
 @media (forced-colors: active) {
   .glass-dock,
-  .glass-modal {
+  .glass-modal,
+  .glass-overlay {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
