@@ -61,7 +61,13 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
 
   const btn = `window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite ${
     framed ? "opacity-65" : "opacity-45"
-  } transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-clay active:bg-graphite/[0.12]`;
+  } transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 active:bg-graphite/[0.12]`;
+
+  const blurIfPointerOrFramed = (el: HTMLButtonElement, detail: number) => {
+    if (framed || detail > 0) {
+      el.blur();
+    }
+  };
 
   return (
     <div
@@ -77,7 +83,10 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
         type="button"
         aria-label={t("window.minimize")}
         className={btn}
-        onClick={() => withWindow((w) => w.minimize())}
+        onClick={(e) => {
+          blurIfPointerOrFramed(e.currentTarget, e.detail);
+          withWindow((w) => w.minimize());
+        }}
       >
         <MinusIcon aria-hidden className="size-4" />
       </button>
@@ -86,7 +95,10 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
           type="button"
           aria-label={maximized ? t("window.restore") : t("window.maximize")}
           className={btn}
-          onClick={() => onToggleMaximize?.()}
+          onClick={(e) => {
+            blurIfPointerOrFramed(e.currentTarget, e.detail);
+            onToggleMaximize?.();
+          }}
         >
           {maximized ? (
             <Minimize2Icon aria-hidden className="size-3.5" />
@@ -99,7 +111,10 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
         type="button"
         aria-label={t("window.close")}
         className={btn}
-        onClick={() => withWindow((w) => w.close())}
+        onClick={(e) => {
+          blurIfPointerOrFramed(e.currentTarget, e.detail);
+          withWindow((w) => w.close());
+        }}
       >
         <XIcon aria-hidden className="size-4" />
       </button>

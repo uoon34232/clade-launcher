@@ -37,8 +37,11 @@ describe("WindowChrome", () => {
     expect(strip.getAttribute("data-tauri-drag-region")).toBe("true");
 
     const maxBtn = screen.getByRole("button", { name: t("window.maximize") });
+    maxBtn.focus();
+    expect(document.activeElement).toBe(maxBtn);
     fireEvent.click(maxBtn);
     expect(onToggleMaximize).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).not.toBe(maxBtn);
 
     fireEvent.mouseDown(strip, { button: 0, detail: 2 });
     expect(onToggleMaximize).toHaveBeenCalledTimes(2);
@@ -46,10 +49,15 @@ describe("WindowChrome", () => {
     rerender(<WindowChrome framed maximized onToggleMaximize={onToggleMaximize} />);
     expect(strip.hasAttribute("data-tauri-drag-region")).toBe(false);
     const restoreBtn = screen.getByRole("button", { name: t("window.restore") });
+    restoreBtn.focus();
     fireEvent.click(restoreBtn);
     expect(onToggleMaximize).toHaveBeenCalledTimes(3);
+    expect(document.activeElement).not.toBe(restoreBtn);
 
-    fireEvent.click(screen.getByRole("button", { name: t("window.minimize") }));
+    const minBtn = screen.getByRole("button", { name: t("window.minimize") });
+    minBtn.focus();
+    fireEvent.click(minBtn);
+    expect(document.activeElement).not.toBe(minBtn);
     fireEvent.click(screen.getByRole("button", { name: t("window.close") }));
     await vi.waitFor(() => {
       expect(invokeSpy).toHaveBeenCalledWith(

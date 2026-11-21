@@ -305,6 +305,10 @@ html[data-input="keyboard"] .hero-link:focus-visible {
   outline-offset: 0.16em;
   border-radius: 0.14em;
 }
+html[data-input="keyboard"] .window-btn:focus-visible {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--color-clay);
+}
 .hero-text {
   display: inline-block;
 }
