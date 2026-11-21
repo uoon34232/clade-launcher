@@ -441,14 +441,12 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 }
 @keyframes game-stage-fold-out {
   0% {
-    opacity: 0.92;
+    opacity: 0.55;
     transform: translate3d(0, 0, 0) scale(1);
-    border-radius: 0;
   }
   100% {
     opacity: 0;
-    transform: translate3d(0, 20px, 0) scale(0.935);
-    border-radius: 26px;
+    transform: translate3d(0, 10px, 0) scale(0.96);
   }
 }
 @keyframes hero-return-in {
@@ -512,13 +510,13 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 }
 .game-stage-exit {
   transform-origin: 50% 42%;
-  animation: game-stage-fold-out 480ms var(--ease-out-soft) 60ms forwards;
+  animation: game-stage-fold-out 440ms var(--ease-out-soft) 150ms forwards;
 }
 .hero-return {
-  animation: hero-return-in 500ms var(--ease-out-soft) 90ms both;
+  animation: hero-return-in 460ms var(--ease-out-soft) 150ms both;
 }
 .dock-return {
-  animation: dock-return-in 480ms var(--ease-out-soft) 110ms both;
+  animation: dock-return-in 440ms var(--ease-out-soft) 170ms both;
 }
 .chrome-btn-enter {
   animation: chrome-btn-pop 220ms var(--ease-out-soft) both;

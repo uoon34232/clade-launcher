@@ -27,7 +27,7 @@ pub const EMBED_EVENT: &str = "game-embed-state";
 /// Logical height (CSS pixels at 100% DPI) of the custom Clade header strip in framed mode.
 pub const HEADER_HEIGHT_LOGICAL_PX: i32 = 44;
 
-const POLL_IDLE: Duration = Duration::from_millis(16);
+const POLL_IDLE: Duration = Duration::from_millis(4);
 const POLL_ACTIVE: Duration = Duration::from_millis(24);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -111,10 +111,10 @@ pub struct CapturedStage {
     pub pixels: Vec<u32>,
 }
 
-const REVEAL_HOLD_MS: u64 = 70;
-const REVEAL_DURATION_MS: u64 = 560;
-const CLOSE_HOLD_MS: u64 = 70;
-const CLOSE_DURATION_MS: u64 = 520;
+const REVEAL_HOLD_MS: u64 = 240;
+const REVEAL_DURATION_MS: u64 = 680;
+const CLOSE_HOLD_MS: u64 = 150;
+const CLOSE_DURATION_MS: u64 = 570;
 
 /// Smooth rounded-viewport reveal geometry and premultiplied-alpha veil opacities for one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,13 +176,13 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
 
     let hold = (REVEAL_HOLD_MS as f32) / (REVEAL_DURATION_MS as f32);
     let u = ((t - hold) / (1.0 - hold)).clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - u).powi(4);
+    let eased = 1.0 - (1.0 - u).powi(5);
 
-    let max_pad_x = ((w as f32) * 0.11)
-        .clamp(24.0, 140.0)
+    let max_pad_x = ((w as f32) * 0.09)
+        .clamp(20.0, 116.0)
         .min((w / 4).max(0) as f32);
-    let max_pad_y = ((h as f32) * 0.11)
-        .clamp(20.0, 96.0)
+    let max_pad_y = ((h as f32) * 0.09)
+        .clamp(16.0, 82.0)
         .min((h / 4).max(0) as f32);
     let pad_x = ((1.0 - eased) * max_pad_x).round() as i32;
     let pad_y = ((1.0 - eased) * max_pad_y).round() as i32;
@@ -192,37 +192,37 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
     let inner_left = ((w - inner_w) / 2).clamp(0, w - inner_w);
     let inner_right = inner_left + inner_w;
 
-    let lift_y = ((1.0 - eased) * 30.0).round() as i32;
+    let lift_y = ((1.0 - eased) * 24.0).round() as i32;
     let inner_top = ((h - inner_h) / 2 + lift_y).clamp(0, h - inner_h);
     let inner_bottom = inner_top + inner_h;
 
-    let radius = (((1.0 - eased) * 28.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
+    let radius = (((1.0 - eased) * 24.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
 
-    let inner_t = (u / 0.62).clamp(0.0, 1.0);
-    let inner_e = 1.0 - (1.0 - inner_t).powi(3);
     let inner_alpha = if u <= 0.0 {
-        242
-    } else {
-        ((1.0 - inner_e) * 242.0).round().clamp(0.0, 255.0) as u8
-    };
-
-    let outer_alpha = if u <= 0.84 {
         255
     } else {
-        let ot = ((u - 0.84) / 0.16).clamp(0.0, 1.0);
+        let inner_t = (u / 0.52).clamp(0.0, 1.0);
+        let inner_e = 1.0 - (1.0 - inner_t).powi(3);
+        ((1.0 - inner_e) * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    };
+
+    let outer_alpha = if u <= 0.78 {
+        255
+    } else {
+        let ot = ((u - 0.78) / 0.22).clamp(0.0, 1.0);
         let oe = 1.0 - (1.0 - ot).powi(3);
-        ((1.0 - oe) * 255.0).round().clamp(0.0, 255.0) as u8
+        ((1.0 - oe) * 255.0 + 0.5).clamp(0.0, 255.0) as u8
     };
 
     let shadow_spread = if u >= 0.98 {
         0
     } else {
-        ((1.0 - eased) * 18.0 + 4.0).round().clamp(0.0, 20.0) as i32
+        ((1.0 - eased) * 16.0 + 4.0).round().clamp(0.0, 20.0) as i32
     };
     let shadow_alpha = if u >= 0.98 {
         0
     } else {
-        (((1.0 - eased) * 0.85 + 0.15) * (1.0 - u).powf(0.6) * 92.0)
+        (((1.0 - eased) * 0.8 + 0.2) * (1.0 - u).powf(0.6) * 76.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
@@ -230,7 +230,7 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
     let border_alpha = if u <= 0.0 || u >= 0.99 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 84.0)
+        ((u * std::f32::consts::PI).sin() * 72.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
@@ -284,12 +284,12 @@ pub fn compute_close_frame(width: i32, height: i32, progress: f32) -> CloseFrame
         };
     }
 
-    let eased = 1.0 - (1.0 - u).powi(3);
-    let max_pad_x = ((w as f32) * 0.12)
-        .clamp(24.0, 150.0)
+    let eased = 1.0 - (1.0 - u).powi(4);
+    let max_pad_x = ((w as f32) * 0.10)
+        .clamp(22.0, 128.0)
         .min((w / 4).max(0) as f32);
-    let max_pad_y = ((h as f32) * 0.12)
-        .clamp(20.0, 100.0)
+    let max_pad_y = ((h as f32) * 0.10)
+        .clamp(18.0, 88.0)
         .min((h / 4).max(0) as f32);
     let pad_x = (eased * max_pad_x).round() as i32;
     let pad_y = (eased * max_pad_y).round() as i32;
@@ -299,35 +299,35 @@ pub fn compute_close_frame(width: i32, height: i32, progress: f32) -> CloseFrame
     let inner_left = ((w - inner_w) / 2).clamp(0, w - inner_w);
     let inner_right = inner_left + inner_w;
 
-    let drop_y = (eased * 34.0).round() as i32;
+    let drop_y = (eased * 26.0).round() as i32;
     let inner_top = ((h - inner_h) / 2 + drop_y).clamp(0, h - inner_h);
     let inner_bottom = inner_top + inner_h;
 
-    let radius = ((eased * 28.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
+    let radius = ((eased * 24.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
 
-    let card_alpha = if u <= 0.10 {
+    let card_alpha = if u <= 0.08 {
         255
     } else {
-        let fade = ((u - 0.10) / 0.90).clamp(0.0, 1.0).powf(1.35);
+        let fade = ((u - 0.08) / 0.92).clamp(0.0, 1.0).powf(1.3);
         ((1.0 - fade) * 255.0).round().clamp(0.0, 255.0) as u8
     };
 
     let shadow_spread = if u <= 0.01 {
         0
     } else {
-        (eased * 18.0 + 4.0).round().clamp(0.0, 20.0) as i32
+        (eased * 16.0 + 4.0).round().clamp(0.0, 20.0) as i32
     };
     let shadow_alpha = if u <= 0.01 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 96.0)
+        ((u * std::f32::consts::PI).sin() * 84.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
     let border_alpha = if u <= 0.01 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 78.0)
+        ((u * std::f32::consts::PI).sin() * 70.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
@@ -345,8 +345,15 @@ pub fn compute_close_frame(width: i32, height: i32, progress: f32) -> CloseFrame
     }
 }
 
+/// Computes `(c * a + 127) / 255` without hardware integer division for all bytes `0..=255`.
+#[inline(always)]
+pub fn mul_div_255(c: u32, a: u32) -> u32 {
+    let t = c * a + 128;
+    (t + (t >> 8)) >> 8
+}
+
 /// Encodes straight `(r, g, b, a)` as little-endian premultiplied `BGRA` for `UpdateLayeredWindow`.
-#[inline]
+#[inline(always)]
 pub fn premul_bgra(r: u8, g: u8, b: u8, a: u8) -> u32 {
     if a == 255 {
         return (255u32 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
@@ -355,13 +362,13 @@ pub fn premul_bgra(r: u8, g: u8, b: u8, a: u8) -> u32 {
         return 0;
     }
     let a16 = u32::from(a);
-    let pm_r = (u32::from(r) * a16 + 127) / 255;
-    let pm_g = (u32::from(g) * a16 + 127) / 255;
-    let pm_b = (u32::from(b) * a16 + 127) / 255;
+    let pm_r = mul_div_255(u32::from(r), a16);
+    let pm_g = mul_div_255(u32::from(g), a16);
+    let pm_b = mul_div_255(u32::from(b), a16);
     (a16 << 24) | (pm_r << 16) | (pm_g << 8) | pm_b
 }
 
-#[inline]
+#[inline(always)]
 fn over_premul(fg_r: u8, fg_g: u8, fg_b: u8, fg_a: u8, bg_premul: u32) -> u32 {
     if fg_a == 0 {
         return bg_premul;
@@ -376,18 +383,18 @@ fn over_premul(fg_r: u8, fg_g: u8, fg_b: u8, fg_a: u8, bg_premul: u32) -> u32 {
     let bg = (bg_premul >> 8) & 0xFF;
     let bb = bg_premul & 0xFF;
 
-    let fr = (u32::from(fg_r) * fa + 127) / 255;
-    let fg_c = (u32::from(fg_g) * fa + 127) / 255;
-    let fb = (u32::from(fg_b) * fa + 127) / 255;
+    let fr = mul_div_255(u32::from(fg_r), fa);
+    let fg_c = mul_div_255(u32::from(fg_g), fa);
+    let fb = mul_div_255(u32::from(fg_b), fa);
 
-    let out_a = (fa + (ba * inv + 127) / 255).min(255);
-    let out_r = (fr + (br * inv + 127) / 255).min(out_a);
-    let out_g = (fg_c + (bg * inv + 127) / 255).min(out_a);
-    let out_b = (fb + (bb * inv + 127) / 255).min(out_a);
+    let out_a = (fa + mul_div_255(ba, inv)).min(255);
+    let out_r = (fr + mul_div_255(br, inv)).min(out_a);
+    let out_g = (fg_c + mul_div_255(bg, inv)).min(out_a);
+    let out_b = (fb + mul_div_255(bb, inv)).min(out_a);
     (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
-#[inline]
+#[inline(always)]
 fn lerp_premul(bg: u32, fg: u32, w_in: f32) -> u32 {
     if w_in <= 0.0 {
         return bg;
@@ -395,17 +402,17 @@ fn lerp_premul(bg: u32, fg: u32, w_in: f32) -> u32 {
     if w_in >= 1.0 {
         return fg;
     }
-    let w = (w_in * 255.0).round().clamp(0.0, 255.0) as u32;
+    let w = (w_in * 255.0 + 0.5).clamp(0.0, 255.0) as u32;
     let inv = 255 - w;
-    let a = (((bg >> 24) & 0xFF) * inv + ((fg >> 24) & 0xFF) * w + 127) / 255;
-    let r = ((((bg >> 16) & 0xFF) * inv + ((fg >> 16) & 0xFF) * w + 127) / 255).min(a);
-    let g = ((((bg >> 8) & 0xFF) * inv + ((fg >> 8) & 0xFF) * w + 127) / 255).min(a);
-    let b = (((bg & 0xFF) * inv + (fg & 0xFF) * w + 127) / 255).min(a);
+    let a = mul_div_255((bg >> 24) & 0xFF, inv) + mul_div_255((fg >> 24) & 0xFF, w);
+    let r = (mul_div_255((bg >> 16) & 0xFF, inv) + mul_div_255((fg >> 16) & 0xFF, w)).min(a);
+    let g = (mul_div_255((bg >> 8) & 0xFF, inv) + mul_div_255((fg >> 8) & 0xFF, w)).min(a);
+    let b = (mul_div_255(bg & 0xFF, inv) + mul_div_255(fg & 0xFF, w)).min(a);
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 fn rounded_rect_sdf(px: f32, py: f32, l: f32, t: f32, r: f32, b: f32, rad: f32) -> f32 {
     if rad > 0.0 {
         let clx = l + rad;
@@ -419,35 +426,61 @@ fn rounded_rect_sdf(px: f32, py: f32, l: f32, t: f32, r: f32, b: f32, rad: f32) 
         if (left_side || right_side) && (top_side || bot_side) {
             let cx = if left_side { clx } else { crx };
             let cy = if top_side { cty } else { cby };
-            return (px - cx).hypot(py - cy) - rad;
+            let dx = px - cx;
+            let dy = py - cy;
+            return (dx * dx + dy * dy).sqrt() - rad;
         }
         return (l - px).max(px - r).max(t - py).max(py - b);
     }
     let dx = (l - px).max(px - r);
     let dy = (t - py).max(py - b);
     if dx > 0.0 && dy > 0.0 {
-        dx.hypot(dy)
+        (dx * dx + dy * dy).sqrt()
     } else {
         dx.max(dy)
     }
 }
 
-#[inline]
+#[inline(always)]
 fn edge_shadow_alpha(d: f32, shadow_alpha: u8, shadow_spread: i32) -> u8 {
     if d <= 0.0 || shadow_alpha == 0 || shadow_spread <= 0 {
         return 0;
     }
     let t = (1.0 - d / (shadow_spread as f32)).clamp(0.0, 1.0);
-    (f32::from(shadow_alpha) * t * t).round().clamp(0.0, 255.0) as u8
+    (f32::from(shadow_alpha) * t * t + 0.5).clamp(0.0, 255.0) as u8
 }
 
-#[inline]
+#[inline(always)]
 fn edge_rim_alpha(d: f32, border_alpha: u8) -> u8 {
     if border_alpha == 0 {
         return 0;
     }
     let w_rim = (1.0 - d.abs()).clamp(0.0, 1.0);
-    (f32::from(border_alpha) * w_rim).round().clamp(0.0, 255.0) as u8
+    (f32::from(border_alpha) * w_rim + 0.5).clamp(0.0, 255.0) as u8
+}
+
+#[inline(always)]
+fn reveal_pixel(d: f32, outer_px: u32, inner_px: u32, frame: RevealFrame) -> u32 {
+    let sh_a = edge_shadow_alpha(d, frame.shadow_alpha, frame.shadow_spread);
+    let bg_px = if sh_a > 0 {
+        over_premul(43, 38, 34, sh_a, outer_px)
+    } else {
+        outer_px
+    };
+    let base_px = lerp_premul(bg_px, inner_px, (0.5 - d).clamp(0.0, 1.0));
+    let rim_a = edge_rim_alpha(d, frame.border_alpha);
+    over_premul(43, 38, 34, rim_a, base_px)
+}
+
+#[inline(always)]
+fn close_row_color(y: usize, card_t: usize, card_h: usize) -> (u8, u8, u8) {
+    let rel = (y.saturating_sub(card_t) as f32) / (card_h.max(1) as f32);
+    let t = rel.clamp(0.0, 1.0);
+    (
+        (52.0 - t * 16.0 + 0.5) as u8,
+        (46.0 - t * 14.0 + 0.5) as u8,
+        (41.0 - t * 13.0 + 0.5) as u8,
+    )
 }
 
 struct PaintBounds {
@@ -456,6 +489,10 @@ struct PaintBounds {
     t: usize,
     b: usize,
     rad: usize,
+    flat_l: usize,
+    flat_r: usize,
+    in_l: usize,
+    in_r: usize,
     band_l: usize,
     band_r: usize,
     band_t: usize,
@@ -479,6 +516,10 @@ fn compute_paint_bounds(
     let t = inner_top.clamp(0, h as i32) as usize;
     let b = inner_bottom.clamp(t as i32, h as i32) as usize;
     let rad = (radius.max(0) as usize).min((r - l) / 2).min((b - t) / 2);
+    let flat_l = (l + rad).min(r);
+    let flat_r = r.saturating_sub(rad).max(flat_l);
+    let in_l = flat_l.max((l + 1).min(r));
+    let in_r = flat_r.min(r.saturating_sub(1)).max(in_l);
     let spread = if shadow_alpha > 0 && shadow_spread > 0 {
         shadow_spread as usize
     } else {
@@ -490,6 +531,10 @@ fn compute_paint_bounds(
         t,
         b,
         rad,
+        flat_l,
+        flat_r,
+        in_l,
+        in_r,
         band_l: l.saturating_sub(spread),
         band_r: (r + spread).min(w),
         band_t: t.saturating_sub(spread),
@@ -541,10 +586,6 @@ pub fn paint_reveal_bgra(buf: &mut [u32], width: i32, height: i32, frame: Reveal
     let tf = pb.t as f32;
     let bf = pb.b as f32;
     let rad_f = pb.rad as f32;
-    let core_t = pb.t + pb.rad.max(1);
-    let core_b = pb.b.saturating_sub(pb.rad.max(1));
-    let core_l = pb.l + 1;
-    let core_r = pb.r.saturating_sub(1);
 
     for (y, row) in buf.chunks_exact_mut(w).enumerate() {
         if pb.l >= pb.r || pb.t >= pb.b || y < pb.band_t || y >= pb.band_b {
@@ -559,24 +600,34 @@ pub fn paint_reveal_bgra(buf: &mut [u32], width: i32, height: i32, frame: Reveal
         }
 
         let py = y as f32 + 0.5;
-        let is_core_row = core_t < core_b && y >= core_t && y < core_b && core_l < core_r;
-        let x_left_end = if is_core_row { core_l } else { pb.band_r };
-        let x_right_start = if is_core_row { core_r } else { pb.band_r };
-
-        if is_core_row {
-            row[core_l..core_r].fill(inner_px);
-        }
-        for x in (pb.band_l..x_left_end).chain(x_right_start..pb.band_r) {
-            let d = rounded_rect_sdf(x as f32 + 0.5, py, lf, tf, rf, bf, rad_f);
-            let sh_a = edge_shadow_alpha(d, frame.shadow_alpha, frame.shadow_spread);
-            let bg_px = if sh_a > 0 {
-                over_premul(43, 38, 34, sh_a, outer_px)
+        let is_interior = y > pb.t && y + 1 < pb.b && pb.in_l < pb.in_r;
+        let (mid_l, mid_r, mid_px) = if is_interior {
+            (pb.in_l, pb.in_r, inner_px)
+        } else if pb.flat_l < pb.flat_r {
+            let row_d = if y < pb.t {
+                tf - py
+            } else if y >= pb.b {
+                py - bf
+            } else if y == pb.t {
+                tf - py
             } else {
-                outer_px
+                py - bf
             };
-            let base_px = lerp_premul(bg_px, inner_px, (0.5 - d).clamp(0.0, 1.0));
-            let rim_a = edge_rim_alpha(d, frame.border_alpha);
-            row[x] = over_premul(43, 38, 34, rim_a, base_px);
+            (
+                pb.flat_l,
+                pb.flat_r,
+                reveal_pixel(row_d, outer_px, inner_px, frame),
+            )
+        } else {
+            (pb.band_r, pb.band_r, outer_px)
+        };
+
+        if mid_l < mid_r {
+            row[mid_l..mid_r].fill(mid_px);
+        }
+        for x in (pb.band_l..mid_l).chain(mid_r..pb.band_r) {
+            let d = rounded_rect_sdf(x as f32 + 0.5, py, lf, tf, rf, bf, rad_f);
+            row[x] = reveal_pixel(d, outer_px, inner_px, frame);
         }
     }
 }
@@ -627,31 +678,11 @@ pub fn paint_close_bgra(
     });
     let card_w = (pb.r - pb.l).max(1);
     let card_h = (pb.b - pb.t).max(1);
-    let half_w = (card_w as f32) * 0.5;
-    let half_h = (card_h as f32) * 0.5;
-    let mid_x = (pb.l as f32) + half_w;
-    let mid_y = (pb.t as f32) + half_h;
-
     let lf = pb.l as f32;
     let rf = pb.r as f32;
     let tf = pb.t as f32;
     let bf = pb.b as f32;
     let rad_f = pb.rad as f32;
-    let core_t = pb.t + pb.rad.max(1);
-    let core_b = pb.b.saturating_sub(pb.rad.max(1));
-    let core_l = pb.l + 1;
-    let core_r = pb.r.saturating_sub(1);
-
-    let fallback_color = |x: usize, py: f32| -> (u8, u8, u8) {
-        let nx = ((x as f32 + 0.5 - mid_x) / half_w.max(1.0)).clamp(-1.0, 1.0);
-        let ny = ((py - mid_y) / half_h.max(1.0)).clamp(-1.0, 1.0);
-        let glow = (1.0 - (nx * nx + ny * ny).min(1.0)).max(0.0);
-        (
-            (43.0 + glow * 18.0).round() as u8,
-            (38.0 + glow * 15.0).round() as u8,
-            (34.0 + glow * 12.0).round() as u8,
-        )
-    };
 
     for (y, row) in buf.chunks_exact_mut(w).enumerate() {
         if y < pb.band_t || y >= pb.band_b {
@@ -666,58 +697,67 @@ pub fn paint_close_bgra(
         }
 
         let py = y as f32 + 0.5;
-        let is_core_row = core_t < core_b && y >= core_t && y < core_b && core_l < core_r;
-        let x_left_end = if is_core_row { core_l } else { pb.band_r };
-        let x_right_start = if is_core_row { core_r } else { pb.band_r };
-
+        let is_interior = y > pb.t && y + 1 < pb.b && pb.in_l < pb.in_r;
         let sy_row = snap.map(|s| {
             let cy = y.saturating_sub(pb.t).min(card_h - 1);
             let sy = (cy * (s.height as usize) / card_h).min(s.height as usize - 1);
             &s.pixels[sy * (s.width as usize)..(sy + 1) * (s.width as usize)]
         });
+        let (fb_r, fb_g, fb_b) = close_row_color(y, pb.t, card_h);
 
-        if is_core_row {
+        let (edge_l_end, edge_r_start) = if is_interior {
             if let Some(src_row) = sy_row {
                 let sw = src_row.len();
                 let step_fp = (sw << 16) / card_w;
-                let mut x_fp = (core_l - pb.l) * step_fp;
+                let mut x_fp = (pb.in_l - pb.l) * step_fp;
                 let a = frame.card_alpha;
                 if a == 255 {
-                    for dst in &mut row[core_l..core_r] {
+                    for dst in &mut row[pb.in_l..pb.in_r] {
                         let rgb = src_row[(x_fp >> 16).min(sw - 1)] & 0x00FF_FFFF;
                         *dst = 0xFF00_0000 | rgb;
                         x_fp += step_fp;
                     }
                 } else if a == 0 {
-                    row[core_l..core_r].fill(0);
+                    row[pb.in_l..pb.in_r].fill(0);
                 } else {
                     let a16 = u32::from(a);
-                    for dst in &mut row[core_l..core_r] {
+                    for dst in &mut row[pb.in_l..pb.in_r] {
                         let rgb = src_row[(x_fp >> 16).min(sw - 1)];
-                        let r_pm = (((rgb >> 16) & 0xFF) * a16 + 127) / 255;
-                        let g_pm = (((rgb >> 8) & 0xFF) * a16 + 127) / 255;
-                        let b_pm = ((rgb & 0xFF) * a16 + 127) / 255;
+                        let r_pm = mul_div_255((rgb >> 16) & 0xFF, a16);
+                        let g_pm = mul_div_255((rgb >> 8) & 0xFF, a16);
+                        let b_pm = mul_div_255(rgb & 0xFF, a16);
                         *dst = (a16 << 24) | (r_pm << 16) | (g_pm << 8) | b_pm;
                         x_fp += step_fp;
                     }
                 }
             } else {
-                let ny = ((py - mid_y) / half_h.max(1.0)).clamp(-1.0, 1.0);
-                let ny2 = ny * ny;
-                let a = frame.card_alpha;
-                for (i, dst) in row[core_l..core_r].iter_mut().enumerate() {
-                    let x = core_l + i;
-                    let nx = ((x as f32 + 0.5 - mid_x) / half_w.max(1.0)).clamp(-1.0, 1.0);
-                    let glow = (1.0 - (nx * nx + ny2).min(1.0)).max(0.0);
-                    let cr = (43.0 + glow * 18.0).round() as u8;
-                    let cg = (38.0 + glow * 15.0).round() as u8;
-                    let cb = (34.0 + glow * 12.0).round() as u8;
-                    *dst = premul_bgra(cr, cg, cb, a);
-                }
+                row[pb.in_l..pb.in_r].fill(premul_bgra(fb_r, fb_g, fb_b, frame.card_alpha));
             }
-        }
+            (pb.in_l, pb.in_r)
+        } else if (y < pb.t || y >= pb.b) && pb.flat_l < pb.flat_r {
+            let d = if y < pb.t { tf - py } else { py - bf };
+            let sh_a = edge_shadow_alpha(d, frame.shadow_alpha, frame.shadow_spread);
+            let sh_px = if sh_a > 0 {
+                premul_bgra(43, 38, 34, sh_a)
+            } else {
+                0
+            };
+            let rim_a = edge_rim_alpha(d, frame.border_alpha);
+            row[pb.flat_l..pb.flat_r].fill(over_premul(246, 240, 230, rim_a, sh_px));
+            (pb.flat_l, pb.flat_r)
+        } else if snap.is_none() && (y == pb.t || y + 1 == pb.b) && pb.flat_l < pb.flat_r {
+            let d = if y == pb.t { tf - py } else { py - bf };
+            let w_in = (0.5 - d).clamp(0.0, 1.0);
+            let card_px = premul_bgra(fb_r, fb_g, fb_b, frame.card_alpha);
+            let base_px = lerp_premul(0, card_px, w_in);
+            let rim_a = edge_rim_alpha(d, frame.border_alpha);
+            row[pb.flat_l..pb.flat_r].fill(over_premul(246, 240, 230, rim_a, base_px));
+            (pb.flat_l, pb.flat_r)
+        } else {
+            (pb.band_r, pb.band_r)
+        };
 
-        for x in (pb.band_l..x_left_end).chain(x_right_start..pb.band_r) {
+        for x in (pb.band_l..edge_l_end).chain(edge_r_start..pb.band_r) {
             let d = rounded_rect_sdf(x as f32 + 0.5, py, lf, tf, rf, bf, rad_f);
             let sh_a = edge_shadow_alpha(d, frame.shadow_alpha, frame.shadow_spread);
             let sh_px = if sh_a > 0 {
@@ -737,7 +777,7 @@ pub fn paint_close_bgra(
                         (rgb & 0xFF) as u8,
                     )
                 } else {
-                    fallback_color(x, py)
+                    (fb_r, fb_g, fb_b)
                 };
                 premul_bgra(cr, cg, cb, frame.card_alpha)
             } else {
@@ -750,11 +790,44 @@ pub fn paint_close_bgra(
     }
 }
 
+pub struct VeilSlot {
+    hwnd: AtomicU64,
+    cancel: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+impl VeilSlot {
+    fn new() -> Self {
+        Self {
+            hwnd: AtomicU64::new(0),
+            cancel: Mutex::new(None),
+        }
+    }
+
+    fn hwnd(&self) -> u64 {
+        self.hwnd.load(Ordering::Acquire)
+    }
+
+    fn set_active(&self, hwnd: u64, cancel: Arc<AtomicBool>) {
+        *self.cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel);
+        self.hwnd.store(hwnd, Ordering::Release);
+    }
+
+    fn clear_if_matches(&self, hwnd: u64, cancel: &Arc<AtomicBool>) {
+        let _ = self
+            .hwnd
+            .compare_exchange(hwnd, 0, Ordering::AcqRel, Ordering::Acquire);
+        let mut guard = self.cancel.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, cancel)) {
+            *guard = None;
+        }
+    }
+}
+
 struct ActiveSession {
     instance_id: String,
     pid: u32,
     game_win: AtomicU64,
-    veil_win: AtomicU64,
+    veil_slot: VeilSlot,
     attached: AtomicBool,
     ever_attached: AtomicBool,
     strip_active: AtomicBool,
@@ -775,7 +848,7 @@ impl ActiveSession {
             instance_id,
             pid,
             game_win: AtomicU64::new(0),
-            veil_win: AtomicU64::new(0),
+            veil_slot: VeilSlot::new(),
             attached: AtomicBool::new(false),
             ever_attached: AtomicBool::new(false),
             strip_active: AtomicBool::new(false),
@@ -844,7 +917,7 @@ pub struct EmbedState {
     bounds: Mutex<Option<StageBounds>>,
     bounds_seq: AtomicU64,
     active: Mutex<Option<Arc<ActiveSession>>>,
-    close_veil_win: Arc<AtomicU64>,
+    close_veil: Arc<VeilSlot>,
 }
 
 impl EmbedState {
@@ -853,7 +926,7 @@ impl EmbedState {
             bounds: Mutex::new(None),
             bounds_seq: AtomicU64::new(0),
             active: Mutex::new(None),
-            close_veil_win: Arc::new(AtomicU64::new(0)),
+            close_veil: Arc::new(VeilSlot::new()),
         }
     }
 
@@ -881,7 +954,7 @@ impl EmbedState {
 
     fn begin(&self, instance_id: String, pid: u32) -> Arc<ActiveSession> {
         #[cfg(windows)]
-        win32::dismiss_veil_slot(&self.close_veil_win);
+        win32::dismiss_veil_slot(&self.close_veil);
         let next = Arc::new(ActiveSession::new(instance_id, pid));
         let prev = {
             let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
@@ -1199,7 +1272,7 @@ pub fn end_session(app: &AppHandle, instance_id: &str) {
     let Some(state) = app.try_state::<EmbedState>() else {
         return;
     };
-    let close_veil_slot = state.close_veil_win.clone();
+    let close_veil_slot = state.close_veil.clone();
     let Some(ended) = state.finish(instance_id) else {
         return;
     };
@@ -1229,9 +1302,7 @@ fn try_attach_game_window(
         return false;
     };
     let animate = should_animate_embed_app(app);
-    let close_veil_slot = app
-        .try_state::<EmbedState>()
-        .map(|s| s.close_veil_win.clone());
+    let close_veil_slot = app.try_state::<EmbedState>().map(|s| s.close_veil.clone());
     let (tx, rx) = std::sync::mpsc::sync_channel::<bool>(1);
     let app_clone = app.clone();
     let session_clone = session.clone();
@@ -1261,11 +1332,12 @@ fn try_attach_game_window(
         if let Some(slot) = &close_veil_slot {
             win32::dismiss_veil_slot(slot);
         }
-        let veil_hwnd = if animate {
+        let veil_handle = if animate {
             win32::create_open_veil(host_hwnd, session_clone.clone(), stage_rect)
         } else {
             None
         };
+        let veil_hwnd = veil_handle.as_ref().map(|v| v.hwnd);
 
         {
             let mut rect_guard = session_clone
@@ -1315,9 +1387,8 @@ fn try_attach_game_window(
         );
 
         if !win32::attach_and_place(mc_hwnd, host_hwnd, layout.stage, veil_hwnd) {
-            if let Some(veil) = veil_hwnd {
-                session_clone.veil_win.store(0, Ordering::Release);
-                win32::destroy_window_if_alive(veil);
+            if let Some(handle) = &veil_handle {
+                win32::cancel_open_veil(handle, &session_clone.veil_slot);
             }
             session_clone.strip_active.store(false, Ordering::Release);
             // SAFETY: still on main UI STA thread.
@@ -1338,8 +1409,8 @@ fn try_attach_game_window(
         session_clone.game_win.store(mc_id, Ordering::Release);
         session_clone.ever_attached.store(true, Ordering::Release);
         let newly_attached = !session_clone.attached.swap(true, Ordering::AcqRel);
-        if let Some(veil) = veil_hwnd {
-            win32::activate_open_veil(veil, mc_hwnd);
+        if let Some(handle) = &veil_handle {
+            win32::activate_open_veil(handle, mc_hwnd);
         }
         if newly_attached {
             tracing::info!(
@@ -1360,7 +1431,7 @@ fn restore_full_webview(
     app: &AppHandle,
     restore_rect: Option<(i32, i32, i32, i32)>,
     restore_clipchildren: Option<bool>,
-    close_anim: Option<(Option<CapturedStage>, Arc<AtomicU64>)>,
+    close_anim: Option<(Option<CapturedStage>, Arc<VeilSlot>)>,
     emit_inactive: bool,
     wait_sync: bool,
 ) {
@@ -1455,7 +1526,7 @@ fn finalize_window_detach(app: AppHandle, session: Arc<ActiveSession>, wait_sync
         .take();
     let close_anim = if wait_sync && should_animate_embed_app(&app) {
         app.try_state::<EmbedState>()
-            .map(|s| (snapshot, s.close_veil_win.clone()))
+            .map(|s| (snapshot, s.close_veil.clone()))
     } else {
         None
     };
@@ -1499,7 +1570,7 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
         if let Some(layout) = win32::layout_for_host(host_hwnd) {
             win32::sync_stage_bounds_for_layout(host_hwnd, &session, layout.stage, true);
         }
-        let veil_active = session.veil_win.load(Ordering::Acquire) != 0;
+        let veil_active = session.veil_slot.hwnd() != 0;
         if veil_active {
             if session.focus_requested.swap(false, Ordering::AcqRel) {
                 delayed_focus_at = Some(std::time::Instant::now() + Duration::from_millis(60));
@@ -1528,6 +1599,7 @@ mod win32 {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Once};
+    use std::time::Duration;
 
     pub use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
@@ -1535,7 +1607,8 @@ mod win32 {
     pub use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_DONOTROUND,
+        DwmFlush, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT,
+        DWMWCP_DONOTROUND,
     };
     use windows_sys::Win32::Graphics::Gdi::{
         BitBlt, ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
@@ -1549,15 +1622,15 @@ mod win32 {
         DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetClientRect, GetCursorPos,
-        GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
-        PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
+        GetClientRect, GetCursorPos, GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW,
+        PeekMessageW, PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
         SetWindowPos, SystemParametersInfoW, UpdateLayeredWindow, GWLP_HINSTANCE, GWLP_HWNDPARENT,
-        GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, IDC_ARROW,
+        GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, IDC_ARROW, MSG, PM_REMOVE,
         SIZE_MINIMIZED, SPI_GETCLIENTAREAANIMATION, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, ULW_ALPHA, WINDOWPOS,
-        WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZE, WM_TIMER,
+        WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZE,
         WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW, WS_CAPTION, WS_CHILD,
         WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME,
         WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -1568,7 +1641,8 @@ mod win32 {
     use super::{
         compute_close_frame, compute_framed_layout, compute_reveal_frame, paint_close_bgra,
         paint_reveal_bgra, stage_to_screen_rect, ActiveSession, CapturedStage, FramedLayout,
-        StageBounds, CLOSE_DURATION_MS, REVEAL_DURATION_MS,
+        StageBounds, VeilSlot, CLOSE_DURATION_MS, CLOSE_HOLD_MS, REVEAL_DURATION_MS,
+        REVEAL_HOLD_MS,
     };
 
     const HWND_TOP: HWND = std::ptr::null_mut();
@@ -1740,7 +1814,7 @@ mod win32 {
         let Some(target) = stage_screen_rect(host, stage) else {
             return;
         };
-        let veil_id = session.veil_win.load(Ordering::Acquire);
+        let veil_id = session.veil_slot.hwnd();
         let below_veil = (veil_id != 0).then_some(veil_id as usize as HWND);
         if !only_if_needed || needs_bounds_sync(mc_hwnd, host, below_veil, target) {
             apply_screen_bounds(
@@ -2250,7 +2324,7 @@ mod win32 {
         // SAFETY: walks global Z-order chain starting at `upper` with a bounded iteration cap.
         unsafe {
             let mut cur = upper;
-            for _ in 0..512 {
+            for _ in 0..64 {
                 cur = GetWindow(cur, GW_HWNDNEXT);
                 if cur.is_null() {
                     return false;
@@ -2596,13 +2670,16 @@ mod win32 {
         }
     }
 
-    pub fn dismiss_veil_slot(slot: &AtomicU64) {
-        let prev = slot.swap(0, Ordering::AcqRel);
+    pub fn dismiss_veil_slot(slot: &VeilSlot) {
+        let prev = slot.hwnd.swap(0, Ordering::AcqRel);
+        if let Some(cancel) = slot.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            cancel.store(true, Ordering::Release);
+        }
         if prev == 0 {
             return;
         }
         let veil = prev as usize as HWND;
-        // SAFETY: posting WM_CLOSE cleanly tears down any live veil HWND on its owning UI thread.
+        // SAFETY: posting WM_CLOSE wakes and closes any live veil HWND on its dedicated thread.
         unsafe {
             if !veil.is_null() && IsWindow(veil) != 0 {
                 let _ = PostMessageW(veil, WM_CLOSE, 0, 0);
@@ -2611,16 +2688,7 @@ mod win32 {
     }
 
     pub fn dismiss_veil(session: &ActiveSession) {
-        dismiss_veil_slot(&session.veil_win);
-    }
-
-    pub fn destroy_window_if_alive(hwnd: HWND) {
-        // SAFETY: invoked on the STA thread owning `hwnd`.
-        unsafe {
-            if !hwnd.is_null() && IsWindow(hwnd) != 0 {
-                let _ = DestroyWindow(hwnd);
-            }
-        }
+        dismiss_veil_slot(&session.veil_slot);
     }
 
     /// Captures the live embedded stage pixels strictly in RAM before `WM_CLOSE` closes Minecraft.
@@ -2637,7 +2705,7 @@ mod win32 {
                 return None;
             }
             let fg = GetForegroundWindow();
-            if fg != host && fg != mc {
+            if fg != host && fg != mc && GetWindow(fg, GW_OWNER) != host {
                 return None;
             }
             let layout = layout_for_host(host)?;
@@ -2733,7 +2801,6 @@ mod win32 {
         }
     }
 
-    const VEIL_TIMER_ID: usize = 1;
     const VEIL_CLASS_NAME: &[u16] = &[
         b'C' as u16,
         b'l' as u16,
@@ -2753,23 +2820,7 @@ mod win32 {
     ];
     static VEIL_CLASS_ONCE: Once = Once::new();
 
-    enum VeilMode {
-        Open {
-            mc: HWND,
-            session: Arc<ActiveSession>,
-        },
-        Close {
-            slot: Arc<AtomicU64>,
-            snapshot: Option<CapturedStage>,
-        },
-    }
-
-    struct VeilState {
-        host: HWND,
-        mode: VeilMode,
-        start: std::time::Instant,
-        x: i32,
-        y: i32,
+    struct VeilSurface {
         width: i32,
         height: i32,
         mem_dc: HDC,
@@ -2778,9 +2829,9 @@ mod win32 {
         bits: *mut u32,
     }
 
-    impl Drop for VeilState {
+    impl Drop for VeilSurface {
         fn drop(&mut self) {
-            // SAFETY: owns the GDI memory DC and DIB created in `create_veil_window`.
+            // SAFETY: owns the GDI memory DC and DIB created inside the veil thread.
             unsafe {
                 if !self.mem_dc.is_null() {
                     if !self.old_obj.is_null() {
@@ -2828,32 +2879,6 @@ mod win32 {
         ) != 0
     }
 
-    unsafe fn push_veil_frame(hwnd: HWND, state: &mut VeilState, progress: f32) -> bool {
-        let len = (state.width as usize).saturating_mul(state.height as usize);
-        if len == 0 || state.bits.is_null() {
-            return false;
-        }
-        let buf = std::slice::from_raw_parts_mut(state.bits, len);
-        match &state.mode {
-            VeilMode::Open { .. } => {
-                let frame = compute_reveal_frame(state.width, state.height, progress);
-                paint_reveal_bgra(buf, state.width, state.height, frame);
-            }
-            VeilMode::Close { snapshot, .. } => {
-                let frame = compute_close_frame(state.width, state.height, progress);
-                paint_close_bgra(buf, state.width, state.height, frame, snapshot.as_ref());
-            }
-        }
-        push_layered_bitmap(
-            hwnd,
-            state.x,
-            state.y,
-            state.width,
-            state.height,
-            state.mem_dc,
-        )
-    }
-
     unsafe fn raise_above(hwnd: HWND, target: HWND) {
         if !target.is_null() && IsWindow(target) != 0 && !is_window_above(hwnd, target) {
             let insert_after = insert_after_above_host(hwnd, target);
@@ -2869,335 +2894,480 @@ mod win32 {
         }
     }
 
+    unsafe fn pump_thread_messages() {
+        let mut msg = std::mem::zeroed::<MSG>();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            let _ = DispatchMessageW(&msg);
+        }
+    }
+
     unsafe extern "system" fn veil_wnd_proc(
         hwnd: HWND,
         msg: u32,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        match msg {
-            WM_CLOSE => {
-                let _ = DestroyWindow(hwnd);
-                return 0;
-            }
-            WM_NCDESTROY => {
-                let _ = KillTimer(hwnd, VEIL_TIMER_ID);
-                let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) as *mut VeilState;
-                if !ptr.is_null() {
-                    let state = Box::from_raw(ptr);
-                    let id = hwnd as usize as u64;
-                    match &state.mode {
-                        VeilMode::Open { session, .. } => {
-                            let _ = session.veil_win.compare_exchange(
-                                id,
-                                0,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            );
-                        }
-                        VeilMode::Close { slot, .. } => {
-                            let _ =
-                                slot.compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
-                        }
-                    }
-                    drop(state);
-                }
-            }
-            WM_TIMER if wparam == VEIL_TIMER_ID => {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut VeilState;
-                if ptr.is_null() {
-                    let _ = DestroyWindow(hwnd);
-                    return 0;
-                }
-                let state = &mut *ptr;
-                let elapsed_ms = state.start.elapsed().as_millis() as u64;
-                let fg = GetForegroundWindow();
-
-                let (should_abort, duration_ms, z_target) = match &state.mode {
-                    VeilMode::Open { mc, session } => {
-                        let user_left =
-                            elapsed_ms > 220 && !fg.is_null() && fg != state.host && fg != *mc;
-                        let abort = session.stop.load(Ordering::Acquire)
-                            || !session.attached.load(Ordering::Acquire)
-                            || !is_host_alive(state.host)
-                            || IsIconic(state.host) != 0
-                            || IsWindowVisible(state.host) == 0
-                            || (!mc.is_null() && !is_attached_window_alive(*mc, state.host))
-                            || user_left;
-                        (
-                            abort,
-                            REVEAL_DURATION_MS,
-                            if !mc.is_null() && IsWindow(*mc) != 0 {
-                                *mc
-                            } else {
-                                state.host
-                            },
-                        )
-                    }
-                    VeilMode::Close { .. } => {
-                        let user_left = elapsed_ms > 220 && !fg.is_null() && fg != state.host;
-                        let abort = !is_host_alive(state.host)
-                            || IsIconic(state.host) != 0
-                            || IsWindowVisible(state.host) == 0
-                            || user_left;
-                        (abort, CLOSE_DURATION_MS, state.host)
-                    }
-                };
-
-                if should_abort {
-                    let _ = DestroyWindow(hwnd);
-                    return 0;
-                }
-
-                if let Some(layout) = layout_for_host(state.host) {
-                    if let Some((sx, sy, sw, sh)) = stage_screen_rect(state.host, layout.stage) {
-                        if (sw - state.width).abs() > 4 || (sh - state.height).abs() > 4 {
-                            let _ = DestroyWindow(hwnd);
-                            return 0;
-                        }
-                        state.x = sx;
-                        state.y = sy;
-                    }
-                }
-
-                let t = (elapsed_ms as f32) / (duration_ms as f32);
-                let _ = push_veil_frame(hwnd, state, t);
-                raise_above(hwnd, z_target);
-
-                if t >= 1.0 {
-                    let focus_after = match &state.mode {
-                        VeilMode::Open { mc, .. } if !mc.is_null() => Some((*mc, state.host)),
-                        _ => None,
-                    };
-                    let _ = DestroyWindow(hwnd);
-                    if let Some((mc, host)) = focus_after {
-                        if should_hand_focus_to_game(host) {
-                            focus_window(mc);
-                        }
-                    }
-                }
-                return 0;
-            }
-            _ => {}
+        if msg == WM_CLOSE {
+            let _ = DestroyWindow(hwnd);
+            return 0;
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
-    fn create_veil_window(
+    unsafe fn init_veil_window(
         host: HWND,
         rect: (i32, i32, i32, i32),
-        mode: VeilMode,
-        start_timer: bool,
-    ) -> Option<HWND> {
+        initial_open: bool,
+        snapshot: Option<&CapturedStage>,
+    ) -> Option<(HWND, VeilSurface)> {
         let (sx, sy, sw, sh) = rect;
-        if sw < 16 || sh < 16 || !is_valid(host) {
+        let hinst = GetWindowLongPtrW(host, GWLP_HINSTANCE) as *mut core::ffi::c_void;
+        VEIL_CLASS_ONCE.call_once(|| {
+            let wc = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(veil_wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinst,
+                hIcon: std::ptr::null_mut(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: VEIL_CLASS_NAME.as_ptr(),
+            };
+            let _ = RegisterClassW(&wc);
+        });
+
+        // Unowned popup with WS_EX_TOOLWINDOW keeps off the taskbar/Alt+Tab while avoiding cross-thread AttachThreadInput stalls.
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            VEIL_CLASS_NAME.as_ptr(),
+            std::ptr::null(),
+            WS_POPUP,
+            sx,
+            sy,
+            sw,
+            sh,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinst,
+            std::ptr::null(),
+        );
+        if hwnd.is_null() {
+            tracing::warn!("could not create native embed transition veil window");
             return None;
         }
-        // SAFETY: invoked on the main UI STA thread owning `host`.
-        unsafe {
-            let hinst = GetWindowLongPtrW(host, GWLP_HINSTANCE) as *mut core::ffi::c_void;
-            VEIL_CLASS_ONCE.call_once(|| {
-                let wc = WNDCLASSW {
-                    style: 0,
-                    lpfnWndProc: Some(veil_wnd_proc),
-                    cbClsExtra: 0,
-                    cbWndExtra: 0,
-                    hInstance: hinst,
-                    hIcon: std::ptr::null_mut(),
-                    hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
-                    hbrBackground: std::ptr::null_mut(),
-                    lpszMenuName: std::ptr::null(),
-                    lpszClassName: VEIL_CLASS_NAME.as_ptr(),
-                };
-                let _ = RegisterClassW(&wc);
-            });
 
-            let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                VEIL_CLASS_NAME.as_ptr(),
-                std::ptr::null(),
-                WS_POPUP,
-                sx,
-                sy,
-                sw,
-                sh,
-                host,
-                std::ptr::null_mut(),
-                hinst,
-                std::ptr::null(),
-            );
-            if hwnd.is_null() {
-                tracing::warn!("could not create native embed transition veil window");
-                return None;
-            }
-
-            let screen_dc = GetDC(std::ptr::null_mut());
-            let mem_dc = CreateCompatibleDC(screen_dc);
-            if !screen_dc.is_null() {
-                let _ = ReleaseDC(std::ptr::null_mut(), screen_dc);
-            }
-            if mem_dc.is_null() {
-                let _ = DestroyWindow(hwnd);
-                return None;
-            }
-
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: sw,
-                    biHeight: -sh,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB,
-                    biSizeImage: 0,
-                    biXPelsPerMeter: 0,
-                    biYPelsPerMeter: 0,
-                    biClrUsed: 0,
-                    biClrImportant: 0,
-                },
-                bmiColors: [std::mem::zeroed(); 1],
-            };
-            let mut raw_bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(
-                mem_dc,
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut raw_bits,
-                std::ptr::null_mut(),
-                0,
-            );
-            if dib.is_null() || raw_bits.is_null() {
-                tracing::warn!("could not allocate layered transition surface for embed veil");
-                let _ = DeleteDC(mem_dc);
-                let _ = DestroyWindow(hwnd);
-                return None;
-            }
-            let old_obj = SelectObject(mem_dc, dib.cast());
-            let mut state = Box::new(VeilState {
-                host,
-                mode,
-                start: std::time::Instant::now(),
-                x: sx,
-                y: sy,
-                width: sw,
-                height: sh,
-                mem_dc,
-                dib,
-                old_obj,
-                bits: raw_bits.cast::<u32>(),
-            });
-            set_corner_preference(hwnd, true);
-            if !push_veil_frame(hwnd, &mut state, 0.0) {
-                tracing::warn!("UpdateLayeredWindow rejected initial embed transition frame");
-                drop(state);
-                let _ = DestroyWindow(hwnd);
-                return None;
-            }
-            let raw_state = Box::into_raw(state);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_state as isize);
-            let id = hwnd as usize as u64;
-            match &(*raw_state).mode {
-                VeilMode::Open { session, .. } => {
-                    session.veil_win.store(id, Ordering::Release);
-                }
-                VeilMode::Close { slot, .. } => {
-                    slot.store(id, Ordering::Release);
-                }
-            }
-            let insert_after = insert_after_above_host(hwnd, host);
-            SetWindowPos(
-                hwnd,
-                insert_after,
-                sx,
-                sy,
-                sw,
-                sh,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            if start_timer {
-                let _ = SetTimer(hwnd, VEIL_TIMER_ID, 16, None);
-            }
-            Some(hwnd)
+        let screen_dc = GetDC(std::ptr::null_mut());
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        if !screen_dc.is_null() {
+            let _ = ReleaseDC(std::ptr::null_mut(), screen_dc);
         }
+        if mem_dc.is_null() {
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: sw,
+                biHeight: -sh,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [std::mem::zeroed(); 1],
+        };
+        let mut raw_bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(
+            mem_dc,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut raw_bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if dib.is_null() || raw_bits.is_null() {
+            tracing::warn!("could not allocate layered transition surface for embed veil");
+            let _ = DeleteDC(mem_dc);
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+        let old_obj = SelectObject(mem_dc, dib.cast());
+        let surface = VeilSurface {
+            width: sw,
+            height: sh,
+            mem_dc,
+            dib,
+            old_obj,
+            bits: raw_bits.cast::<u32>(),
+        };
+
+        set_corner_preference(hwnd, true);
+        let len = (sw as usize).saturating_mul(sh as usize);
+        let buf = std::slice::from_raw_parts_mut(surface.bits, len);
+        if initial_open {
+            paint_reveal_bgra(buf, sw, sh, compute_reveal_frame(sw, sh, 0.0));
+        } else {
+            paint_close_bgra(buf, sw, sh, compute_close_frame(sw, sh, 0.0), snapshot);
+        }
+        if !push_layered_bitmap(hwnd, sx, sy, sw, sh, surface.mem_dc) {
+            tracing::warn!("UpdateLayeredWindow rejected initial embed transition frame");
+            drop(surface);
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+        let insert_after = insert_after_above_host(hwnd, host);
+        SetWindowPos(
+            hwnd,
+            insert_after,
+            sx,
+            sy,
+            sw,
+            sh,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        Some((hwnd, surface))
+    }
+
+    pub struct OpenVeilHandle {
+        pub hwnd: HWND,
+        mc_slot: Arc<AtomicU64>,
+        activated: Arc<AtomicBool>,
+        cancel: Arc<AtomicBool>,
     }
 
     pub fn create_open_veil(
         host: HWND,
         session: Arc<ActiveSession>,
         rect: (i32, i32, i32, i32),
-    ) -> Option<HWND> {
-        create_veil_window(
-            host,
-            rect,
-            VeilMode::Open {
-                mc: std::ptr::null_mut(),
-                session,
-            },
-            false,
-        )
+    ) -> Option<OpenVeilHandle> {
+        let (_, _, sw, sh) = rect;
+        if sw < 16 || sh < 16 || !is_valid(host) {
+            return None;
+        }
+        let host_id = host as usize as u64;
+        let mc_slot = Arc::new(AtomicU64::new(0));
+        let activated = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<u64>(1);
+
+        let mc_slot_t = mc_slot.clone();
+        let activated_t = activated.clone();
+        let cancel_t = cancel.clone();
+        let spawn = std::thread::Builder::new()
+            .name("clade-embed-veil".to_owned())
+            .spawn(move || {
+                // SAFETY: `hwnd` and `surface` belong exclusively to this dedicated VSync thread.
+                unsafe {
+                    let host = host_id as usize as HWND;
+                    let Some((hwnd, surface)) = init_veil_window(host, rect, true, None) else {
+                        let _ = ready_tx.send(0);
+                        return;
+                    };
+                    let id = hwnd as usize as u64;
+                    session.veil_slot.set_active(id, cancel_t.clone());
+                    let _ = ready_tx.send(id);
+
+                    let len = (surface.width as usize).saturating_mul(surface.height as usize);
+                    let created_at = std::time::Instant::now();
+                    let mut anim_start: Option<std::time::Instant> = None;
+                    let mut completed = false;
+                    let mut last_mc: HWND = std::ptr::null_mut();
+                    let mut x = rect.0;
+                    let mut y = rect.1;
+
+                    loop {
+                        pump_thread_messages();
+                        if cancel_t.load(Ordering::Acquire) || IsWindow(hwnd) == 0 {
+                            break;
+                        }
+                        if DwmFlush() != 0 {
+                            std::thread::sleep(Duration::from_millis(8));
+                        }
+                        pump_thread_messages();
+                        if cancel_t.load(Ordering::Acquire) || IsWindow(hwnd) == 0 {
+                            break;
+                        }
+
+                        let mc = mc_slot_t.load(Ordering::Acquire) as usize as HWND;
+                        if !mc.is_null() {
+                            last_mc = mc;
+                        }
+                        if !activated_t.load(Ordering::Acquire) {
+                            if session.stop.load(Ordering::Acquire)
+                                || !is_host_alive(host)
+                                || IsIconic(host) != 0
+                                || IsWindowVisible(host) == 0
+                                || created_at.elapsed() > Duration::from_millis(1500)
+                            {
+                                break;
+                            }
+                            let z_target = if !mc.is_null() && IsWindow(mc) != 0 {
+                                mc
+                            } else {
+                                host
+                            };
+                            raise_above(hwnd, z_target);
+                            continue;
+                        }
+
+                        let start = *anim_start.get_or_insert_with(|| {
+                            tracing::info!(
+                                width = surface.width,
+                                height = surface.height,
+                                "started native game reveal animation"
+                            );
+                            std::time::Instant::now()
+                        });
+                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        let fg = GetForegroundWindow();
+                        let user_left = elapsed_ms > REVEAL_HOLD_MS + 100
+                            && !fg.is_null()
+                            && fg != host
+                            && fg != mc;
+                        if session.stop.load(Ordering::Acquire)
+                            || !session.attached.load(Ordering::Acquire)
+                            || !is_host_alive(host)
+                            || IsIconic(host) != 0
+                            || IsWindowVisible(host) == 0
+                            || (!mc.is_null() && !is_attached_window_alive(mc, host))
+                            || user_left
+                        {
+                            break;
+                        }
+
+                        if let Some(layout) = layout_for_host(host) {
+                            if let Some((nx, ny, nw, nh)) = stage_screen_rect(host, layout.stage) {
+                                if (nw - surface.width).abs() > 4 || (nh - surface.height).abs() > 4
+                                {
+                                    break;
+                                }
+                                x = nx;
+                                y = ny;
+                            }
+                        }
+
+                        let t = (elapsed_ms as f32) / (REVEAL_DURATION_MS as f32);
+                        let buf = std::slice::from_raw_parts_mut(surface.bits, len);
+                        let frame = compute_reveal_frame(surface.width, surface.height, t);
+                        paint_reveal_bgra(buf, surface.width, surface.height, frame);
+                        let _ = push_layered_bitmap(
+                            hwnd,
+                            x,
+                            y,
+                            surface.width,
+                            surface.height,
+                            surface.mem_dc,
+                        );
+                        let z_target = if !mc.is_null() && IsWindow(mc) != 0 {
+                            mc
+                        } else {
+                            host
+                        };
+                        raise_above(hwnd, z_target);
+
+                        if t >= 1.0 {
+                            completed = true;
+                            break;
+                        }
+                    }
+
+                    if IsWindow(hwnd) != 0 {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    pump_thread_messages();
+                    drop(surface);
+                    session.veil_slot.clear_if_matches(id, &cancel_t);
+                    if completed && !cancel_t.load(Ordering::Acquire) {
+                        session.focus_requested.store(true, Ordering::Release);
+                        if !last_mc.is_null() && should_hand_focus_to_game(host) {
+                            focus_window(last_mc);
+                        }
+                    }
+                }
+            });
+
+        if spawn.is_err() {
+            return None;
+        }
+        match ready_rx.recv_timeout(Duration::from_millis(80)) {
+            Ok(id) if id != 0 => Some(OpenVeilHandle {
+                hwnd: id as usize as HWND,
+                mc_slot,
+                activated,
+                cancel,
+            }),
+            _ => {
+                cancel.store(true, Ordering::Release);
+                None
+            }
+        }
     }
 
-    pub fn activate_open_veil(veil: HWND, mc: HWND) {
-        if veil.is_null() {
-            return;
-        }
-        // SAFETY: invoked synchronously on the UI STA thread right after `create_open_veil`.
+    pub fn activate_open_veil(handle: &OpenVeilHandle, mc: HWND) {
+        handle.mc_slot.store(mc as usize as u64, Ordering::Release);
+        handle.activated.store(true, Ordering::Release);
+    }
+
+    pub fn cancel_open_veil(handle: &OpenVeilHandle, slot: &VeilSlot) {
+        handle.cancel.store(true, Ordering::Release);
+        dismiss_veil_slot(slot);
+        // SAFETY: posting WM_CLOSE gently closes `handle.hwnd` if still registered.
         unsafe {
-            if IsWindow(veil) == 0 {
-                return;
+            if !handle.hwnd.is_null() && IsWindow(handle.hwnd) != 0 {
+                let _ = PostMessageW(handle.hwnd, WM_CLOSE, 0, 0);
             }
-            let ptr = GetWindowLongPtrW(veil, GWLP_USERDATA) as *mut VeilState;
-            if ptr.is_null() {
-                let _ = DestroyWindow(veil);
-                return;
-            }
-            let state = &mut *ptr;
-            if let VeilMode::Open { mc: mc_slot, .. } = &mut state.mode {
-                *mc_slot = mc;
-            }
-            state.start = std::time::Instant::now();
-            let _ = push_veil_frame(veil, state, 0.0);
-            let insert_after = insert_after_above_host(veil, mc);
-            SetWindowPos(
-                veil,
-                insert_after,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            let _ = SetTimer(veil, VEIL_TIMER_ID, 16, None);
-            tracing::info!(
-                width = state.width,
-                height = state.height,
-                "started native game reveal animation"
-            );
         }
     }
 
     pub fn create_close_veil(
         host: HWND,
-        slot: Arc<AtomicU64>,
+        slot: Arc<VeilSlot>,
         rect: (i32, i32, i32, i32),
         snapshot: Option<CapturedStage>,
-    ) -> Option<HWND> {
+    ) -> bool {
+        let (_, _, sw, sh) = rect;
+        if sw < 16 || sh < 16 || !is_valid(host) {
+            return false;
+        }
         dismiss_veil_slot(&slot);
-        let has_snapshot = snapshot.is_some();
-        let hwnd = create_veil_window(host, rect, VeilMode::Close { slot, snapshot }, true)?;
-        tracing::info!(
-            width = rect.2,
-            height = rect.3,
-            has_snapshot,
-            "started native game close animation"
-        );
-        Some(hwnd)
+        let host_id = host as usize as u64;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let cancel_t = cancel.clone();
+
+        let spawn = std::thread::Builder::new()
+            .name("clade-embed-veil".to_owned())
+            .spawn(move || {
+                // SAFETY: `hwnd` and `surface` belong exclusively to this dedicated VSync thread.
+                unsafe {
+                    let host = host_id as usize as HWND;
+                    let Some((hwnd, surface)) =
+                        init_veil_window(host, rect, false, snapshot.as_ref())
+                    else {
+                        let _ = ready_tx.send(false);
+                        return;
+                    };
+                    let id = hwnd as usize as u64;
+                    slot.set_active(id, cancel_t.clone());
+                    let _ = ready_tx.send(true);
+                    tracing::info!(
+                        width = surface.width,
+                        height = surface.height,
+                        has_snapshot = snapshot.is_some(),
+                        "started native game close animation"
+                    );
+
+                    let len = (surface.width as usize).saturating_mul(surface.height as usize);
+                    let start = std::time::Instant::now();
+                    let mut x = rect.0;
+                    let mut y = rect.1;
+
+                    loop {
+                        pump_thread_messages();
+                        if cancel_t.load(Ordering::Acquire) || IsWindow(hwnd) == 0 {
+                            break;
+                        }
+                        if DwmFlush() != 0 {
+                            std::thread::sleep(Duration::from_millis(8));
+                        }
+                        pump_thread_messages();
+                        if cancel_t.load(Ordering::Acquire) || IsWindow(hwnd) == 0 {
+                            break;
+                        }
+
+                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        let fg = GetForegroundWindow();
+                        let user_left = elapsed_ms > CLOSE_HOLD_MS + 100
+                            && !fg.is_null()
+                            && fg != host
+                            && GetWindow(fg, GW_OWNER) != host;
+                        if !is_host_alive(host)
+                            || IsIconic(host) != 0
+                            || IsWindowVisible(host) == 0
+                            || user_left
+                        {
+                            break;
+                        }
+
+                        if let Some(layout) = layout_for_host(host) {
+                            if let Some((nx, ny, nw, nh)) = stage_screen_rect(host, layout.stage) {
+                                if (nw - surface.width).abs() > 4 || (nh - surface.height).abs() > 4
+                                {
+                                    break;
+                                }
+                                x = nx;
+                                y = ny;
+                            }
+                        }
+
+                        let t = (elapsed_ms as f32) / (CLOSE_DURATION_MS as f32);
+                        let buf = std::slice::from_raw_parts_mut(surface.bits, len);
+                        let frame = compute_close_frame(surface.width, surface.height, t);
+                        paint_close_bgra(
+                            buf,
+                            surface.width,
+                            surface.height,
+                            frame,
+                            snapshot.as_ref(),
+                        );
+                        let _ = push_layered_bitmap(
+                            hwnd,
+                            x,
+                            y,
+                            surface.width,
+                            surface.height,
+                            surface.mem_dc,
+                        );
+                        raise_above(hwnd, host);
+
+                        if t >= 1.0 {
+                            break;
+                        }
+                    }
+
+                    if IsWindow(hwnd) != 0 {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    pump_thread_messages();
+                    drop(snapshot);
+                    drop(surface);
+                    slot.clear_if_matches(id, &cancel_t);
+                }
+            });
+
+        if spawn.is_err() {
+            return false;
+        }
+        match ready_rx.recv_timeout(Duration::from_millis(80)) {
+            Ok(true) => true,
+            _ => {
+                cancel.store(true, Ordering::Release);
+                false
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mul_div_255_is_bit_exact_for_all_byte_pairs() {
+        for c in 0u32..=255 {
+            for a in 0u32..=255 {
+                assert_eq!(mul_div_255(c, a), (c * a + 127) / 255, "c={c}, a={a}");
+            }
+        }
+    }
 
     #[test]
     fn stage_bounds_clamp_dimensions_and_corner_radius() {
@@ -3360,14 +3530,14 @@ mod tests {
     #[test]
     fn compute_reveal_frame_clamps_endpoints_and_expands_smoothly() {
         let hold = compute_reveal_frame(1280, 676, 0.05);
-        assert_eq!(hold.inner_alpha, 242);
+        assert_eq!(hold.inner_alpha, 255);
         assert_eq!(hold.outer_alpha, 255);
         assert_eq!(hold.border_alpha, 0);
         assert!(hold.shadow_alpha > 0);
         assert!(hold.shadow_spread > 0);
-        assert!(hold.inner_left >= 100 && hold.inner_right <= 1180);
+        assert!(hold.inner_left >= 80 && hold.inner_right <= 1200);
         assert!(hold.inner_top > 0 && hold.inner_bottom <= 676);
-        assert_eq!(hold.radius, 28);
+        assert_eq!(hold.radius, 24);
 
         let mid = compute_reveal_frame(1280, 676, 0.65);
         assert!(mid.inner_alpha < hold.inner_alpha);
@@ -3400,7 +3570,7 @@ mod tests {
 
     #[test]
     fn compute_close_frame_holds_then_shrinks_and_fades_smoothly() {
-        let hold = compute_close_frame(1280, 676, 0.05);
+        let hold = compute_close_frame(1280, 676, 0.10);
         assert_eq!(
             hold,
             CloseFrame {
@@ -3416,7 +3586,7 @@ mod tests {
             }
         );
 
-        let mid = compute_close_frame(1280, 676, 0.55);
+        let mid = compute_close_frame(1280, 676, 0.60);
         assert!(mid.inner_left > 0 && mid.inner_right < 1280);
         assert!(mid.inner_top > 0 && mid.inner_bottom <= 676);
         assert!(mid.radius > 0);
@@ -3501,7 +3671,7 @@ mod tests {
         }
         // Corners outside shrunk card stay transparent so Clade UI renders underneath.
         let mut big = vec![0xFFFF_FFFF; 320 * 200];
-        let mid = compute_close_frame(320, 200, 0.6);
+        let mid = compute_close_frame(320, 200, 0.65);
         paint_close_bgra(&mut big, 320, 200, mid, Some(&snap));
         assert_eq!(big[0], 0);
         assert_eq!(big[319], 0);

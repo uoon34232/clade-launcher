@@ -173,7 +173,7 @@ export function LauncherHome({
     returnTimerRef.current = window.setTimeout(() => {
       returnTimerRef.current = null;
       setEmbedReturning(false);
-    }, 620);
+    }, 680);
     return () => {
       if (returnTimerRef.current !== null) {
         window.clearTimeout(returnTimerRef.current);
@@ -580,10 +580,8 @@ export function LauncherHome({
           <div
             aria-hidden="true"
             data-testid="game-stage-exit"
-            className="game-stage-exit bg-graphite/[0.22] ring-graphite/10 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden ring-1 ring-inset"
-          >
-            <div className="h-full w-full bg-[radial-gradient(ellipse_at_50%_40%,rgb(246_240_230/0.14),transparent_70%)]" />
-          </div>
+            className="game-stage-exit bg-ivory/25 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden"
+          />
         )}
         {!embed.active && (
           <section
