@@ -30,7 +30,7 @@ export function TitleWordmark() {
   };
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-1.5 flex h-8 items-center justify-center">
+    <div className="pointer-events-none absolute inset-x-0 inset-y-0 flex items-center justify-center">
       <button
         type="button"
         aria-label={t("window.wordmark")}

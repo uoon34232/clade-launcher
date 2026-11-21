@@ -59,14 +59,17 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
       .catch(() => undefined);
   };
 
-  const btn =
-    "window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite opacity-45 transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-clay active:bg-graphite/[0.12]";
+  const btn = `window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite ${
+    framed ? "opacity-65" : "opacity-45"
+  } transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-clay active:bg-graphite/[0.12]`;
 
   return (
     <div
       ref={strip}
       {...(!maximized ? { "data-tauri-drag-region": true } : {})}
-      className="absolute inset-x-0 top-0 z-20 flex h-11 justify-end px-2 pt-1.5"
+      className={`absolute inset-x-0 top-0 z-20 flex justify-end px-2 ${
+        framed ? "border-graphite/10 h-[44px] items-center border-b" : "h-11 pt-1.5"
+      }`}
     >
       {/* The wordmark is a button (not a drag region); the empty strip around it still drags the window. */}
       <TitleWordmark />
