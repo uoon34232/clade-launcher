@@ -58,12 +58,14 @@ export interface GameEmbedStatus {
   active: boolean;
   instanceId: string | null;
   maximized: boolean;
+  closing?: boolean;
 }
 
 export const NO_EMBED: GameEmbedStatus = {
   active: false,
   instanceId: null,
   maximized: false,
+  closing: false,
 };
 
 export function parseGameEmbedStatus(raw: unknown): GameEmbedStatus {
@@ -72,6 +74,7 @@ export function parseGameEmbedStatus(raw: unknown): GameEmbedStatus {
     active: true,
     instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
     maximized: raw.maximized === true,
+    closing: raw.closing === true,
   };
 }
 

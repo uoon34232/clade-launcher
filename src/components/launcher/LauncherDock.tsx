@@ -29,11 +29,15 @@ interface Props {
   removedCount?: number;
   onOpenRemovedProfiles?: () => void;
   onOpenSettings: () => void;
+  /** True right after an embedded game closes so the dock rises back swiftly. */
+  returning?: boolean;
 }
 
 export function LauncherDock(p: Props) {
   return (
-    <div className="dock-rise absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] flex justify-center px-6">
+    <div
+      className={`${p.returning ? "dock-return" : "dock-rise"} absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] flex justify-center px-6`}
+    >
       <nav aria-label="Clade" className="glass-dock flex items-center gap-2 rounded-[1.75rem] p-2">
         <AccountMenu
           accounts={p.accounts}

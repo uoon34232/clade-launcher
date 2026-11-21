@@ -31,10 +31,24 @@ describe("WindowChrome", () => {
     expect(screen.queryByRole("button", { name: t("window.maximize") })).toBeNull();
     expect(screen.getByRole("button", { name: t("window.close") })).toBeTruthy();
 
-    rerender(<WindowChrome framed maximized={false} onToggleMaximize={onToggleMaximize} />);
+    rerender(
+      <WindowChrome
+        framed={false}
+        launching
+        maximized={false}
+        onToggleMaximize={onToggleMaximize}
+      />,
+    );
+    const launchingStrip = container.firstElementChild as HTMLElement;
+    expect(launchingStrip.className).toContain("border-graphite/10");
+
+    rerender(<WindowChrome framed closing maximized={false} onToggleMaximize={onToggleMaximize} />);
     const strip = container.firstElementChild as HTMLElement;
     expect(strip.className).toContain("h-[44px]");
     expect(strip.getAttribute("data-tauri-drag-region")).toBe("true");
+    expect(screen.getByRole("button", { name: t("window.close") }).className).toContain(
+      "chrome-closing-pulse",
+    );
 
     const maxBtn = screen.getByRole("button", { name: t("window.maximize") });
     maxBtn.focus();

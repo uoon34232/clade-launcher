@@ -28,7 +28,9 @@ import {
   type RunState,
 } from "@/lib/launch/api";
 import { profilesApi, type ProfilesApi, type ProfilesSnapshot } from "@/lib/profiles/api";
+import { prefersReducedMotion } from "@/lib/motion";
 import { completeOnboarding, inTauri, type UiSettings } from "@/lib/settings/uiSettings";
+import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
 import { AnimatedBackground } from "./AnimatedBackground";
 import { Hero } from "./Hero";
@@ -152,6 +154,33 @@ export function LauncherHome({
   const [surface, setSurface] = useState<Surface>({ kind: "none" });
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const [embed, setEmbed] = useState<GameEmbedStatus>(NO_EMBED);
+  const [prevEmbedActive, setPrevEmbedActive] = useState(embed.active);
+  const [embedReturning, setEmbedReturning] = useState(false);
+  const returnTimerRef = useRef<number | null>(null);
+  const ui = useUiSettings();
+
+  if (embed.active !== prevEmbedActive) {
+    setPrevEmbedActive(embed.active);
+    if (embed.active) {
+      if (embedReturning) setEmbedReturning(false);
+    } else if (!prefersReducedMotion()) {
+      setEmbedReturning(true);
+    }
+  }
+  useEffect(() => {
+    if (!embedReturning) return;
+    if (returnTimerRef.current !== null) window.clearTimeout(returnTimerRef.current);
+    returnTimerRef.current = window.setTimeout(() => {
+      returnTimerRef.current = null;
+      setEmbedReturning(false);
+    }, 420);
+    return () => {
+      if (returnTimerRef.current !== null) {
+        window.clearTimeout(returnTimerRef.current);
+        returnTimerRef.current = null;
+      }
+    };
+  }, [embedReturning]);
   const stageRef = useRef<HTMLDivElement>(null);
   const refreshSeqRef = useRef(0);
   const accountsSeqRef = useRef(0);
@@ -478,6 +507,8 @@ export function LauncherHome({
     surface.kind === "account"
       ? (accounts.accounts.find((a) => a.id === surface.id) ?? null)
       : null;
+  const isLaunching = Object.values(runs).includes("launching");
+  const embedLaunching = isLaunching && ui.onLaunch === "embed" && !embed.active;
   const bgPaused =
     embed.active ||
     surface.kind !== "none" ||
@@ -491,6 +522,8 @@ export function LauncherHome({
         <AnimatedBackground paused={bgPaused} />
         <WindowChrome
           framed={embed.active}
+          launching={embedLaunching}
+          closing={embed.closing}
           maximized={embed.maximized}
           onToggleMaximize={toggleMaximize}
         />
@@ -509,11 +542,36 @@ export function LauncherHome({
             className="h-full w-full"
           />
         </div>
+        {embedLaunching && (
+          <div
+            aria-hidden="true"
+            data-testid="game-stage-launching"
+            className="launch-stage-veil pointer-events-none absolute inset-x-0 top-[44px] bottom-0 overflow-hidden"
+          >
+            <div className="bg-graphite/[0.04] h-[2px] w-full overflow-hidden">
+              <div className="stage-seam-shimmer bg-clay/55 h-full w-1/3 rounded-full" />
+            </div>
+            <div className="bg-sand/20 ring-graphite/[0.06] h-full w-full ring-1 ring-inset" />
+          </div>
+        )}
+        {!embed.active && embedReturning && (
+          <div
+            aria-hidden="true"
+            data-testid="game-stage-exit"
+            className="game-stage-exit bg-graphite/[0.86] ring-cream/10 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden ring-1 ring-inset"
+          >
+            <div className="h-full w-full bg-[radial-gradient(ellipse_at_50%_40%,rgb(246_240_230/0.09),transparent_70%)]" />
+          </div>
+        )}
         {!embed.active && (
-          <section className="absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]">
+          <section
+            data-launching={embedLaunching ? "true" : undefined}
+            className="hero-stage absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]"
+          >
             <Hero
               lastPhraseId={initialUi?.lastPhrase}
               playtimeSeconds={snapshot.totalPlaytimeSeconds}
+              returning={embedReturning}
             />
           </section>
         )}
@@ -606,6 +664,7 @@ export function LauncherHome({
             onPlay={play}
             playState={playState}
             onOpenSettings={() => setSurface({ kind: "settings" })}
+            returning={embedReturning}
           />
         )}
         <ModalBoundary

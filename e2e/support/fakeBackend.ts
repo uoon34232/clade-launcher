@@ -39,10 +39,15 @@ interface Control {
     };
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
-    embed: { active: boolean; instanceId: string | null; maximized: boolean };
+    embed: { active: boolean; instanceId: string | null; maximized: boolean; closing?: boolean };
   };
   emit: (event: string, payload: unknown) => void;
-  setEmbedded: (instanceId: string | null, active: boolean, maximized?: boolean) => void;
+  setEmbedded: (
+    instanceId: string | null,
+    active: boolean,
+    maximized?: boolean,
+    closing?: boolean,
+  ) => void;
   finishPrepare: () => boolean;
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
   finishUpdate: () => boolean;
@@ -81,7 +86,9 @@ function install(cfg: BackendConfig): void {
     updateStatus: { stage: "idle", version: null, bytesDone: 0, bytesTotal: 0 },
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
-    embed: clone(cfg.embed ?? { active: false, instanceId: null, maximized: false }),
+    embed: clone(
+      cfg.embed ?? { active: false, instanceId: null, maximized: false, closing: false },
+    ),
   };
   const calls: Control["calls"] = [];
 
@@ -96,7 +103,7 @@ function install(cfg: BackendConfig): void {
       if (ev.state === "stopped") {
         delete state.runs[ev.instanceId];
         if (state.embed.active && state.embed.instanceId === ev.instanceId) {
-          state.embed = { active: false, instanceId: null, maximized: false };
+          state.embed = { active: false, instanceId: null, maximized: false, closing: false };
           for (const id of [...(listeners.get("game-embed-state") ?? [])]) {
             callbacks.get(id)?.({ event: "game-embed-state", id, payload: clone(state.embed) });
           }
@@ -933,10 +940,10 @@ function install(cfg: BackendConfig): void {
     calls,
     state,
     emit,
-    setEmbedded: (instanceId, active, maximized = false) => {
+    setEmbedded: (instanceId, active, maximized = false, closing = false) => {
       state.embed = active
-        ? { active: true, instanceId, maximized }
-        : { active: false, instanceId: null, maximized: false };
+        ? { active: true, instanceId, maximized, closing }
+        : { active: false, instanceId: null, maximized: false, closing: false };
       emit("game-embed-state", clone(state.embed));
     },
     hasPendingPrepare: () => pendingPrepare !== null,
@@ -1115,10 +1122,15 @@ export class Backend {
   }
 
   /** Simulates native framed-game attachment (`game-embed-state`). */
-  async embedded(instanceId: string, active = true, maximized = false): Promise<void> {
+  async embedded(
+    instanceId: string,
+    active = true,
+    maximized = false,
+    closing = false,
+  ): Promise<void> {
     await this.page.evaluate(
-      ([id, a, m]) => (window as unknown as { __e2e: Control }).__e2e.setEmbedded(id, a, m),
-      [active ? instanceId : null, active, maximized] as const,
+      ([id, a, m, c]) => (window as unknown as { __e2e: Control }).__e2e.setEmbedded(id, a, m, c),
+      [active ? instanceId : null, active, maximized, closing] as const,
     );
   }
 

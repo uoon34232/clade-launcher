@@ -25,9 +25,11 @@ interface HeroProps {
   lastPhraseId?: string | null;
   /** Total Minecraft playtime across all profiles, in seconds (the real backend value). */
   playtimeSeconds?: number;
+  /** True right after an embedded game closes so the headline glides back swiftly instead of the startup entrance. */
+  returning?: boolean;
 }
 
-export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) {
+export function Hero({ context, lastPhraseId, playtimeSeconds = 0, returning = false }: HeroProps) {
   const t = useT(); // re-renders on a language change; the phrase itself (its id) stays the same
   // A fresh phrase on every start, never the one shown last time.
   const [phrase, setPhrase] = useState<Phrase>(() =>
@@ -194,7 +196,9 @@ export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) 
   };
 
   return (
-    <div className="hero-rise flex flex-col items-center px-8 text-center">
+    <div
+      className={`${returning ? "hero-return" : "hero-rise"} flex flex-col items-center px-8 text-center`}
+    >
       <h1
         className="text-graphite font-serif"
         style={{

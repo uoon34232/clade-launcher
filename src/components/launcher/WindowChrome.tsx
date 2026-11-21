@@ -7,6 +7,8 @@ import { TitleWordmark } from "./TitleWordmark";
 
 interface Props {
   framed?: boolean;
+  launching?: boolean;
+  closing?: boolean;
   maximized?: boolean;
   onToggleMaximize?: () => void;
 }
@@ -14,7 +16,13 @@ interface Props {
 // Frameless window: a drag strip with the quiet product name centred in it, plus the window controls.
 // Renders nothing in a plain browser. Maximize/Restore is available only while a game is framed
 // inside Clade (`framed = true`).
-export function WindowChrome({ framed = false, maximized = false, onToggleMaximize }: Props) {
+export function WindowChrome({
+  framed = false,
+  launching = false,
+  closing = false,
+  maximized = false,
+  onToggleMaximize,
+}: Props) {
   const t = useT();
   const [win, setWin] = useState<Window | null>(null);
   const strip = useRef<HTMLDivElement>(null);
@@ -73,9 +81,9 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
     <div
       ref={strip}
       {...(!maximized ? { "data-tauri-drag-region": true } : {})}
-      className={`absolute inset-x-0 top-0 z-20 flex justify-end px-2 ${
-        framed ? "border-graphite/10 h-[44px] items-center border-b" : "h-11 pt-1.5"
-      }`}
+      className={`absolute inset-x-0 top-0 z-20 flex justify-end border-b px-2 transition-[border-color] duration-300 ${
+        framed || launching ? "border-graphite/10" : "border-transparent"
+      } ${framed ? "h-[44px] items-center" : "h-11 pt-1.5"}`}
     >
       {/* The wordmark is a button (not a drag region); the empty strip around it still drags the window. */}
       <TitleWordmark />
@@ -94,7 +102,7 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
         <button
           type="button"
           aria-label={maximized ? t("window.restore") : t("window.maximize")}
-          className={btn}
+          className={`${btn} chrome-btn-enter`}
           onClick={(e) => {
             blurIfPointerOrFramed(e.currentTarget, e.detail);
             onToggleMaximize?.();
@@ -110,7 +118,7 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
       <button
         type="button"
         aria-label={t("window.close")}
-        className={btn}
+        className={`${btn} ${closing ? "chrome-closing-pulse" : ""}`}
         onClick={(e) => {
           blurIfPointerOrFramed(e.currentTarget, e.detail);
           withWindow((w) => w.close());

@@ -139,6 +139,11 @@ impl SettingsState {
         self.read().ui.transparency.clone()
     }
 
+    /// The reduced-motion choice (`system`, `on` or `off`).
+    pub fn reduced_motion(&self) -> String {
+        self.read().ui.reduced_motion.clone()
+    }
+
     /// The instance selected in the dock, if any (an id, never a path).
     pub fn last_instance(&self) -> Option<InstanceId> {
         self.read().last_instance.clone()

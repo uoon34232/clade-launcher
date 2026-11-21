@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG } from "./support/fixtures";
 import { expect, test } from "./support/test";
 import { playButton, profileTrigger, text } from "./support/ui";
 
@@ -262,10 +263,12 @@ test.describe("framed game mode (inside Clade)", () => {
     expect(bounds.radius).toBe(0);
 
     await playButton(page).click();
+    await expect(page.getByTestId("game-stage-launching")).toBeVisible();
     await backend.playing("survival");
     await backend.embedded("survival", true);
 
     await expect(playButton(page)).toHaveCount(0);
+    await expect(page.getByTestId("game-stage-launching")).toHaveCount(0);
     await expect(page.getByTestId("game-stage")).toHaveAttribute("aria-hidden", "false");
     await expect(page.getByRole("button", { name: text("window.minimize") })).toBeVisible();
     await expect(page.getByRole("button", { name: text("window.maximize") })).toBeVisible();
@@ -280,9 +283,35 @@ test.describe("framed game mode (inside Clade)", () => {
     await expect(page.getByRole("button", { name: text("window.maximize") })).toBeVisible();
 
     await backend.stopped("survival", { kind: "normal", reason: "normal", code: 0 });
+    await expect(page.getByTestId("game-stage-exit")).toBeVisible();
+    await expect(page.getByTestId("game-stage-exit")).toHaveCount(0);
     await expect(page.getByRole("button", { name: text("window.maximize") })).toHaveCount(0);
     await expect(page.getByRole("button", { name: text("window.restore") })).toHaveCount(0);
     await expect(playButton(page)).toHaveText(text("play.play"));
     await expect(playButton(page)).toBeEnabled();
+  });
+});
+
+test.describe("framed game mode with reduced motion", () => {
+  test.use({
+    backendConfig: {
+      ui: { ...DEFAULT_CONFIG.ui, reducedMotion: "on" },
+    },
+  });
+
+  test("skips the close fold-out transition layer when reduced motion is enabled", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await playButton(page).click();
+    await backend.playing("survival");
+    await backend.embedded("survival", true);
+    await expect(page.getByTestId("game-stage")).toHaveAttribute("aria-hidden", "false");
+
+    await backend.stopped("survival", { kind: "normal", reason: "normal", code: 0 });
+    await expect(playButton(page)).toHaveText(text("play.play"));
+    await expect(page.getByTestId("game-stage-exit")).toHaveCount(0);
   });
 });
