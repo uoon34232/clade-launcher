@@ -4,6 +4,7 @@ import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
 import type { ProfilesApi, ProfilesSnapshot, RemovedProfileSummary } from "@/lib/profiles/api";
 import { playSound } from "@/lib/sound/soundService";
+import { cn } from "@/lib/utils";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
 import { BUTTON_QUIET, BUTTON_SMALL_SOFT, BUTTON_SOFT } from "./modalStyles";
 
@@ -62,11 +63,11 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
         title={t("removedProfiles.title")}
         description={t("removedProfiles.description")}
       />
-      <div className="mt-4">
+      <div className="mb-5">
         {removed.length === 0 ? (
           <p className="text-ink-muted py-3 text-[0.9375rem]">{t("removedProfiles.empty")}</p>
         ) : (
-          <ul className="divide-graphite/10 border-graphite/10 bg-sand/30 max-h-64 divide-y overflow-y-auto rounded-2xl border">
+          <ul className="quiet-scroll divide-graphite/10 border-graphite/10 bg-sand/30 max-h-64 divide-y overflow-y-auto rounded-2xl border">
             {removed.map((item) => {
               const busy = busyFolder === item.folder;
               const detail =
@@ -106,7 +107,7 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
             type="button"
             disabled={busyFolder !== null}
             onClick={openFolder}
-            className={`${BUTTON_QUIET} mr-auto px-3`}
+            className={cn(BUTTON_QUIET, "mr-auto px-3")}
           >
             {t("removedProfiles.openFolder")}
           </button>

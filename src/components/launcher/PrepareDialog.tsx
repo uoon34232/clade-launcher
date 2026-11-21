@@ -297,7 +297,8 @@ function Run({
       <ModalHeader title={profile.name} description={profileDetail(profile)} />
       <div className="mb-6 flex flex-col gap-3">
         <p aria-live="polite" className="text-graphite min-h-6 text-[0.9375rem]">
-          {stageText(p?.stage ?? null, { verify, loader: profile.loader })}…
+          {stageText(p?.stage ?? null, { verify, loader: profile.loader })}
+          {p?.stage === "done" ? "" : "…"}
         </p>
         <div
           role="progressbar"

@@ -28,7 +28,7 @@ export function SettingsButton({ onClick }: Props) {
         <SettingsIcon
           aria-hidden
           strokeWidth={1.75}
-          className="ease-out-soft size-5 transition-transform duration-300 group-hover:rotate-[30deg]"
+          className="settings-gear ease-out-soft size-5 transition-transform duration-300 group-hover:rotate-[30deg]"
         />
       </TooltipTrigger>
       <TooltipContent side="top" sideOffset={14}>

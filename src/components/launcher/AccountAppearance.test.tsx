@@ -198,7 +198,7 @@ describe("restoring the default skin", () => {
     fireEvent.click(screen.getByRole("button", { name: "Вернуть стандартный" }));
     expect(
       screen.getByText(
-        "Вернуть стандартный скин? Текущий пользовательский скин будет удалён с этого аккаунта Minecraft.",
+        "Вернуть стандартный скин? Текущий скин будет удалён с этого аккаунта Minecraft.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Оставить текущий скин" })).toBeTruthy();

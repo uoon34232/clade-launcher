@@ -156,6 +156,13 @@ export function LauncherHome({
   const refreshSeqRef = useRef(0);
   const accountsSeqRef = useRef(0);
   const selectAccountSeqRef = useRef(0);
+  const switchTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (switchTimerRef.current !== null) window.clearTimeout(switchTimerRef.current);
+    },
+    [],
+  );
   const [problem, setProblem] = useState<Problem | null>(null);
   // The first-run introduction: only when the backend says it was never finished or skipped.
   const [introduction, setIntroduction] = useState(initialUi?.onboardingDone === false);
@@ -350,7 +357,22 @@ export function LauncherHome({
     api.select(id).catch(refresh);
   };
 
-  const close = () => setSurface({ kind: "none" });
+  const close = () => {
+    if (switchTimerRef.current !== null) {
+      window.clearTimeout(switchTimerRef.current);
+      switchTimerRef.current = null;
+    }
+    setSurface({ kind: "none" });
+  };
+
+  const switchSurface = useCallback((next: Surface) => {
+    if (switchTimerRef.current !== null) window.clearTimeout(switchTimerRef.current);
+    setSurface({ kind: "none" });
+    switchTimerRef.current = window.setTimeout(() => {
+      switchTimerRef.current = null;
+      setSurface(next);
+    }, 0);
+  }, []);
 
   // However the introduction ends, it is recorded as seen (permanently); the last page can lead
   // straight into creating a profile or adding an account, which are the normal dialogs.
@@ -623,10 +645,10 @@ export function LauncherHome({
                 }}
                 onVerify={() =>
                   editingProfile &&
-                  setSurface({ kind: "prepare", id: editingProfile.id, verify: true })
+                  switchSurface({ kind: "prepare", id: editingProfile.id, verify: true })
                 }
                 onRemove={() =>
-                  editingProfile && setSurface({ kind: "remove-profile", id: editingProfile.id })
+                  editingProfile && switchSurface({ kind: "remove-profile", id: editingProfile.id })
                 }
                 api={api}
               />
@@ -666,11 +688,11 @@ export function LauncherHome({
                 onClose={() => setProblem(null)}
                 onRepair={(id) => {
                   setProblem(null);
-                  setSurface({ kind: "prepare", id });
+                  switchSurface({ kind: "prepare", id });
                 }}
                 onSignIn={(accountId) => {
                   setProblem(null);
-                  setSurface({ kind: "sign-in", accountId });
+                  switchSurface({ kind: "sign-in", accountId });
                 }}
                 onRetry={(id) => {
                   setProblem(null);
@@ -713,7 +735,7 @@ export function LauncherHome({
                 account={managed}
                 capabilities={accounts.capabilities}
                 onClose={close}
-                onSignInAgain={(id) => setSurface({ kind: "sign-in", accountId: id })}
+                onSignInAgain={(id) => switchSurface({ kind: "sign-in", accountId: id })}
                 onRemoved={(snapshot) => {
                   setAccounts(snapshot);
                   close();

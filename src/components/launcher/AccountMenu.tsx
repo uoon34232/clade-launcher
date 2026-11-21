@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { SettingsIcon } from "lucide-react";
 import {
   DropdownMenu,
@@ -70,71 +70,58 @@ export function AccountMenu({ accounts, activeId, onSelect, onManage, onAdd }: P
       >
         {active && (
           <>
-            <div
-              role="presentation"
+            <DropdownMenuRadioGroup
+              value={active.id}
+              onValueChange={(id: string) => {
+                playSound("select");
+                onSelect(id);
+              }}
               className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1"
-              style={{ gridTemplateRows: `repeat(${accounts.length}, auto)` }}
             >
-              <DropdownMenuRadioGroup
-                value={active.id}
-                onValueChange={(id: string) => {
-                  playSound("select");
-                  onSelect(id);
-                }}
-                className="col-start-1 grid"
-                style={{
-                  gridRow: `1 / span ${accounts.length}`,
-                  gridTemplateRows: "subgrid",
-                }}
-              >
-                {accounts.map((a) => (
-                  <DropdownMenuRadioItem
-                    key={a.id}
-                    value={a.id}
-                    closeOnClick
-                    onPointerEnter={() => setHoveredId(a.id)}
-                    onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
-                    onFocus={() => setFocusedId(a.id)}
-                    onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
-                    className={`${ROW_ITEM} data-[checked]:bg-cream/[0.06] min-w-0 pr-9`}
-                  >
-                    <PlayerHead
-                      account={a}
-                      className="ring-cream/10 size-7 shrink-0 rounded-[0.4rem] ring-1"
-                    />
-                    <span className="flex min-w-0 flex-col leading-tight">
-                      <span className="truncate text-[0.875rem] font-medium">{a.username}</span>
-                      {a.needsSignIn && (
-                        <span className="text-cream/55 text-[0.75rem]">
-                          {t("account.needsSignIn")}
-                        </span>
-                      )}
-                    </span>
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-              {accounts.map((a, i) => {
+              {accounts.map((a) => {
                 const revealed = hoveredId === a.id || focusedId === a.id;
                 return (
-                  <DropdownMenuItem
-                    key={a.id}
-                    style={{ gridColumnStart: 2, gridRowStart: i + 1 }}
-                    aria-label={t("account.manage", { name: a.username })}
-                    onPointerEnter={() => setHoveredId(a.id)}
-                    onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
-                    onFocus={() => setFocusedId(a.id)}
-                    onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
-                    className={`text-cream/55 focus:bg-cream/[0.1] focus:text-cream size-9 shrink-0 justify-center rounded-[0.75rem] p-0 transition-[opacity,background-color,color] duration-150 hover:opacity-100 focus:opacity-100 data-[highlighted]:opacity-100 ${revealed ? "opacity-100" : "opacity-0"}`}
-                    onClick={() => {
-                      playSound("click");
-                      window.setTimeout(() => onManage(a.id), 0); // after the menu has closed and returned focus
-                    }}
-                  >
-                    <SettingsIcon aria-hidden strokeWidth={1.75} className="size-4" />
-                  </DropdownMenuItem>
+                  <Fragment key={a.id}>
+                    <DropdownMenuRadioItem
+                      value={a.id}
+                      closeOnClick
+                      onPointerEnter={() => setHoveredId(a.id)}
+                      onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
+                      onFocus={() => setFocusedId(a.id)}
+                      onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
+                      className={`${ROW_ITEM} data-[checked]:bg-cream/[0.06] col-start-1 min-w-0 pr-9`}
+                    >
+                      <PlayerHead
+                        account={a}
+                        className="ring-cream/10 size-7 shrink-0 rounded-[0.4rem] ring-1"
+                      />
+                      <span className="flex min-w-0 flex-col leading-tight">
+                        <span className="truncate text-[0.875rem] font-medium">{a.username}</span>
+                        {a.needsSignIn && (
+                          <span className="text-cream/55 text-[0.75rem]">
+                            {t("account.needsSignIn")}
+                          </span>
+                        )}
+                      </span>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuItem
+                      aria-label={t("account.manage", { name: a.username })}
+                      onPointerEnter={() => setHoveredId(a.id)}
+                      onPointerLeave={() => setHoveredId((prev) => (prev === a.id ? null : prev))}
+                      onFocus={() => setFocusedId(a.id)}
+                      onBlur={() => setFocusedId((prev) => (prev === a.id ? null : prev))}
+                      className={`focus:bg-cream/[0.1] focus:text-cream col-start-2 size-9 shrink-0 justify-center rounded-[0.75rem] p-0 transition-colors duration-150 ${revealed ? "text-cream" : "text-cream/55"}`}
+                      onClick={() => {
+                        playSound("click");
+                        window.setTimeout(() => onManage(a.id), 0); // after the menu has closed and returned focus
+                      }}
+                    >
+                      <SettingsIcon aria-hidden strokeWidth={1.75} className="size-4" />
+                    </DropdownMenuItem>
+                  </Fragment>
                 );
               })}
-            </div>
+            </DropdownMenuRadioGroup>
             <DropdownMenuSeparator className="bg-cream/[0.08] my-1.5" />
           </>
         )}

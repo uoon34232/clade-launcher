@@ -267,7 +267,7 @@ describe("when the launch is refused", () => {
     expect(screen.getByRole("dialog").textContent).toContain("Unlock your accounts");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
-    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("doesn't match"));
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("doesn’t match"));
     expect(launch.launch).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText<HTMLInputElement>("Passphrase").value).toBe("");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "right pass" } });

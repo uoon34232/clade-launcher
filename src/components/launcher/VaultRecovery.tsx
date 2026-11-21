@@ -3,6 +3,7 @@ import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { useT } from "@/lib/i18n";
 import { describeError, errorCode } from "@/lib/i18n/errors";
 import { playSound } from "@/lib/sound/soundService";
+import { cn } from "@/lib/utils";
 import { ModalFooter, ModalHeader } from "./Modal";
 import {
   BUTTON_DANGER,
@@ -95,7 +96,7 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
       <button
         ref={linkRef}
         type="button"
-        className={`${BUTTON_SMALL_QUIET} -ml-1 px-1`}
+        className={cn(BUTTON_SMALL_QUIET, "-ml-1 px-1")}
         onClick={() => {
           playSound("click");
           ask(true);

@@ -11,6 +11,7 @@ export const ru: Record<MessageKey, Message> = {
   "common.cancel": "Отмена",
   "common.close": "Закрыть",
   "common.done": "Готово",
+  "common.apply": "Применить",
   "common.tryAgain": "Повторить",
   "common.working": "Выполняется…",
   "common.continue": "Продолжить",
@@ -21,7 +22,7 @@ export const ru: Record<MessageKey, Message> = {
 
   // ---- window chrome
   "window.minimize": "Свернуть",
-  "window.maximize": "Увеличить",
+  "window.maximize": "Развернуть",
   "window.restore": "Восстановить",
   "window.close": "Закрыть",
   "window.wordmark": "Показать девиз Clade",
@@ -88,7 +89,7 @@ export const ru: Record<MessageKey, Message> = {
   "removeProfile.body":
     "Профиль исчезнет из Clade, но его миры, моды, настройки, скриншоты и другие файлы останутся сохранены в папке Clade. Ничего не будет удалено безвозвратно.",
   "removeProfile.confirm": "Убрать из Clade",
-  "removeProfile.working": "Убираем…",
+  "removeProfile.working": "Перемещение…",
   "removedProfiles.emptyNotice": {
     by: "count",
     one: "В папке Clade сохранён {count} убранный профиль.",
@@ -101,7 +102,7 @@ export const ru: Record<MessageKey, Message> = {
   "removedProfiles.description":
     "Миры, моды и настройки нетронутыми хранятся в папке Clade. Восстановление вернёт профиль в список; открой папку, если хочешь удалить файлы вручную.",
   "removedProfiles.restore": "Восстановить",
-  "removedProfiles.restoring": "Восстанавливаем…",
+  "removedProfiles.restoring": "Восстановление…",
   "removedProfiles.openFolder": "Открыть папку",
   "removedProfiles.empty": "Убранных профилей нет.",
   "profile.vanilla": "Ванильный",
@@ -171,7 +172,7 @@ export const ru: Record<MessageKey, Message> = {
   "create.loaderVersion": "Версия загрузчика",
   "create.versionRecommended": "{version} (рекомендуется)",
   "create.channel.recommended": "рекомендуется",
-  "create.channel.latest": "новейшая",
+  "create.channel.latest": "последняя",
   "create.channel.prerelease": "бета",
   "create.channel.stable": "",
   "create.checking": "Проверка…",
@@ -241,7 +242,7 @@ export const ru: Record<MessageKey, Message> = {
   "exit.mixin": "Не удалось применить мод. Проверь моды в этом профиле.",
   "exit.incompatible_mods": "Моды в этом профиле несовместимы друг с другом.",
   "exit.missing_class": "Не удалось загрузить библиотеку или мод.",
-  "exit.jvm_start": "Java не смогла запуститься с выбранными настройками.",
+  "exit.jvm_start": "Не удалось запустить Java с выбранными настройками.",
   "exit.early_exit": "Minecraft остановился сразу после запуска (код выхода {code}).",
   "exit.unexpected": "Minecraft неожиданно остановился (код выхода {code}).",
   "exit.stopped": "Minecraft был остановлен.",
@@ -262,7 +263,7 @@ export const ru: Record<MessageKey, Message> = {
   "recovery.link": "Не помнишь парольную фразу?",
   "recovery.title": "Начать заново?",
   "recovery.body":
-    "Clade не может восстановить забытую парольную фразу. Если начать заново, старое зашифрованное хранилище входов будет убрано в архив, и эти сохранённые входы перестанут использоваться в этой папке Clade. Тебе придётся снова войти в аккаунты Microsoft. Профили, миры, время игры и настройки сохранятся.",
+    "Clade не может восстановить забытую парольную фразу. Если начать заново, старое зашифрованное хранилище входов будет убрано в архив, и эти сохранённые входы перестанут использоваться в этой папке Clade. Тебе придётся снова войти в аккаунты Microsoft. Профили, миры, время в игре и настройки сохранятся.",
   "recovery.keep": "Продолжить попытки",
   "recovery.confirm": "Начать заново",
   "signin.unlockDescription":
@@ -271,7 +272,7 @@ export const ru: Record<MessageKey, Message> = {
     one: "Не менее {count} символа. Подойдёт несколько слов.",
     other: "Не менее {count} символов. Подойдёт несколько слов.",
   },
-  "signin.repeat": "Парольная фраза ещё раз",
+  "signin.repeat": "Повтори парольную фразу",
   "signin.mismatch": "Парольные фразы не совпадают.",
   "signin.approvalNote":
     "Ничего не сохранено. Это исправится, когда Mojang одобрит регистрацию лаунчера.",
@@ -293,7 +294,7 @@ export const ru: Record<MessageKey, Message> = {
   "accountModal.restoreDefault": "Вернуть стандартный",
   "accountModal.uploading": "Загрузка…",
   "accountModal.resetConfirm":
-    "Вернуть стандартный скин? Текущий пользовательский скин будет удалён с этого аккаунта Minecraft.",
+    "Вернуть стандартный скин? Текущий скин будет удалён с этого аккаунта Minecraft.",
   "accountModal.keepSkin": "Оставить текущий скин",
   "accountModal.restoring": "Возврат…",
   "accountModal.skinModelNote": "Модель применяется к PNG, который ты выберешь следующим.",
@@ -306,7 +307,7 @@ export const ru: Record<MessageKey, Message> = {
   "appearance.equipNamed": "Надеть «{name}»",
   "appearance.hideCape": "Скрыть плащ",
   "appearance.needsSignIn": "Войди снова, чтобы менять внешний вид в Minecraft.",
-  "accountModal.confirmRemove": "Удалить {name}? Профили, миры и время игры останутся как есть.",
+  "accountModal.confirmRemove": "Удалить {name}? Профили, миры и время в игре останутся как есть.",
   "accountModal.keep": "Оставить аккаунт",
   "accountModal.remove": "Удалить аккаунт",
   "accountModal.removing": "Удаление…",
@@ -333,17 +334,17 @@ export const ru: Record<MessageKey, Message> = {
   "settings.transparency.on": "Вкл.",
   "settings.transparency.off": "Выкл.",
   "settings.memory": "Память",
-  "settings.memory.auto": "Автоматически (рекомендуется)",
+  "settings.memory.auto": "Автоматически",
   "settings.memory.custom": "Своя",
   "settings.memory.autoNote": "Подбирается автоматически: {value}.",
   "settings.memory.slider": "Память для Minecraft",
   "settings.memory.gb": "{value} ГБ",
   "settings.onLaunch": "Когда Minecraft запускается",
   "settings.onLaunch.embed": "Внутри Clade",
-  "settings.onLaunch.keep": "Оставить Clade открытым",
-  "settings.onLaunch.hide": "Скрыть Clade",
+  "settings.onLaunch.keep": "Оставить открытым",
+  "settings.onLaunch.hide": "Скрыть",
   "settings.onExit": "Когда Minecraft закрывается",
-  "settings.onExit.show": "Показать Clade снова",
+  "settings.onExit.show": "Показать снова",
   "settings.onExit.hidden": "Оставить скрытым",
   "settings.onExit.hiddenNote":
     "Скрытый Clade тихо закроется вместе с игрой. Запусти его снова в любой момент.",
@@ -354,17 +355,17 @@ export const ru: Record<MessageKey, Message> = {
   "settings.diagnosticsDone": "Сохранено: {name}.",
   "settings.reset": "Сбросить настройки",
   "settings.resetConfirm":
-    "Сбросить настройки по умолчанию? Профили, миры, аккаунты и время в игре останутся как есть.",
+    "Вернуть настройки по умолчанию? Профили, миры, аккаунты и время в игре останутся как есть.",
   "settings.resetKeep": "Оставить",
   "settings.resetDo": "Сбросить",
   "settings.clearRetiredVaults": "Удалить архивные хранилища ({count})",
   "settings.clearingRetiredVaults": "Удаление…",
   "settings.clearRetiredVaultsConfirm": {
     by: "count",
-    one: "Удалить {count} архивное хранилище? Аккаунты, профили и миры не затронутся.",
-    few: "Удалить {count} архивных хранилища? Аккаунты, профили и миры не затронутся.",
-    many: "Удалить {count} архивных хранилищ? Аккаунты, профили и миры не затронутся.",
-    other: "Удалить {count} архивного хранилища? Аккаунты, профили и миры не затронутся.",
+    one: "Удалить {count} архивное хранилище? Аккаунты, профили и миры останутся нетронутыми.",
+    few: "Удалить {count} архивных хранилища? Аккаунты, профили и миры останутся нетронутыми.",
+    many: "Удалить {count} архивных хранилищ? Аккаунты, профили и миры останутся нетронутыми.",
+    other: "Удалить {count} архивного хранилища? Аккаунты, профили и миры останутся нетронутыми.",
   },
   "settings.clearRetiredVaultsKeep": "Оставить",
   "settings.clearRetiredVaultsDo": "Удалить",
@@ -436,12 +437,12 @@ export const ru: Record<MessageKey, Message> = {
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",
   "error.settings.unsupported_value": "Такая настройка не поддерживается.",
   "error.settings.unsupported_language": "Этот язык не поддерживается.",
-  "error.settings.open_failed": "Windows не смог открыть эту папку.",
+  "error.settings.open_failed": "Не удалось открыть эту папку в Windows.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
   "error.generic": "Что-то пошло не так.",
   "error.common.storage":
-    "Clade не удалось прочитать или записать нужные файлы. Проверь, что в его папку можно писать.",
+    "Clade не удалось прочитать или записать нужные файлы. Проверь, что папка Clade доступна для записи.",
   "error.common.not_found": "Этого профиля больше нет.",
   "error.common.network_unavailable": "Сеть недоступна.",
   "error.common.backend_unavailable": "Здесь лаунчер недоступен.",
@@ -476,7 +477,7 @@ export const ru: Record<MessageKey, Message> = {
   "error.prepare.java": "Не удалось настроить Java.",
   "error.prepare.loader": "Не удалось установить загрузчик модов.",
   "error.prepare.storage":
-    "Не удалось сохранить файлы. Проверь, есть ли место на диске и можно ли на него писать.",
+    "Не удалось сохранить файлы. Проверь, есть ли место на диске и доступен ли он для записи.",
   "error.prepare.disk_space":
     "На диске, где находится Clade, не хватает места: нужно около {required}, доступно {available}. Освободи место и повтори.",
   "error.prepare.account_required":
@@ -552,10 +553,10 @@ export const ru: Record<MessageKey, Message> = {
   "error.appearance.busy": "Другое изменение ещё выполняется.",
   "error.appearance.unknown_account": "Этого аккаунта больше нет.",
 
-  "error.profile.unknown": "Не удалось создать профиль.",
+  "error.profile.unknown": "Не удалось выполнить действие с профилем.",
   "error.profile.duplicate_name": "Профиль «{name}» уже существует.",
   "error.profile.unknown_minecraft":
-    "Minecraft {minecraft} нет в официальном списке версий Mojang.",
+    "Версии Minecraft {minecraft} нет в официальном списке Mojang.",
   "error.profile.cannot_verify":
     "Сейчас не удаётся проверить версии Minecraft. Подключись к сети один раз и повтори.",
   "error.profile.cannot_verify_loader":
@@ -581,7 +582,7 @@ export const ru: Record<MessageKey, Message> = {
     "Не удалось восстановить профиль. Проверь, не открыты ли его файлы в другой программе.",
   "error.profile.duplicate_failed":
     "Не удалось дублировать профиль. Проверь свободное место на диске и закрой всё, что использует его папку.",
-  "error.profile.open_failed": "Windows не смог открыть эту папку.",
+  "error.profile.open_failed": "Не удалось открыть эту папку в Windows.",
 
   "error.catalog.unknown": "Не удалось загрузить список версий.",
   "error.catalog.catalog_unavailable":

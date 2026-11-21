@@ -37,9 +37,12 @@ export function TitleWordmark() {
         data-phase={on ? "on" : "off"}
         data-mode={mode}
         onClick={activate}
-        className="wordmark text-graphite/50 focus-visible:ring-clay pointer-events-auto relative -mx-2 cursor-default rounded-md px-2 py-0.5 font-serif text-[0.9375rem] leading-none font-normal tracking-[0.04em] whitespace-nowrap outline-none select-none focus-visible:ring-2"
+        className="wordmark text-graphite/65 pointer-events-auto relative -mx-2 cursor-default rounded-md px-2 py-0.5 font-serif text-[0.9375rem] leading-none font-normal tracking-[0.04em] whitespace-nowrap outline-none select-none"
         style={{ fontVariationSettings: '"opsz" 24, "SOFT" 60' }}
       >
+        <span className="sr-only" aria-live="polite">
+          {on ? t("onboarding.tagline") : ""}
+        </span>
         <span aria-hidden className="wordmark-word wm-fade block">
           {LETTERS.map((letter, i) => (
             <span

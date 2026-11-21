@@ -31,6 +31,7 @@ import {
 } from "@/lib/profiles/api";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
+import { cn } from "@/lib/utils";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
 import { BUTTON_PRIMARY, BUTTON_QUIET, FIELD, LABEL } from "./modalStyles";
 import { Segmented } from "./Segmented";
@@ -353,7 +354,7 @@ function ProfileForm({
           >
             <SelectTrigger
               aria-labelledby="mc-version-label"
-              className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3`}
+              className={cn(FIELD, "min-w-0 justify-between border-0 py-0 pr-3")}
             >
               <SelectValue placeholder={t("create.choose")} />
             </SelectTrigger>
@@ -365,7 +366,7 @@ function ProfileForm({
               {shown.map((e) => (
                 <SelectItem key={e.id} value={e.id} className="rounded-lg py-1.5">
                   <span className="flex-1">{e.id}</span>
-                  <span className="text-cream/45 pr-4 text-[0.75rem] tabular-nums">
+                  <span className="text-cream/55 pr-4 text-[0.75rem] tabular-nums">
                     {releaseDay(e.releaseTime)}
                   </span>
                 </SelectItem>
@@ -373,7 +374,7 @@ function ProfileForm({
             </SelectContent>
           </Select>
         ) : (
-          <div className={`${FIELD} text-ink-muted flex items-center`} aria-live="polite">
+          <div className={cn(FIELD, "text-ink-muted flex items-center")} aria-live="polite">
             {catalog.status === "loading" ? t("create.loading") : t("create.unavailable")}
           </div>
         )}
@@ -481,7 +482,10 @@ function ProfileForm({
                 >
                   <SelectTrigger
                     aria-labelledby="loader-version-label"
-                    className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+                    className={cn(
+                      FIELD,
+                      "min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50",
+                    )}
                   >
                     <SelectValue
                       placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
@@ -495,7 +499,7 @@ function ProfileForm({
                     {(current?.versions ?? []).map((v) => (
                       <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
                         <span className="flex-1">{v.version}</span>
-                        <span className="text-cream/45 pr-4 text-[0.75rem]">
+                        <span className="text-cream/55 pr-4 text-[0.75rem]">
                           {v.version === current?.recommended
                             ? t("create.channel.recommended")
                             : t(CHANNEL_NOTE[v.channel])}

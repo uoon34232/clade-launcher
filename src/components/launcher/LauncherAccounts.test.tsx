@@ -368,7 +368,7 @@ describe("signing in", () => {
     expect(screen.getByLabelText("Passphrase").getAttribute("aria-describedby")).toBeNull();
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "wrong wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
-    await waitFor(() => expect(dialog.textContent).toContain("doesn't match"));
+    await waitFor(() => expect(dialog.textContent).toContain("doesn’t match"));
     expect(accounts.signIn).not.toHaveBeenCalled();
     expect(screen.getByLabelText<HTMLInputElement>("Passphrase").value).toBe("");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "correct horse" } });
@@ -479,7 +479,7 @@ describe("accounts in Russian", () => {
     expect(dialog.textContent).toContain("Восстановить её нельзя");
     expect(dialog.textContent).toContain("Не менее 8 символов");
     const pass = screen.getByLabelText<HTMLInputElement>("Парольная фраза");
-    const again = screen.getByLabelText<HTMLInputElement>("Парольная фраза ещё раз");
+    const again = screen.getByLabelText<HTMLInputElement>("Повтори парольную фразу");
     fireEvent.change(pass, { target: { value: "long enough words" } });
     fireEvent.change(again, { target: { value: "different" } });
     expect(dialog.textContent).toContain("Парольные фразы не совпадают.");
@@ -510,7 +510,7 @@ describe("accounts in Russian", () => {
     expect(await screen.findByText("У этого аккаунта нет плащей.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Выйти и удалить…" }));
     expect(dialog.textContent).toContain(
-      "Удалить Alex? Профили, миры и время игры останутся как есть.",
+      "Удалить Alex? Профили, миры и время в игре останутся как есть.",
     );
     expect(screen.getByRole("button", { name: "Оставить аккаунт" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Удалить аккаунт" })).toBeTruthy();

@@ -35,13 +35,15 @@ export function OnboardingDialog({ open, onExit }: Props) {
 
   return (
     <Modal open={open} onOpenChange={(o) => !o && onExit("skip")} size="md" closeOnBackdrop={false}>
-      <div key={step} className="animate-in fade-in-0 duration-300">
-        <p className="text-ink-muted mb-5 text-[0.8125rem]">
-          {t("onboarding.step", { current: step + 1, total: STEPS })}
-        </p>
-        {step === 0 && <Welcome />}
-        {step === 1 && <Portable />}
-        {step === 2 && <Ready />}
+      <div aria-live="polite" className="min-w-0">
+        <div key={step} className="animate-in fade-in-0 duration-300">
+          <p className="text-ink-muted mb-5 text-[0.8125rem]">
+            {t("onboarding.step", { current: step + 1, total: STEPS })}
+          </p>
+          {step === 0 && <Welcome />}
+          {step === 1 && <Portable />}
+          {step === 2 && <Ready />}
+        </div>
       </div>
 
       {step === 2 && (

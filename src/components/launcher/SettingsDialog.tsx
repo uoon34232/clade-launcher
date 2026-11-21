@@ -21,11 +21,11 @@ import {
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound, sound } from "@/lib/sound/soundService";
 import { supportApi, type SupportApi, type UpdateProgress } from "@/lib/support/api";
+import { cn } from "@/lib/utils";
 import { CatEgg } from "./CatEgg";
 import { Modal, ModalHeader, ModalSection } from "./Modal";
 import {
-  BUTTON_PRIMARY,
-  BUTTON_QUIET,
+  BUTTON_SMALL_DANGER,
   BUTTON_SMALL_PRIMARY,
   BUTTON_SMALL_QUIET,
   BUTTON_SMALL_SOFT,
@@ -39,6 +39,17 @@ interface Props {
   /** Injectable for tests; the real backend by default. */
   support?: SupportApi;
 }
+
+const VALUE_KEYS = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
 
 type ConfirmAction = "reset" | "retired-vaults" | null;
 
@@ -419,11 +430,13 @@ function SettingsBody({
                       aria-valuenow={downloadPercent ?? undefined}
                       className="bg-graphite/12 h-1.5 w-14 shrink-0 overflow-hidden rounded-full"
                     >
-                      {downloadPercent !== null && (
+                      {downloadPercent !== null ? (
                         <div
                           className="bg-clay h-full rounded-full transition-[width] duration-150"
                           style={{ width: `${downloadPercent}%` }}
                         />
+                      ) : (
+                        <div className="indeterminate-bar bg-clay/70 h-full w-1/3 rounded-full" />
                       )}
                     </div>
                   )}
@@ -443,11 +456,7 @@ function SettingsBody({
                 </span>
               )}
               {errorText && (
-                <span
-                  role="alert"
-                  title={errorText}
-                  className="text-clay-deep max-w-[18rem] truncate text-[0.8125rem]"
-                >
+                <span role="alert" className="text-clay-deep text-[0.8125rem] leading-snug">
                   {errorText}
                 </span>
               )}
@@ -608,9 +617,9 @@ function InterfaceSection({ isAdvanced, disabled }: { isAdvanced: boolean; disab
         </button>
       </Row>
       <div
-        className={`flex items-center gap-4 transition-opacity duration-200 ${s.enabled && !disabled ? "" : "opacity-45"}`}
+        className={`flex items-center gap-3 transition-opacity duration-200 ${s.enabled && !disabled ? "" : "opacity-45"}`}
       >
-        <label htmlFor="ui-volume" className="text-graphite text-[0.9375rem]">
+        <label htmlFor="ui-volume" className="text-graphite shrink-0 text-[0.9375rem]">
           {t("settings.volume")}
         </label>
         <input
@@ -623,10 +632,15 @@ function InterfaceSection({ isAdvanced, disabled }: { isAdvanced: boolean; disab
           value={Math.round(s.volume * 100)}
           onChange={(e) => sound.setSettings({ volume: Number(e.target.value) / 100 })}
           onPointerUp={() => playSound("select")}
-          onKeyUp={() => playSound("select")}
+          onKeyUp={(e) => {
+            if (VALUE_KEYS.has(e.key)) playSound("select");
+          }}
           aria-valuetext={`${Math.round(s.volume * 100)}%`}
-          className="accent-clay focus-visible:ring-clay/45 ml-auto h-6 w-36 cursor-default outline-none focus-visible:ring-2 disabled:cursor-not-allowed"
+          className="accent-clay focus-visible:ring-clay/45 ml-auto h-6 w-32 cursor-default outline-none focus-visible:ring-2 disabled:cursor-not-allowed"
         />
+        <span aria-hidden className="text-ink-muted w-9 text-right text-[0.8125rem] tabular-nums">
+          {Math.round(s.volume * 100)}%
+        </span>
       </div>
 
       {isAdvanced && (
@@ -913,15 +927,15 @@ function SupportSection({
   return (
     <ModalSection title={t("settings.support")} compact>
       {confirmAction === "reset" ? (
-        <div className="flex flex-col gap-3">
-          <p role="alert" className="text-graphite text-[0.9375rem]">
+        <div className="flex flex-col gap-2.5">
+          <p role="alert" className="text-graphite text-[0.875rem] leading-snug">
             {t("settings.resetConfirm")}
           </p>
-          <div className="flex flex-wrap items-center justify-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
               autoFocus
-              className={BUTTON_QUIET}
+              className={BUTTON_SMALL_QUIET}
               onClick={() => {
                 playSound("click");
                 restoreResetFocus.current = true;
@@ -930,7 +944,7 @@ function SupportSection({
             >
               {t("settings.resetKeep")}
             </button>
-            <button type="button" className={BUTTON_PRIMARY} onClick={reset}>
+            <button type="button" className={BUTTON_SMALL_DANGER} onClick={reset}>
               {t("settings.resetDo")}
             </button>
           </div>
@@ -957,7 +971,7 @@ function SupportSection({
             <button
               type="button"
               disabled={clearingVaults}
-              className={BUTTON_SMALL_PRIMARY}
+              className={BUTTON_SMALL_DANGER}
               onClick={clearRetiredVaults}
             >
               {clearingVaults
@@ -968,11 +982,11 @@ function SupportSection({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
               disabled={disabled}
-              className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
+              className={cn(BUTTON_SMALL_SOFT, "px-2.5")}
               onClick={() => run(() => support.openCladeFolder())}
             >
               {t("settings.openFolder")}
@@ -982,14 +996,14 @@ function SupportSection({
                 <button
                   type="button"
                   disabled={disabled}
-                  className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
+                  className={cn(BUTTON_SMALL_SOFT, "px-2.5")}
                   onClick={() => run(() => support.openLogsFolder())}
                 >
                   {t("common.openLogs")}
                 </button>
                 <button
                   type="button"
-                  className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
+                  className={cn(BUTTON_SMALL_SOFT, "px-2.5")}
                   disabled={disabled || exporting}
                   onClick={exportDiagnostics}
                 >
@@ -1001,7 +1015,7 @@ function SupportSection({
               ref={resetTriggerRef}
               type="button"
               disabled={disabled}
-              className={`${BUTTON_SMALL_QUIET} min-w-0 truncate px-2.5`}
+              className={cn(BUTTON_SMALL_QUIET, "px-2.5")}
               onClick={() => {
                 playSound("click");
                 setNotice(null);
@@ -1015,7 +1029,7 @@ function SupportSection({
                 ref={retiredTriggerRef}
                 type="button"
                 disabled={disabled}
-                className={`${BUTTON_SMALL_QUIET} col-span-2 min-w-0 truncate px-2.5`}
+                className={cn(BUTTON_SMALL_QUIET, "px-2.5")}
                 onClick={() => {
                   playSound("click");
                   setNotice(null);

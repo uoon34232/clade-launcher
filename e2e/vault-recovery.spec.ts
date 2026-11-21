@@ -227,7 +227,7 @@ test.describe("in Russian", () => {
     const d = dialog(page);
     await d.getByRole("button", { name: "Не помнишь парольную фразу?" }).click();
     await expect(d.getByRole("heading", { name: "Начать заново?" })).toBeVisible();
-    await expect(d.getByText(/Профили, миры, время игры и настройки сохранятся\./)).toBeVisible();
+    await expect(d.getByText(/Профили, миры, время в игре и настройки сохранятся\./)).toBeVisible();
     await expect(d.getByRole("button", { name: "Продолжить попытки" })).toBeFocused();
     await d.getByRole("button", { name: "Начать заново" }).click();
     await expect(d.getByRole("heading", { name: "Защита аккаунтов" })).toBeVisible();

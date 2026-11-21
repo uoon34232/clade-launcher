@@ -201,11 +201,13 @@ function Body({
             spellCheck={false}
             value={pass}
             onChange={(e) => setPass(e.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? "unlock-pass-error" : undefined}
             className={FIELD}
           />
         </div>
         {error && (
-          <p role="alert" className="text-clay-deep text-[0.875rem]">
+          <p id="unlock-pass-error" role="alert" className="text-clay-deep text-[0.875rem]">
             {error}
           </p>
         )}

@@ -232,7 +232,7 @@ describe("structured backend errors are worded in the current language", () => {
 
   it("builds the disk-space message from byte counts, in both languages", () => {
     expect(describeError("prepare", disk)).toBe(
-      "There isn't enough free space on the drive that holds Clade: about 3.0 GB is needed and 200 MB is available. Free some space and try again.",
+      "There isn’t enough free space on the drive that holds Clade: about 3.0 GB is needed and 200 MB is available. Free some space and try again.",
     );
     setLocale("ru");
     expect(describeError("prepare", disk)).toBe(
@@ -257,7 +257,7 @@ describe("structured backend errors are worded in the current language", () => {
       ),
     ).toBe("A profile named “Survival” already exists.");
     expect(describeCode("profile", "invalid_memory", { min: 1024, max: 12288 })).toBe(
-      "That amount of memory isn't safe for this computer. Choose between 1 GB and 12 GB.",
+      "That amount of memory isn’t safe for this computer. Choose between 1 GB and 12 GB.",
     );
     expect(
       describeCode("profile", "invalid_resolution", {
@@ -268,7 +268,7 @@ describe("structured backend errors are worded in the current language", () => {
       }),
     ).toBe("Choose a window size between 320×240 and 7680×4320.");
     expect(describeCode("profile", "invalid_jvm_args")).toMatch(/safe JVM flags/);
-    expect(describeCode("profile", "open_failed")).toBe("Windows couldn't open that folder.");
+    expect(describeCode("profile", "open_failed")).toBe("Windows couldn’t open that folder.");
     setLocale("ru");
     expect(
       describeError(
@@ -290,7 +290,7 @@ describe("structured backend errors are worded in the current language", () => {
       }),
     ).toBe("Выбери размер окна от 320×240 до 7680×4320.");
     expect(describeCode("profile", "invalid_jvm_args")).toMatch(/безопасные флаги JVM/);
-    expect(describeCode("profile", "open_failed")).toBe("Windows не смог открыть эту папку.");
+    expect(describeCode("profile", "open_failed")).toBe("Не удалось открыть эту папку в Windows.");
     expect(describeCode("launch", "needs_sign_in")).toBe(
       "Этому аккаунту нужно войти снова, чтобы играть.",
     );
@@ -313,7 +313,7 @@ describe("structured backend errors are worded in the current language", () => {
   it("falls back to the domain's general message, then a generic one, for unknown codes", () => {
     expect(describeCode("signIn", "something_new")).toBe("Sign-in failed.");
     expect(describeCode("prepare", null)).toBe("Setup failed.");
-    expect(describeCode("catalog", "storage")).toMatch(/couldn't read or write/);
+    expect(describeCode("catalog", "storage")).toMatch(/couldn’t read or write/);
     setLocale("ru");
     expect(describeCode("vault", "never_heard_of_it")).toBe("Не получилось.");
   });
@@ -323,14 +323,14 @@ describe("structured backend errors are worded in the current language", () => {
       "Could not load the version list. Check your connection and try again.",
     );
     expect(describeCode("signIn", "sign_in_unavailable")).toBe(
-      "Microsoft sign-in isn't available in this build yet.",
+      "Microsoft sign-in isn’t available in this build yet.",
     );
-    expect(describeCode("settings", "unsupported_language")).toBe("That language isn't supported.");
+    expect(describeCode("settings", "unsupported_language")).toBe("That language isn’t supported.");
     expect(describeCode("launch", "unsupported_folder_path")).toBe(
-      "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
+      "Clade can’t run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
     );
     expect(describeCode("settings", "unsupported_folder_path")).toBe(
-      "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
+      "Clade can’t run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
     );
 
     setLocale("ru");

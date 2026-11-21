@@ -266,7 +266,12 @@ function Flow({
             value={pass}
             onChange={(e) => setPass(e.target.value)}
             className={FIELD}
-            aria-describedby={creating ? "vault-pass-note" : undefined}
+            aria-invalid={fieldError ? true : undefined}
+            aria-describedby={
+              [creating ? "vault-pass-note" : null, fieldError ? "vault-pass-error" : null]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
           />
           {creating && (
             <span id="vault-pass-note" className="text-ink-muted text-[0.8125rem]">
@@ -298,7 +303,7 @@ function Flow({
           </div>
         )}
         {fieldError && (
-          <p role="alert" className="text-clay-deep text-[0.875rem]">
+          <p id="vault-pass-error" role="alert" className="text-clay-deep text-[0.875rem]">
             {fieldError}
           </p>
         )}

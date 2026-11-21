@@ -345,7 +345,7 @@ describe("Profile settings dialog", () => {
 
     // Control characters
     fireEvent.change(input, { target: { value: "Bad\u0007Name" } });
-    expect(d.getByRole("alert").textContent).toBe("The name can't contain control characters.");
+    expect(d.getByRole("alert").textContent).toBe("The name can’t contain control characters.");
     expect(save().disabled).toBe(true);
 
     // Duplicate of another profile (case-insensitive)
@@ -443,7 +443,7 @@ describe("Profile settings dialog", () => {
     fireEvent.change(slider, { target: { value: "8192" } });
     fireEvent.pointerUp(slider);
     expect((await d.findByRole("alert")).textContent).toBe(
-      "That amount of memory isn't safe for this computer. Choose between 1 GB and 12 GB.",
+      "That amount of memory isn’t safe for this computer. Choose between 1 GB and 12 GB.",
     );
 
     // Back to Launcher default
@@ -565,7 +565,7 @@ describe("Profile settings dialog", () => {
 
     api.openFolder.mockRejectedValueOnce(new BackendError("explorer failed", "open_failed"));
     fireEvent.click(d.getByRole("button", { name: "Open profile folder" }));
-    expect((await d.findByRole("alert")).textContent).toBe("Windows couldn't open that folder.");
+    expect((await d.findByRole("alert")).textContent).toBe("Windows couldn’t open that folder.");
 
     // Verify files delegates to PrepareDialog ({ verify: true })
     fireEvent.click(d.getByRole("button", { name: "Verify files" }));
@@ -711,7 +711,9 @@ describe("Profile settings and unreadable notice in Russian", () => {
     fireEvent.click(d.getByRole("button", { name: "Открыть папку профиля" }));
     await waitFor(() =>
       expect(
-        d.getAllByRole("alert").some((a) => a.textContent === "Windows не смог открыть эту папку."),
+        d
+          .getAllByRole("alert")
+          .some((a) => a.textContent === "Не удалось открыть эту папку в Windows."),
       ).toBe(true),
     );
   });

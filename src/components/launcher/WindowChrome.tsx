@@ -60,7 +60,7 @@ export function WindowChrome({ framed = false, maximized = false, onToggleMaximi
   };
 
   const btn = `window-btn grid h-8 w-10 cursor-default place-items-center rounded-lg text-graphite ${
-    framed ? "opacity-65" : "opacity-45"
+    framed ? "opacity-65" : "opacity-60"
   } transition-[opacity,background-color] duration-150 outline-none hover:bg-graphite/[0.07] hover:opacity-100 active:bg-graphite/[0.12]`;
 
   const blurIfPointerOrFramed = (el: HTMLButtonElement, detail: number) => {

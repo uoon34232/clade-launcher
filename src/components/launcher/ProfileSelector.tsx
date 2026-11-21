@@ -99,7 +99,7 @@ export function ProfileSelector({
         side="top"
         align="center"
         sideOffset={14}
-        className="glass-menu flex max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
+        className="glass-menu flex max-h-[min(28rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
       >
         {/* Only the list of profiles scrolls; profile actions stay in view below it. */}
         <div className="menu-scroll min-h-0 flex-1 overflow-y-auto">

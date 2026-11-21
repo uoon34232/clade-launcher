@@ -220,7 +220,7 @@ describe("setting a profile up", () => {
         "offline",
       ),
     );
-    expect(dialog.textContent).toContain("Can't reach the network");
+    expect(dialog.textContent).toContain("Can’t reach the network");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(api.prepare).toHaveBeenCalledTimes(2));
     expect(dialog.textContent).toContain("Preparing Minecraft");

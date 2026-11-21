@@ -121,7 +121,7 @@ describe("Forgot passphrase wording and cleanup", () => {
     expect(screen.getByText("Начать заново?")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Продолжить попытки" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Начать заново" })).toBeTruthy();
-    expect(screen.getByText(/Профили, миры, время игры и настройки сохранятся\./)).toBeTruthy();
+    expect(screen.getByText(/Профили, миры, время в игре и настройки сохранятся\./)).toBeTruthy();
   });
 
   it("never leaves the dialog around it locked when it goes away while asking", () => {

@@ -237,7 +237,7 @@ export function AccountAppearance({
             </button>
           </div>
           {confirmingReset ? (
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-3">
               <p className="text-graphite mr-auto min-w-[14rem] flex-1 text-[0.8125rem]">
                 {t("accountModal.resetConfirm")}
               </p>
@@ -451,6 +451,8 @@ function Notice({
                     spellCheck={false}
                     value={pass}
                     onChange={(e) => setPass(e.target.value)}
+                    aria-invalid={unlockError ? true : undefined}
+                    aria-describedby={unlockError ? "appearance-unlock-error" : undefined}
                     className={FIELD}
                   />
                 </div>
@@ -462,7 +464,11 @@ function Notice({
                   {busy ? t("common.working") : t("common.unlock")}
                 </button>
                 {unlockError && (
-                  <p role="alert" className="text-clay-deep w-full text-[0.875rem]">
+                  <p
+                    id="appearance-unlock-error"
+                    role="alert"
+                    className="text-clay-deep w-full text-[0.875rem]"
+                  >
                     {unlockError}
                   </p>
                 )}

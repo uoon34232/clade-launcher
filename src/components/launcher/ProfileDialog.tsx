@@ -36,11 +36,13 @@ import {
 } from "@/lib/profiles/api";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
+import { cn } from "@/lib/utils";
 import { Modal, ModalFooter, ModalHeader, ModalSection } from "./Modal";
 import {
   BUTTON_DANGER,
-  BUTTON_PRIMARY,
   BUTTON_QUIET,
+  BUTTON_SMALL_PRIMARY,
+  BUTTON_SMALL_QUIET,
   BUTTON_SMALL_SOFT,
   BUTTON_SOFT,
   FIELD,
@@ -257,6 +259,10 @@ function Body({
     nextJvmArgs.every((arg, i) => arg === savedJvmArgs[i]);
 
   const [changingVersion, setChangingVersion] = useState(false);
+  const changeVersionBtnRef = useRef<HTMLButtonElement>(null);
+  const restoreVersionFocus = () => {
+    window.requestAnimationFrame(() => changeVersionBtnRef.current?.focus());
+  };
   const [renaming, setRenaming] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -429,12 +435,12 @@ function Body({
             maxLength={80}
             aria-invalid={showNameError ? true : undefined}
             aria-describedby={showNameError ? "profile-edit-name-error" : undefined}
-            className={`${FIELD} h-10 min-w-0 flex-1`}
+            className={cn(FIELD, "h-10 min-w-0 flex-1")}
           />
           <button
             type="submit"
             disabled={unchanged || nameError !== null || running || saving}
-            className={`${BUTTON_SOFT} h-10 shrink-0 px-4`}
+            className={cn(BUTTON_SOFT, "h-10 shrink-0 px-4")}
           >
             {renaming ? t("profileModal.saving") : t("profileModal.saveName")}
           </button>
@@ -467,6 +473,7 @@ function Body({
         </dl>
         {!changingVersion && (
           <button
+            ref={changeVersionBtnRef}
             type="button"
             disabled={running || saving}
             className={BUTTON_SMALL_SOFT}
@@ -492,10 +499,12 @@ function Body({
             playSound("click");
             setChangingVersion(false);
             setDirty(computeDirty({ changingVersion: false }));
+            restoreVersionFocus();
           }}
           onSaved={(snapshot) => {
             setChangingVersion(false);
             setDirty(computeDirty({ changingVersion: false }));
+            restoreVersionFocus();
             onUpdated(snapshot);
           }}
         />
@@ -643,7 +652,7 @@ function Body({
         ]}
       />
       {savedRes !== null ? (
-        <form onSubmit={saveResolution} className="flex items-center gap-1.5" noValidate>
+        <form onSubmit={saveResolution} className="flex flex-wrap items-center gap-1.5" noValidate>
           <input
             type="text"
             inputMode="numeric"
@@ -660,7 +669,9 @@ function Body({
               setDirty(computeDirty({ resDirty }));
             }}
             aria-label={t("profileModal.resolutionWidth")}
-            className={`${FIELD_COMPACT} w-16 shrink-0 text-center tabular-nums`}
+            aria-invalid={resolutionError ? true : undefined}
+            aria-describedby={resolutionError ? "profile-resolution-error" : undefined}
+            className={cn(FIELD_COMPACT, "w-16 shrink-0 text-center tabular-nums")}
           />
           <span aria-hidden className="text-ink-muted text-[0.875rem]">
             ×
@@ -681,21 +692,24 @@ function Body({
               setDirty(computeDirty({ resDirty }));
             }}
             aria-label={t("profileModal.resolutionHeight")}
-            className={`${FIELD_COMPACT} w-16 shrink-0 text-center tabular-nums`}
+            aria-invalid={resolutionError ? true : undefined}
+            aria-describedby={resolutionError ? "profile-resolution-error" : undefined}
+            className={cn(FIELD_COMPACT, "w-16 shrink-0 text-center tabular-nums")}
           />
           <button
             type="submit"
             disabled={running || saving || resolutionSaving || resolutionUnchanged}
-            className={`${BUTTON_SMALL_SOFT} ml-auto h-9 shrink-0 px-3`}
+            aria-label={t("profileModal.applyResolution")}
+            className={cn(BUTTON_SMALL_SOFT, "ml-auto h-9 shrink-0 px-3")}
           >
-            {t("profileModal.applyResolution")}
+            {t("common.apply")}
           </button>
         </form>
       ) : (
         <p className="text-ink-muted text-[0.8125rem]">{t("profileModal.resolutionDefaultNote")}</p>
       )}
       {resolutionError && (
-        <p role="alert" className="text-clay-deep text-[0.8125rem]">
+        <p id="profile-resolution-error" role="alert" className="text-clay-deep text-[0.8125rem]">
           {resolutionError}
         </p>
       )}
@@ -724,22 +738,27 @@ function Body({
             spellCheck={false}
             placeholder={t("profileModal.jvmArgsPlaceholder")}
             aria-label={t("profileModal.jvmArgs")}
-            className={`${FIELD} h-9 min-w-0 flex-1 text-[0.8125rem]`}
+            aria-invalid={jvmError ? true : undefined}
+            aria-describedby={jvmError ? "profile-jvm-error" : "profile-jvm-note"}
+            className={cn(FIELD, "h-9 min-w-0 flex-1 text-[0.8125rem]")}
           />
           <button
             type="submit"
             disabled={running || saving || jvmSaving || jvmUnchanged}
-            className={`${BUTTON_SMALL_SOFT} h-9 shrink-0 px-3`}
+            aria-label={t("profileModal.applyJvmArgs")}
+            className={cn(BUTTON_SMALL_SOFT, "h-9 shrink-0 px-3")}
           >
-            {t("profileModal.applyJvmArgs")}
+            {t("common.apply")}
           </button>
         </div>
         {jvmError ? (
-          <p role="alert" className="text-clay-deep text-[0.8125rem]">
+          <p id="profile-jvm-error" role="alert" className="text-clay-deep text-[0.8125rem]">
             {jvmError}
           </p>
         ) : (
-          <p className="text-ink-muted text-[0.8125rem]">{t("profileModal.jvmArgsNote")}</p>
+          <p id="profile-jvm-note" className="text-ink-muted text-[0.8125rem]">
+            {t("profileModal.jvmArgsNote")}
+          </p>
         )}
       </form>
     </ModalSection>
@@ -774,7 +793,7 @@ function Body({
         <button
           type="button"
           disabled={removeDisabled || saving}
-          className={`${BUTTON_DANGER} mr-auto`}
+          className={cn(BUTTON_DANGER, "mr-auto")}
           onClick={() => {
             playSound("click");
             onRemove();
@@ -785,7 +804,7 @@ function Body({
         <button
           type="button"
           disabled={running || saving}
-          className={BUTTON_SOFT}
+          className={BUTTON_QUIET}
           onClick={duplicateProfile}
         >
           {duplicating ? t("profileModal.duplicating") : t("profileModal.duplicate")}
@@ -828,6 +847,10 @@ function VersionEditor({
   onSaved,
 }: VersionEditorProps) {
   const t = useT();
+  const editorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    editorRef.current?.focus();
+  }, []);
   const [reload, setReload] = useState(0);
   const [filter, setFilter] = useState<VersionFilter>("releases");
   const [catalogResult, setCatalogResult] = useState<{
@@ -981,7 +1004,11 @@ function VersionEditor({
       : null;
 
   return (
-    <div className="bg-sand/35 ring-graphite/10 mt-1 flex flex-col gap-2.5 rounded-2xl p-3 ring-1">
+    <div
+      ref={editorRef}
+      tabIndex={-1}
+      className="bg-sand/35 ring-graphite/10 mt-1 flex flex-col gap-2.5 rounded-2xl p-3 ring-1 outline-none"
+    >
       <div className="flex min-w-0 flex-col gap-1">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <span id="profile-edit-mc-label" className={LABEL}>
@@ -1018,7 +1045,7 @@ function VersionEditor({
           >
             <SelectTrigger
               aria-labelledby="profile-edit-mc-label"
-              className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3`}
+              className={cn(FIELD, "h-9 min-w-0 justify-between border-0 py-0 pr-3")}
             >
               <SelectValue placeholder={t("create.choose")} />
             </SelectTrigger>
@@ -1030,7 +1057,7 @@ function VersionEditor({
               {shown.map((e) => (
                 <SelectItem key={e.id} value={e.id} className="rounded-lg py-1.5">
                   <span className="flex-1">{e.id}</span>
-                  <span className="text-cream/45 pr-4 text-[0.75rem] tabular-nums">
+                  <span className="text-cream/55 pr-4 text-[0.75rem] tabular-nums">
                     {releaseDay(e.releaseTime)}
                   </span>
                 </SelectItem>
@@ -1038,7 +1065,7 @@ function VersionEditor({
             </SelectContent>
           </Select>
         ) : (
-          <div className={`${FIELD} text-ink-muted flex h-9 items-center`} aria-live="polite">
+          <div className={cn(FIELD, "text-ink-muted flex h-9 items-center")} aria-live="polite">
             {catalog.status === "loading" ? t("create.loading") : t("create.unavailable")}
           </div>
         )}
@@ -1069,7 +1096,11 @@ function VersionEditor({
               <span id="profile-edit-loader-label" className={LABEL}>
                 {t("profileModal.loaderVersionFor", { loader: LOADER_NAMES[moddedLoader] })}
               </span>
-              {loaderIssue && <span className="text-clay-deep text-[0.75rem]">{loaderIssue}</span>}
+              {loaderIssue && (
+                <span role="alert" className="text-clay-deep text-[0.75rem]">
+                  {loaderIssue}
+                </span>
+              )}
             </div>
             <Select
               value={chosenLoaderVersion}
@@ -1091,7 +1122,10 @@ function VersionEditor({
             >
               <SelectTrigger
                 aria-labelledby="profile-edit-loader-label"
-                className={`${FIELD} h-9 min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+                className={cn(
+                  FIELD,
+                  "h-9 min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50",
+                )}
               >
                 <SelectValue
                   placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
@@ -1105,7 +1139,7 @@ function VersionEditor({
                 {(currentLoader?.versions ?? []).map((v) => (
                   <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
                     <span className="flex-1">{v.version}</span>
-                    <span className="text-cream/45 pr-4 text-[0.75rem]">
+                    <span className="text-cream/55 pr-4 text-[0.75rem]">
                       {v.version === currentLoader?.recommended
                         ? t("create.channel.recommended")
                         : t(CHANNEL_NOTE[v.channel])}
@@ -1116,7 +1150,9 @@ function VersionEditor({
             </Select>
           </div>
         ) : loaderIssue ? (
-          <p className="text-clay-deep text-[0.75rem]">{loaderIssue}</p>
+          <p role="alert" className="text-clay-deep text-[0.75rem]">
+            {loaderIssue}
+          </p>
         ) : null)}
 
       <p className="text-ink-muted text-[0.8125rem]">
@@ -1130,14 +1166,14 @@ function VersionEditor({
       )}
 
       <div className="flex items-center justify-end gap-2">
-        <button type="button" disabled={saving} onClick={onCancel} className={BUTTON_QUIET}>
+        <button type="button" disabled={saving} onClick={onCancel} className={BUTTON_SMALL_QUIET}>
           {t("common.cancel")}
         </button>
         <button
           type="button"
           disabled={!canSave}
           onClick={saveVersion}
-          className={`${BUTTON_PRIMARY} h-9 px-4 text-[0.8125rem]`}
+          className={BUTTON_SMALL_PRIMARY}
         >
           {saving ? t("profileModal.saving") : t("profileModal.saveVersion")}
         </button>

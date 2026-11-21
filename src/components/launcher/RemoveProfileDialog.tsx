@@ -98,7 +98,7 @@ function Body({
   return (
     <>
       <ModalHeader title={t("removeProfile.title", { profile: profile.name })} />
-      <p className="text-graphite mt-4 text-[0.9375rem] leading-relaxed">
+      <p className="text-graphite mb-5 text-[0.9375rem] leading-relaxed">
         {t("removeProfile.body")}
       </p>
       {error && (
