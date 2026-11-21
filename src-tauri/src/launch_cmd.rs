@@ -109,6 +109,7 @@ struct Entry {
 struct StateInner {
     sessions: HashMap<String, Entry>,
     exit_when_idle: bool,
+    closing: bool,
 }
 
 /// The running games, managed by Tauri.
@@ -125,6 +126,7 @@ impl LaunchState {
             sessions: Mutex::new(StateInner {
                 sessions: HashMap::new(),
                 exit_when_idle: false,
+                closing: false,
             }),
             locks: Arc::new(ProfileLocks::default()),
         }
@@ -149,6 +151,9 @@ impl LaunchState {
     /// already starting or running (`Launching`), or its files are being prepared (`Preparing`).
     pub fn claim_checked(&self, id: &InstanceId) -> Result<(), Activity> {
         let mut inner = self.lock();
+        if inner.closing {
+            return Err(Activity::Launching);
+        }
         if inner.sessions.contains_key(id.as_str()) {
             return Err(Activity::Launching);
         }
@@ -193,7 +198,8 @@ impl LaunchState {
     }
 
     /// Called when the window is asked to close: under one lock, if any game process is alive, sets
-    /// `exit_when_idle = true` and returns `true` (hide instead of quitting); otherwise returns `false`.
+    /// `exit_when_idle = true` and returns `true` (hide instead of quitting); otherwise latches
+    /// `closing = true` and returns `false` so pre-spawn launches cannot spawn after close starts.
     pub fn close_requested(&self) -> bool {
         let mut inner = self.lock();
         if inner.sessions.values().any(|e| e.pid.is_some()) {
@@ -201,8 +207,14 @@ impl LaunchState {
             true
         } else {
             inner.exit_when_idle = false;
+            inner.closing = true;
             false
         }
+    }
+
+    /// True once [`Self::close_requested`] has allowed the window to exit.
+    pub fn is_closing(&self) -> bool {
+        self.lock().closing
     }
 
     /// Is a game process alive (started and not yet exited)? Closing the window while this is
@@ -481,6 +493,9 @@ pub async fn launch_profile(
 ) -> Result<(), LaunchFailure> {
     let iid =
         InstanceId::new(&id).map_err(|_| fail("not_found", "That profile no longer exists."))?;
+    if state.is_closing() {
+        return Err(fail("spawn_failed", "Clade is closing."));
+    }
     match state.claim_checked(&iid) {
         Ok(()) => {}
         Err(Activity::Launching) => {
@@ -503,7 +518,9 @@ pub async fn launch_profile(
         state.release(&iid);
         emit(&app, &iid, "stopped", None);
         // A launch that could not start is always shown, even if the window was hidden.
-        reveal(&app);
+        if !state.is_closing() {
+            reveal(&app);
+        }
     }
     result
 }
@@ -572,13 +589,21 @@ async fn start(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
-    let child = process
-        .spawn()
-        .map_err(|e| fail("spawn_failed", format!("Java could not be started: {e}")))?;
-
-    let pid = child.id().unwrap_or(0);
-    state.set_pid(id, pid);
-    tracing::info!(pid, "game process started");
+    let (child, pid) = {
+        let mut inner = state.lock();
+        if inner.closing {
+            return Err(fail("spawn_failed", "Clade is closing."));
+        }
+        let child = process
+            .spawn()
+            .map_err(|e| fail("spawn_failed", format!("Java could not be started: {e}")))?;
+        let pid = child.id().unwrap_or(0);
+        if let Some(e) = inner.sessions.get_mut(id.as_str()) {
+            e.pid = Some(pid);
+        }
+        tracing::info!(pid, "game process started");
+        (child, pid)
+    };
 
     // The playtime session starts only now, after a successful spawn.
     let tracker =

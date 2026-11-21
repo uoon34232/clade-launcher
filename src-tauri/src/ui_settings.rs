@@ -110,7 +110,9 @@ impl UiSettingsDto {
             },
             on_launch: s.behavior.on_launch.clone(),
             on_exit: s.behavior.on_exit.clone(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: crate::update_check::installed_version_tag()
+                .trim_start_matches('v')
+                .to_owned(),
         }
     }
 }
@@ -442,7 +444,9 @@ mod tests {
                 memory: dto.memory.clone(),
                 on_launch: "embed".into(),
                 on_exit: "show".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
+                version: crate::update_check::installed_version_tag()
+                    .trim_start_matches('v')
+                    .into(),
             }
         );
         assert!(dto.memory.min <= dto.memory.auto.max(dto.memory.min));

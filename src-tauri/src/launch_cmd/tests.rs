@@ -710,19 +710,29 @@ fn close_requested_and_finish_session_are_atomic_and_eliminate_the_zombie_race()
     let a = InstanceId::new("alpha").unwrap();
     let b = InstanceId::new("bravo").unwrap();
 
-    // No game or still before PID exists: CloseRequested lets Tauri close immediately.
-    assert!(!s.close_requested());
-    assert!(!s.exit_when_idle());
-    assert!(s.claim(&a));
-    assert!(!s.close_requested());
-    assert!(!s.exit_when_idle());
+    // No game or still before PID exists: CloseRequested lets Tauri close immediately and
+    // latches `closing` so late pre-spawn launches or new claims are rejected.
+    let closing_idle = LaunchState::new(PortableRoot::at(d.path()));
+    assert!(!closing_idle.close_requested());
+    assert!(closing_idle.is_closing());
+    assert!(!closing_idle.exit_when_idle());
+    assert!(!closing_idle.claim(&a));
 
-    // Two live games: CloseRequested hides and sets exit_when_idle atomically; finishing the first
-    // reports another_running = true, finishing the second reports another_running = false.
+    let closing_pre_spawn = LaunchState::new(PortableRoot::at(d.path()));
+    assert!(closing_pre_spawn.claim(&a));
+    assert!(!closing_pre_spawn.close_requested());
+    assert!(closing_pre_spawn.is_closing());
+    assert!(!closing_pre_spawn.exit_when_idle());
+    assert!(!closing_pre_spawn.claim(&b));
+
+    // Two live games: CloseRequested hides, sets exit_when_idle atomically, and does not latch
+    // `closing`; finishing the first reports another_running = true, second reports false.
+    assert!(s.claim(&a));
     s.set_pid(&a, 1001);
     assert!(s.claim(&b));
     s.set_pid(&b, 1002);
     assert!(s.close_requested());
+    assert!(!s.is_closing());
     assert!(s.exit_when_idle());
     assert_eq!(s.finish_session(&a), (true, true));
     assert_eq!(s.finish_session(&b), (true, false));

@@ -104,8 +104,10 @@ if (-not $SkipBuild) {
     [System.IO.File]::WriteAllText($cargoCfg, $tomlText, (New-Object System.Text.UTF8Encoding($false)))
 
     # The C code that is compiled into the binary (the TLS library) records its source paths too; MSVC's
-    # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered.
-    $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
+    # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered; paths
+    # containing spaces are skipped here because cc-rs splits CFLAGS on whitespace, while their space-free
+    # 8.3 short paths remain in $forbid.
+    $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ }) -join ' '
     if ($Tag) { $env:CLADE_RELEASE_TAG = $Tag } else { Remove-Item -LiteralPath Env:CLADE_RELEASE_TAG -ErrorAction SilentlyContinue }
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE) { throw 'pnpm install failed' }

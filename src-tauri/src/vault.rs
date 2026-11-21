@@ -39,7 +39,7 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::portable::fsutil::{atomic_write, read_bounded};
+use crate::portable::fsutil::{atomic_write, is_link, read_bounded};
 
 const MAGIC: &[u8; 8] = b"LNCHVLT\0";
 const FORMAT_VERSION: u8 = 1;
@@ -319,14 +319,41 @@ fn write_encrypted(
     out.extend_from_slice(&ct);
 
     let bak = bak_path(path);
+    for candidate in [path, &bak] {
+        match is_link(candidate) {
+            Ok(true) => {
+                return Err(VaultError::Io(io::Error::other(
+                    "refusing to write vault through a link",
+                )));
+            }
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(VaultError::Io(e)),
+        }
+    }
     // Keep one previous generation in case the new file is damaged by a yanked stick, unless
-    // revoking credentials or rotating the passphrase (where `.bak` is overwritten instead).
-    if !overwrite_bak && path.exists() {
-        let _ = fs::copy(path, &bak);
+    // revoking credentials or rotating the passphrase (where `.bak` is overwritten atomically instead).
+    if !overwrite_bak && fs::symlink_metadata(path).is_ok() {
+        match fs::read(path) {
+            Ok(prev) => {
+                if let Err(e) = atomic_write(&bak, &prev) {
+                    tracing::warn!(error = %e, "could not update backup vault");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not read previous vault for backup"),
+        }
     }
     atomic_write(path, &out)?;
-    if overwrite_bak && bak.exists() {
-        let _ = atomic_write(&bak, &out);
+    if overwrite_bak && fs::symlink_metadata(&bak).is_ok() {
+        if let Err(write_err) = atomic_write(&bak, &out) {
+            if let Err(remove_err) = fs::remove_file(&bak) {
+                tracing::warn!(
+                    error = %remove_err,
+                    "could not remove stale backup vault after overwrite failure"
+                );
+                return Err(VaultError::Io(write_err));
+            }
+        }
     }
     Ok(())
 }
@@ -886,5 +913,27 @@ mod tests {
     fn debug_output_never_contains_secrets() {
         let s = secrets("LEAKY");
         assert!(!format!("{s:?}").contains("LEAKY"));
+    }
+
+    #[test]
+    fn write_encrypted_backs_up_atomically_and_propagates_overwrite_bak_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.bin");
+        let bak = bak_path(&p);
+        let mut v = Vault::create_with(&p, PW, FAST).unwrap();
+        v.set_account("a", secrets("first")).unwrap();
+        assert!(bak.is_file(), "normal save creates atomic .bak backup");
+        assert!(Vault::unlock(&bak, PW).is_ok());
+
+        // Replace `.bak` with a non-empty directory so neither atomic overwrite nor `remove_file`
+        // can clear it when rotating credentials (`overwrite_bak = true`).
+        fs::remove_file(&bak).unwrap();
+        fs::create_dir(&bak).unwrap();
+        fs::write(bak.join("pinned"), b"block-remove").unwrap();
+        let err = v.change_passphrase("new stronger passphrase");
+        assert!(
+            matches!(err, Err(VaultError::Io(_))),
+            "overwrite_bak failure must be reported when stale backup cannot be removed: {err:?}"
+        );
     }
 }

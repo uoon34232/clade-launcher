@@ -43,7 +43,7 @@ Security-sensitive areas include:
 - Forge / NeoForge installer sandboxing;
 - Minecraft process construction and environment isolation;
 - log redaction;
-- future self-update verification.
+- in-app portable self-update download, verification, and swap integrity.
 
 ## Secrets and logs
 

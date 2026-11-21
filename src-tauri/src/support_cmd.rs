@@ -53,7 +53,7 @@ fn build_export(
         root,
         launcher_settings,
         &Facts {
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::update_check::installed_version_tag().trim_start_matches('v'),
             layout_version: crate::portable::root::LAYOUT_VERSION,
             webview,
             webview_version,

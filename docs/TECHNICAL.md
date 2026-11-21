@@ -40,7 +40,7 @@ Two requirements shape most of the design:
 
 You need:
 
-- Rust (stable, MSVC toolchain) and the Visual Studio C++ build tools;
+- Rust (the toolchain pinned in `rust-toolchain.toml`, MSVC toolchain) and the Visual Studio C++ build tools;
 - Node.js and pnpm (the exact pnpm version is pinned in `package.json`);
 - the Microsoft Edge WebView2 Runtime for development (present on current Windows 10/11).
 
@@ -78,7 +78,7 @@ During development Clade keeps its data in `src-tauri/target/debug/clade-root`, 
 
 ```
 src-tauri/src/    Rust backend: every privileged operation
-src-tauri/tests/  guard tests (portability, product rules, icon)
+src-tauri/tests/  guard tests (portability, product rules, icon, window rules)
 src/              React frontend: views, localization, a typed IPC layer
 src/locales/      English and Russian catalogs
 docs/             documentation and published media
@@ -114,7 +114,7 @@ Clade-Launcher/
 ├─ libraries/   shared libraries
 ├─ assets/      shared game assets
 ├─ runtimes/    java/ and webview2/
-├─ cache/       scratch, catalog and skin (avatar) caches
+├─ cache/       scratch (`tmp/game/`), catalog, skin (avatar), and staged update (`updates/`) caches
 └─ logs/
 ```
 
@@ -273,7 +273,7 @@ There is **no offline, guest or cracked mode**, and none must be added.
 
 **JVM defaults.** `-Xmx` is a quarter of the RAM (at least 2 GiB, at most 8 GiB, never more than half the machine); a profile can override memory and add its own validated arguments.
 
-**Isolation.** The game runs with its working directory and game directory set to the profile's `game/` folder. Its environment is cleared and rebuilt: the Windows system directory, `TEMP`/`TMP` pointing into `cache/game-tmp/<id>`, and `USERPROFILE`/`HOME`/`APPDATA`/`LOCALAPPDATA` pointing into the profile's `home/`. Nothing a game or a mod writes by default lands on the machine. `JAVA_HOME`, `CLASSPATH` and similar variables are not passed. The game is started directly, with no shell, using the verified `java.exe` and no console window.
+**Isolation.** The game runs with its working directory and game directory set to the profile's `game/` folder. Its environment is cleared and rebuilt: the Windows system directory, `TEMP`/`TMP` pointing into `cache/tmp/game/<id>`, and `USERPROFILE`/`HOME`/`APPDATA`/`LOCALAPPDATA` pointing into the profile's `home/`. Nothing a game or a mod writes by default lands on the machine. `JAVA_HOME`, `CLASSPATH` and similar variables are not passed. The game is started directly, with no shell, using the verified `java.exe` and no console window.
 
 **Secrets.** The access token exists only inside a `Secret` and the argument vector. The command's `Debug` output and its redacted form hide the token and show the Clade folder as `<clade>`; every session-log line also passes a redactor built from the session's secrets.
 

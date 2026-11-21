@@ -200,6 +200,16 @@ function install(cfg: BackendConfig): void {
     "-xx:logfile",
     "-xx:sharedarchivefile",
     "-xx:archiveclassesatexit",
+    "-xx:flags",
+    "-xx:maxheapsize",
+    "-xx:initialheapsize",
+    "-xx:startflightrecording",
+    "-xx:flightrecorderoptions",
+    "-xx:dumploadedclasslist",
+    "-xx:compilecommandfile",
+    "-xx:sharedarchiveconfigfile",
+    "-xx:perfdatasavefile",
+    "-xx:replaydatafile",
     "-duser.home",
     "-duser.dir",
     "-djava.io.tmpdir",
@@ -221,6 +231,16 @@ function install(cfg: BackendConfig): void {
     "logfile",
     "sharedarchivefile",
     "archiveclassesatexit",
+    "flags",
+    "maxheapsize",
+    "initialheapsize",
+    "startflightrecording",
+    "flightrecorderoptions",
+    "dumploadedclasslist",
+    "compilecommandfile",
+    "sharedarchiveconfigfile",
+    "perfdatasavefile",
+    "replaydatafile",
   ]);
   const isAllowedJvmArg = (a: string): boolean => {
     const xxRest = a.startsWith("-XX:+")
@@ -305,14 +325,19 @@ function install(cfg: BackendConfig): void {
         if (typeof args.enabled === "boolean") state.ui.soundEnabled = args.enabled;
         if (typeof args.volume === "number") state.ui.soundVolume = args.volume;
         emit("ui-settings-changed", clone(state.ui));
-        return null;
+        return clone(state.ui);
       case "set_language":
         state.ui.language = args.language as "en" | "ru";
         emit("ui-settings-changed", clone(state.ui));
         return null;
-      case "set_last_phrase":
-        state.ui.lastPhrase = args.id as string;
+      case "set_last_phrase": {
+        const next = args.id as string;
+        if (state.ui.lastPhrase !== next) {
+          state.ui.lastPhrase = next;
+          emit("ui-settings-changed", clone(state.ui));
+        }
         return null;
+      }
       case "set_ui_mode": {
         const mode = args.mode;
         if (mode !== "simple" && mode !== "advanced") {
@@ -444,6 +469,12 @@ function install(cfg: BackendConfig): void {
       case "apply_staged_update": {
         if (Object.keys(state.runs).length > 0) {
           return fail("update_game_running", "Close Minecraft before updating Clade.");
+        }
+        if (pendingPrepare) {
+          return fail(
+            "update_prepare_running",
+            "Wait for profile setup to finish before updating.",
+          );
         }
         if (state.updateStatus.stage !== "ready") {
           return fail("update_install_failed", "No staged update is ready.");
@@ -719,7 +750,9 @@ function install(cfg: BackendConfig): void {
               };
         };
         if (state.profiles.some((p) => p.name.toLowerCase() === req.name.trim().toLowerCase()))
-          return fail("duplicate_name", "A profile with this name already exists.");
+          return fail("duplicate_name", "A profile with this name already exists.", {
+            params: { name: req.name.trim() },
+          });
         const modded = req.profile.type === "modded" ? req.profile : null;
         const id = `${slug(req.name)}-${state.profiles.length + 1}`;
         state.profiles.push({

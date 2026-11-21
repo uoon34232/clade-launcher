@@ -402,6 +402,16 @@ const FORBIDDEN_JVM_PREFIXES: &[&str] = &[
     "-xx:logfile",
     "-xx:sharedarchivefile",
     "-xx:archiveclassesatexit",
+    "-xx:flags",
+    "-xx:maxheapsize",
+    "-xx:initialheapsize",
+    "-xx:startflightrecording",
+    "-xx:flightrecorderoptions",
+    "-xx:dumploadedclasslist",
+    "-xx:compilecommandfile",
+    "-xx:sharedarchiveconfigfile",
+    "-xx:perfdatasavefile",
+    "-xx:replaydatafile",
     "-duser.home",
     "-duser.dir",
     "-djava.io.tmpdir",
@@ -424,6 +434,16 @@ const FORBIDDEN_XX_OPTS: &[&str] = &[
     "logfile",
     "sharedarchivefile",
     "archiveclassesatexit",
+    "flags",
+    "maxheapsize",
+    "initialheapsize",
+    "startflightrecording",
+    "flightrecorderoptions",
+    "dumploadedclasslist",
+    "compilecommandfile",
+    "sharedarchiveconfigfile",
+    "perfdatasavefile",
+    "replaydatafile",
 ];
 
 fn is_allowed_jvm_arg(a: &str) -> bool {
@@ -2044,7 +2064,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(with_jvm.extra_jvm_args.len(), 2);
-        for forbidden in ["-Xmx4G", "-javaagent:evil.jar", "-cp", "plain"] {
+        for forbidden in [
+            "-Xmx4G",
+            "-javaagent:evil.jar",
+            "-cp",
+            "plain",
+            "-XX:Flags=evil.flags",
+            "-XX:MaxHeapSize=8G",
+            "-XX:InitialHeapSize=4G",
+            "-XX:StartFlightRecording=filename=evil.jfr",
+            "-XX:FlightRecorderOptions=repository=evil",
+            "-XX:DumpLoadedClassList=evil.lst",
+            "-XX:CompileCommandFile=evil.cmd",
+            "-XX:SharedArchiveConfigFile=evil.txt",
+            "-XX:PerfDataSaveFile=evil.perf",
+            "-XX:ReplayDataFile=evil.replay",
+        ] {
             assert!(
                 matches!(
                     store.set_jvm_args(&inst.id, vec![forbidden.into()]),

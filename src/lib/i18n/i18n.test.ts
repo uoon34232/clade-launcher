@@ -385,6 +385,24 @@ describe("structured backend errors are worded in the current language", () => {
       ),
     ).toEqual([]);
 
+    const profileServiceSrc = readFileSync(join(dir, "profile_service.rs"), "utf8");
+    const appearanceBlock = profileServiceSrc.slice(
+      profileServiceSrc.indexOf("pub fn code(self)"),
+      profileServiceSrc.indexOf("pub fn coded(self)"),
+    );
+    const appearanceCodes = [...appearanceBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
+    expect(appearanceCodes.length).toBeGreaterThanOrEqual(14);
+    expect(wanted("appearance", appearanceCodes)).toEqual([]);
+
+    const vaultRecoverySrc = readFileSync(join(dir, "vault_recovery.rs"), "utf8");
+    const resetBlock = vaultRecoverySrc.slice(
+      vaultRecoverySrc.indexOf("pub fn code(self)"),
+      vaultRecoverySrc.indexOf("pub fn coded(self)"),
+    );
+    const resetCodes = [...resetBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
+    expect(resetCodes.length).toBeGreaterThanOrEqual(7);
+    expect(wanted("vault", resetCodes)).toEqual([]);
+
     const coded = [...text.matchAll(/CodedError::new\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
     const known = new Set([
       ...[

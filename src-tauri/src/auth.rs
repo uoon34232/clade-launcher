@@ -86,6 +86,9 @@ pub fn parse_callback(head: &str, port: u16, expected_state: &str) -> Callback {
     let (Some("GET"), Some(target)) = (parts.next(), parts.next()) else {
         return Callback::Ignore;
     };
+    if !target.starts_with('/') || target.starts_with("//") {
+        return Callback::Ignore;
+    }
     let mut host_count = 0usize;
     let mut host_ok = false;
     for l in lines {
@@ -339,6 +342,7 @@ impl Loopback {
         let port = self.port;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Secret, AuthError>>(1);
         let mut tasks = tokio::task::JoinSet::new();
+        let mut v6_alive = self.v6.is_some();
 
         loop {
             let accept_enabled = tasks.len() < MAX_LOOPBACK_CONNS;
@@ -354,11 +358,15 @@ impl Loopback {
                     Err(e) if is_transient_accept(&e) => {}
                     Err(_) => return Err(AuthError::BrowserUnavailable),
                 },
-                res = accept_opt(self.v6.as_ref()), if accept_enabled => {
-                    if let Ok((stream, _)) = res {
+                res = accept_opt(self.v6.as_ref()), if accept_enabled && v6_alive => match res {
+                    Ok((stream, _)) => {
                         spawn_callback_conn(&mut tasks, stream, port, expected.clone(), tx.clone());
                     }
-                }
+                    Err(e) if is_transient_accept(&e) => {}
+                    Err(_) => {
+                        v6_alive = false;
+                    }
+                },
             }
         }
     }
@@ -389,13 +397,36 @@ pub async fn sign_in<T: Transport>(
     cancel: &Notify,
     wait: Duration,
 ) -> Result<SignedIn, AuthError> {
+    sign_in_with_open(
+        t,
+        loopback,
+        move |url| std::future::ready(open(&url)),
+        progress,
+        cancel,
+        wait,
+    )
+    .await
+}
+
+async fn sign_in_with_open<T: Transport, F, Fut>(
+    t: &T,
+    loopback: &Loopback,
+    open: F,
+    progress: impl Fn(Stage),
+    cancel: &Notify,
+    wait: Duration,
+) -> Result<SignedIn, AuthError>
+where
+    F: FnOnce(Url) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     let pkce = Pkce::generate()?;
     let state = random_token()?;
     let redirect = loopback.redirect_uri();
     let url = authorize_url(&redirect, &state, &pkce.challenge);
 
     progress(Stage::Opening);
-    if !open(&url) {
+    if !open(url).await {
         return Err(AuthError::BrowserUnavailable);
     }
     progress(Stage::Waiting);
@@ -990,10 +1021,20 @@ async fn run_sign_in(
 
     let t = transport(auth)?;
     let loopback = Loopback::bind().await?;
-    let signed = sign_in(
+    let app_open = app.clone();
+    let signed = sign_in_with_open(
         t,
         &loopback,
-        |url| app.opener().open_url(url.as_str(), None::<&str>).is_ok(),
+        |url| async move {
+            tokio::task::spawn_blocking(move || {
+                app_open
+                    .opener()
+                    .open_url(url.as_str(), None::<&str>)
+                    .is_ok()
+            })
+            .await
+            .unwrap_or(false)
+        },
         |stage| {
             let _ = app.emit(PROGRESS_EVENT, stage);
         },
@@ -1249,6 +1290,8 @@ mod tests {
             "GET /other?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",
             "POST /?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",
             "GET /?code=abc&state=S HTTP/1.1\r\nHost: evil.example:5000\r\n\r\n",
+            "GET @evil.example/?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",
+            "GET //evil.example/?code=abc&state=S HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",
             "GET /?code=abc&state=S HTTP/1.1\r\n\r\n",
             "GET /?code=&state=S HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",
             "GET /favicon.ico HTTP/1.1\r\nHost: localhost:5000\r\n\r\n",

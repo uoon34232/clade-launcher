@@ -12,6 +12,12 @@ The first public build is planned as a preview release rather than `1.0.0`. Brea
 
 ## [Unreleased]
 
+- In-app portable updater in Settings (`Check for updates` -> `Update` -> `Restart to update`), with streamed SHA-256 verification, release package allowlist checks, lock-aware staged replacement, rollback on error, and disk cleanup.
+- Framed game mode (`Inside Clade`) switched from `WS_CHILD` reparenting to an owned borderless `WS_POPUP` surface with STA subclass safety, cursor-capture compatibility (`Back to Game` / raw mouse focus), and cleaner hover/focus button styling.
+- Frosted blur treatment for translucent glass modal dialogs and overlay backdrops when transparency effects are enabled.
+- Bundled Cyrillic variable fonts (`Literata` + `Onest`), layout wrapping/truncation fixes, accessible alert/form error links, and EN/RU localization polish.
+- Backend security and reliability hardening across HTTP redirect policy error propagation, atomic encrypted vault backup writes, expanded JVM flag allowlist exclusions, AppContainer NULL-DACL safety, OAuth loopback target/IPv6/non-blocking browser launch handling, pre-spawn window close guards, and aligned preview version reporting.
+
 ## [0.1.0]
 
 Before you run it: the Preview targets **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`)**. Clade is not code-signed, so Windows SmartScreen may warn about `Clade.exe`, and Windows 11 Smart App Control in enforcement mode may block it completely, with no "Run anyway" option. Please do not disable or bypass Windows security features to run Clade. Report bugs in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose) and never post passwords, sign-in codes, tokens or vault files.
