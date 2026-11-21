@@ -1,12 +1,16 @@
 //! Native framed game embedding ("Inside Clade").
 //!
 //! When `"When Minecraft starts"` is `"embed"`, Clade keeps its own frameless window open as a host
-//! frame (title strip with Minimize / Maximize / Close + warm background padding) and reparents the
-//! running Minecraft window directly inside the launcher's central stage region via Win32
-//! `SetParent`, child window styles, `SetWindowPos`, `SetWindowRgn`, and `CreateRoundRectRgn`.
+//! frame and splits the host client area into two **disjoint** rectangles:
 //!
-//! No game frames are ever copied through the WebView: Java/OpenGL renders straight to its native
-//! surface and keeps raw mouse/keyboard handling.
+//! - Top strip `(0, 0, client_w, header_px)`: WebView2 (`WRY_WEBVIEW` + `ICoreWebView2Controller`)
+//!   renders `WindowChrome` (`Clade` wordmark, drag strip, Minimize / Maximize / Close buttons).
+//! - Stage `(0, header_px, client_w, client_h - header_px)`: the running Minecraft window is
+//!   reparented via Win32 `SetParent` and kept flush below the strip.
+//!
+//! Using `ICoreWebView2Controller::SetBounds` with a host subclass (instead of GDI `SetWindowRgn` on
+//! `WRY_WEBVIEW`) keeps Chromium/DirectComposition presentation intact so the top bar renders
+//! cleanly over Mica and full WebView2 bounds recover immediately when Minecraft exits.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,16 +18,17 @@ use std::time::Duration;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, PhysicalSize, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Event announcing a change to the framed game embedding state.
 pub const EMBED_EVENT: &str = "game-embed-state";
 
+/// Logical height (CSS pixels at 100% DPI) of the custom Clade header strip in framed mode.
+pub const HEADER_HEIGHT_LOGICAL_PX: i32 = 44;
+
 const POLL_IDLE: Duration = Duration::from_millis(16);
 const POLL_ACTIVE: Duration = Duration::from_millis(24);
-const FALLBACK_TOP_PX: i32 = 44;
-const FALLBACK_MARGIN_PX: i32 = 18;
-const FALLBACK_RADIUS_PX: u32 = 0;
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Physical stage rectangle inside Clade's main window where the game window sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,19 +53,31 @@ impl StageBounds {
             radius: r,
         }
     }
+}
 
-    fn fallback_from_window(w: &tauri::WebviewWindow) -> Self {
-        let scale = w.scale_factor().unwrap_or(1.0).clamp(0.5, 4.0);
-        let size = w
-            .inner_size()
-            .unwrap_or_else(|_| PhysicalSize::new(1280, 720));
-        let top = (f64::from(FALLBACK_TOP_PX) * scale).round() as i32;
-        let margin = (f64::from(FALLBACK_MARGIN_PX) * scale).round() as i32;
-        let radius = (f64::from(FALLBACK_RADIUS_PX) * scale).round().max(0.0) as u32;
-        let width = (size.width as i32 - margin * 2).max(320) as u32;
-        let height = (size.height as i32 - top - margin).max(240) as u32;
-        Self::clamped(margin, top, width, height, radius)
+/// Disjoint native rectangles for WebView2's top strip and Minecraft's stage in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramedLayout {
+    pub webview_width: i32,
+    pub webview_height: i32,
+    pub stage: StageBounds,
+}
+
+/// Computes non-overlapping top-strip and stage bounds from host client pixels and monitor DPI.
+pub fn compute_framed_layout(client_w: i32, client_h: i32, dpi: u32) -> Option<FramedLayout> {
+    if client_w < 64 || client_h < 64 {
+        return None;
     }
+    let scale = (f64::from(dpi.max(48)) / 96.0).clamp(0.5, 4.0);
+    let max_header = (client_h - 64).max(24);
+    let header_px =
+        ((f64::from(HEADER_HEIGHT_LOGICAL_PX) * scale).round() as i32).clamp(24, max_header);
+    let stage_h = (client_h - header_px).max(64) as u32;
+    Some(FramedLayout {
+        webview_width: client_w,
+        webview_height: header_px,
+        stage: StageBounds::clamped(0, header_px, client_w as u32, stage_h, 0),
+    })
 }
 
 /// UI-facing embedding snapshot.
@@ -77,6 +94,9 @@ struct ActiveSession {
     pid: u32,
     game_win: AtomicU64,
     attached: AtomicBool,
+    ever_attached: AtomicBool,
+    strip_active: AtomicBool,
+    prev_host_clipchildren: AtomicBool,
     maximized: AtomicBool,
     attach_win_rect: Mutex<Option<(i32, i32, i32, i32)>>,
     pre_expand_win_rect: Mutex<Option<(i32, i32, i32, i32)>>,
@@ -93,6 +113,9 @@ impl ActiveSession {
             pid,
             game_win: AtomicU64::new(0),
             attached: AtomicBool::new(false),
+            ever_attached: AtomicBool::new(false),
+            strip_active: AtomicBool::new(false),
+            prev_host_clipchildren: AtomicBool::new(false),
             maximized: AtomicBool::new(false),
             attach_win_rect: Mutex::new(None),
             pre_expand_win_rect: Mutex::new(None),
@@ -113,12 +136,28 @@ impl ActiveSession {
             maximized: self.maximized.load(Ordering::Acquire),
         }
     }
+
+    /// Marks the currently embedded HWND detached while keeping session history (`ever_attached`,
+    /// `attach_win_rect`, `prev_host_clipchildren`) until `end_session` completes.
+    fn mark_window_detached(&self) -> bool {
+        self.game_win.store(0, Ordering::Release);
+        self.maximized.store(false, Ordering::Release);
+        self.close_requested.store(false, Ordering::Release);
+        self.close_attempts.store(0, Ordering::Release);
+        self.focus_requested.store(false, Ordering::Release);
+        let was_attached = self.attached.swap(false, Ordering::AcqRel);
+        let was_strip = self.strip_active.swap(false, Ordering::AcqRel);
+        was_attached || was_strip
+    }
 }
 
-/// Snapshot saved when detaching a framed game window so host geometry can be restored cleanly.
+/// Snapshot saved when ending a framed session so host geometry and styles restore idempotently.
 struct FinishedEmbed {
     was_attached: bool,
+    ever_attached: bool,
+    strip_active: bool,
     attach_win_rect: Option<(i32, i32, i32, i32)>,
+    prev_host_clipchildren: bool,
 }
 
 /// State managing framed game attachment and stage coordinates.
@@ -184,13 +223,19 @@ impl EmbedState {
         let session = guard.take()?;
         session.stop.store(true, Ordering::Release);
         let was_attached = session.attached.swap(false, Ordering::AcqRel);
+        let ever_attached = session.ever_attached.load(Ordering::Acquire);
+        let strip_active = session.strip_active.swap(false, Ordering::AcqRel);
+        let prev_host_clipchildren = session.prev_host_clipchildren.load(Ordering::Acquire);
         let attach_win_rect = *session
             .attach_win_rect
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         Some(FinishedEmbed {
             was_attached,
+            ever_attached,
+            strip_active,
             attach_win_rect,
+            prev_host_clipchildren,
         })
     }
 }
@@ -228,7 +273,6 @@ pub fn get_game_embed_status(state: State<'_, EmbedState>) -> GameEmbedStatus {
 
 #[tauri::command]
 pub fn set_game_stage_bounds(
-    app: AppHandle,
     state: State<'_, EmbedState>,
     x: i32,
     y: i32,
@@ -236,19 +280,38 @@ pub fn set_game_stage_bounds(
     height: u32,
     radius: u32,
 ) {
-    let bounds = StageBounds::clamped(x, y, width, height, radius);
-    state.set_bounds(bounds);
-    if let Some(session) = state.current_session() {
-        let mc_id = session.game_win.load(Ordering::Acquire);
-        if session.attached.load(Ordering::Acquire) && mc_id != 0 {
-            if let Some(host_id) = app
-                .get_webview_window("main")
-                .and_then(|w| host_window_id(&w))
-            {
-                win32::dispatch_host_clipping(&app, host_id, mc_id, Some(bounds));
-            }
+    state.set_bounds(StageBounds::clamped(x, y, width, height, radius));
+}
+
+thread_local! {
+    static EXTRACTED_CONTROLLER: std::cell::RefCell<Option<win32::ICoreWebView2Controller>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clones `ICoreWebView2Controller` on the main UI STA thread and returns from
+/// `WebviewWindow::with_webview` immediately so `tauri-runtime-wry` releases its
+/// `window_id` mutex before `f` performs Win32/Tauri operations that may synchronously
+/// dispatch `WindowEvent` callbacks (`Resized`, `Focused`) or nested webview calls.
+fn with_controller_on_main_thread(
+    app: &AppHandle,
+    f: impl FnOnce(win32::ICoreWebView2Controller) + Send + 'static,
+) -> bool {
+    let Some(w) = app.get_webview_window("main") else {
+        return false;
+    };
+    app.run_on_main_thread(move || {
+        let _ = w.with_webview(|webview| {
+            let ctrl = webview.controller().clone();
+            EXTRACTED_CONTROLLER.with(|slot| {
+                *slot.borrow_mut() = Some(ctrl);
+            });
+        });
+        let controller = EXTRACTED_CONTROLLER.with(|slot| slot.borrow_mut().take());
+        if let Some(controller) = controller {
+            f(controller);
         }
-    }
+    })
+    .is_ok()
 }
 
 #[tauri::command]
@@ -267,19 +330,24 @@ pub fn toggle_game_maximize(app: AppHandle, state: State<'_, EmbedState>) -> Gam
         // duplicate native caption buttons on top of Clade's custom header strip.
         let _ = w.set_resizable(!next);
         if let Some(host_id) = host_window_id(&w) {
-            let mc_id = session.game_win.load(Ordering::Acquire);
-            let app_clone = app.clone();
             let session_clone = session.clone();
-            let _ = app.run_on_main_thread(move || {
+            let _ = with_controller_on_main_thread(&app, move |controller| {
                 let host_hwnd = host_id as usize as win32::HWND;
-                let mc_hwnd = mc_id as usize as win32::HWND;
                 win32::set_work_area_expanded(host_hwnd, next, &session_clone);
-                if mc_id != 0 {
-                    win32::sync_host_clipping(
-                        host_hwnd,
-                        mc_hwnd,
-                        Some(active_bounds(&app_clone).0),
-                    );
+                if session_clone.strip_active.load(Ordering::Acquire) {
+                    if let Some(layout) = win32::layout_for_host(host_hwnd) {
+                        let wry_hwnd = win32::controller_wry_hwnd(&controller);
+                        win32::apply_webview_bounds(
+                            &controller,
+                            wry_hwnd,
+                            layout.webview_width,
+                            layout.webview_height,
+                        );
+                        let mc_id = session_clone.game_win.load(Ordering::Acquire);
+                        if mc_id != 0 {
+                            win32::apply_bounds(mc_id as usize as win32::HWND, layout.stage);
+                        }
+                    }
                 }
             });
         }
@@ -301,7 +369,7 @@ pub fn on_host_focused(app: &AppHandle) {
     }
 }
 
-/// Keeps `maximized` (and Win32 WebView clipping) in sync when the host resizes during a game.
+/// Ensures WebView2 strip and embedded stage stay synchronized when host resizes during a game.
 pub fn on_host_resized(app: &AppHandle) {
     let Some(state) = app.try_state::<EmbedState>() else {
         return;
@@ -309,18 +377,37 @@ pub fn on_host_resized(app: &AppHandle) {
     let Some(session) = state.current_session() else {
         return;
     };
-    if !session.attached.load(Ordering::Acquire) {
+    if !session.strip_active.load(Ordering::Acquire) {
         return;
     }
-    let mc_id = session.game_win.load(Ordering::Acquire);
-    if mc_id != 0 {
-        if let Some(host_id) = app
-            .get_webview_window("main")
-            .and_then(|w| host_window_id(&w))
-        {
-            win32::dispatch_host_clipping(app, host_id, mc_id, Some(active_bounds(app).0));
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(host_id) = host_window_id(&w) else {
+        return;
+    };
+    let _ = with_controller_on_main_thread(app, move |controller| {
+        if !session.strip_active.load(Ordering::Acquire) {
+            return;
         }
-    }
+        let host_hwnd = host_id as usize as win32::HWND;
+        if let Some(layout) = win32::layout_for_host(host_hwnd) {
+            let wry_hwnd = win32::controller_wry_hwnd(&controller);
+            win32::sync_webview_bounds_if_needed(
+                &controller,
+                wry_hwnd,
+                layout.webview_width,
+                layout.webview_height,
+            );
+            let mc_id = session.game_win.load(Ordering::Acquire);
+            if mc_id != 0 {
+                let mc_hwnd = mc_id as usize as win32::HWND;
+                if win32::needs_bounds_sync(mc_hwnd, host_hwnd, layout.stage) {
+                    win32::apply_bounds(mc_hwnd, layout.stage);
+                }
+            }
+        }
+    });
 }
 
 /// Sends a graceful close signal to the embedded game window on the first close click.
@@ -369,7 +456,7 @@ pub fn start_session(app: AppHandle, instance_id: String, pid: u32) {
         });
 }
 
-/// Tears down framed mode when the game finishes, returning Clade's window to its menu geometry.
+/// Tears down framed mode when the game finishes, restoring full WebView2 bounds and launcher UI.
 pub fn end_session(app: &AppHandle, instance_id: &str) {
     let Some(state) = app.try_state::<EmbedState>() else {
         return;
@@ -378,80 +465,215 @@ pub fn end_session(app: &AppHandle, instance_id: &str) {
         return;
     };
     let _ = app.emit(EMBED_EVENT, GameEmbedStatus::default());
-    if ended.was_attached {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.set_resizable(true);
-            if let Some(host_id) = host_window_id(&w) {
-                let attach_rect = ended.attach_win_rect;
-                let _ = app.run_on_main_thread(move || {
-                    let host_hwnd = host_id as usize as win32::HWND;
-                    win32::sync_host_clipping(host_hwnd, std::ptr::null_mut(), None);
-                    win32::set_corner_preference(host_hwnd, false);
-                    if let Some((x, y, width, height)) = attach_rect {
-                        win32::set_window_rect(host_hwnd, x, y, width, height);
-                    }
-                });
-            }
-        }
-    }
-}
-
-fn mark_attached(app: &AppHandle, session: &ActiveSession, win_id: u64) {
-    session.game_win.store(win_id, Ordering::Release);
-    if !session.attached.swap(true, Ordering::AcqRel) {
-        tracing::info!(
-            instance = %session.instance_id,
-            "embedded game window into Clade stage"
+    if ended.was_attached || ended.ever_attached || ended.strip_active {
+        restore_full_webview(
+            app,
+            ended.attach_win_rect,
+            Some(ended.prev_host_clipchildren),
+            false,
         );
-        if let Some(w) = app.get_webview_window("main") {
-            if let Some(host_id) = host_window_id(&w) {
-                let host_hwnd = host_id as usize as win32::HWND;
-                *session
-                    .attach_win_rect
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = win32::window_rect(host_hwnd);
-                let _ = w.set_resizable(true);
-                win32::dispatch_host_clipping(app, host_id, win_id, Some(active_bounds(app).0));
-            } else {
-                let _ = w.set_resizable(true);
-            }
-        }
-        let _ = app.emit(EMBED_EVENT, session.status());
     }
 }
 
-fn active_bounds(app: &AppHandle) -> (StageBounds, u64) {
-    let state = app.state::<EmbedState>();
-    let (maybe, seq) = state.current_bounds();
-    let bounds = maybe.unwrap_or_else(|| {
-        app.get_webview_window("main")
-            .map(|w| StageBounds::fallback_from_window(&w))
-            .unwrap_or_else(|| StageBounds::clamped(18, 44, 1244, 658, 0))
+fn try_attach_game_window(
+    app: &AppHandle,
+    session: &Arc<ActiveSession>,
+    host_id: u64,
+    mc_id: u64,
+) -> bool {
+    let Some(w) = app.get_webview_window("main") else {
+        return false;
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel::<bool>(1);
+    let app_clone = app.clone();
+    let session_clone = session.clone();
+    let w_clone = w.clone();
+
+    if !with_controller_on_main_thread(app, move |controller| {
+        if session_clone.stop.load(Ordering::Acquire) {
+            let _ = tx.send(false);
+            return;
+        }
+        let host_hwnd = host_id as usize as win32::HWND;
+        let mc_hwnd = mc_id as usize as win32::HWND;
+        if !win32::is_host_alive(host_hwnd) || !win32::is_valid(mc_hwnd) {
+            let _ = tx.send(false);
+            return;
+        }
+        let Some(layout) = win32::layout_for_host(host_hwnd) else {
+            let _ = tx.send(false);
+            return;
+        };
+
+        {
+            let mut rect_guard = session_clone
+                .attach_win_rect
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if rect_guard.is_none() {
+                *rect_guard = win32::window_rect(host_hwnd);
+            }
+        }
+        if !session_clone.ever_attached.load(Ordering::Acquire) {
+            session_clone
+                .prev_host_clipchildren
+                .store(win32::host_has_clip_children(host_hwnd), Ordering::Release);
+        }
+        win32::set_host_clip_children(host_hwnd, true);
+
+        let wry_hwnd = win32::controller_wry_hwnd(&controller);
+        win32::ensure_child_clipsiblings(wry_hwnd);
+
+        session_clone.strip_active.store(true, Ordering::Release);
+        // SAFETY: executing on the main UI STA thread owning `host_hwnd`, `wry_hwnd`, and `controller`.
+        unsafe {
+            win32::install_host_subclass(
+                host_hwnd,
+                win32::HostSubclassState {
+                    app: app_clone.clone(),
+                    controller: controller.clone(),
+                    wry_hwnd,
+                    session: session_clone.clone(),
+                },
+            );
+            win32::install_wry_subclass(
+                wry_hwnd,
+                win32::WrySubclassState {
+                    host_hwnd,
+                    controller: controller.clone(),
+                    session: session_clone.clone(),
+                    sync_pending: std::sync::atomic::AtomicBool::new(false),
+                },
+            );
+        }
+        win32::apply_webview_bounds(
+            &controller,
+            wry_hwnd,
+            layout.webview_width,
+            layout.webview_height,
+        );
+
+        if !win32::attach_and_place(mc_hwnd, host_hwnd, layout.stage) {
+            session_clone.strip_active.store(false, Ordering::Release);
+            // SAFETY: still on main UI STA thread.
+            unsafe {
+                win32::uninstall_wry_subclass(wry_hwnd);
+                win32::uninstall_host_subclass(host_hwnd);
+            }
+            if !session_clone.ever_attached.load(Ordering::Acquire)
+                && !session_clone.prev_host_clipchildren.load(Ordering::Acquire)
+            {
+                win32::set_host_clip_children(host_hwnd, false);
+            }
+            win32::restore_webview_to_client(host_hwnd, &controller, wry_hwnd);
+            let _ = tx.send(false);
+            return;
+        }
+
+        session_clone.game_win.store(mc_id, Ordering::Release);
+        session_clone.ever_attached.store(true, Ordering::Release);
+        let newly_attached = !session_clone.attached.swap(true, Ordering::AcqRel);
+        let _ = w_clone.set_resizable(true);
+        if newly_attached {
+            tracing::info!(
+                instance = %session_clone.instance_id,
+                "embedded game window into Clade stage"
+            );
+        }
+        let _ = app_clone.emit(EMBED_EVENT, session_clone.status());
+        let _ = tx.send(true);
+    }) {
+        return false;
+    }
+
+    rx.recv_timeout(ATTACH_TIMEOUT).unwrap_or(false)
+}
+
+fn restore_full_webview(
+    app: &AppHandle,
+    restore_rect: Option<(i32, i32, i32, i32)>,
+    restore_clipchildren: Option<bool>,
+    emit_inactive: bool,
+) {
+    let Some(w) = app.get_webview_window("main") else {
+        if emit_inactive {
+            let _ = app.emit(EMBED_EVENT, GameEmbedStatus::default());
+        }
+        return;
+    };
+    let Some(host_id) = host_window_id(&w) else {
+        if emit_inactive {
+            let _ = app.emit(EMBED_EVENT, GameEmbedStatus::default());
+        }
+        return;
+    };
+    let app_clone = app.clone();
+    let w_clone = w.clone();
+    let _ = with_controller_on_main_thread(app, move |controller| {
+        let host_hwnd = host_id as usize as win32::HWND;
+        let visible = win32::is_valid(host_hwnd);
+        let wry_hwnd = win32::controller_wry_hwnd(&controller);
+        // SAFETY: executing on the main UI STA thread owning `host_hwnd`, `wry_hwnd`, and `webview`.
+        unsafe {
+            win32::uninstall_wry_subclass(wry_hwnd);
+            win32::uninstall_host_subclass(host_hwnd);
+        }
+        if restore_clipchildren == Some(false) {
+            win32::set_host_clip_children(host_hwnd, false);
+        }
+        win32::set_corner_preference(host_hwnd, false);
+        let _ = w_clone.set_resizable(true);
+        if let Some((x, y, width, height)) = restore_rect {
+            if win32::window_rect(host_hwnd) != Some((x, y, width, height)) {
+                win32::set_window_rect(host_hwnd, x, y, width, height);
+            }
+        }
+
+        win32::restore_webview_to_client_with_visibility(host_hwnd, &controller, wry_hwnd, visible);
+
+        if visible {
+            win32::focus_webview_if_foreground(host_hwnd, &controller);
+            win32::redraw_all(host_hwnd);
+            crate::webview::resume_window(&app_clone);
+            crate::glass::refresh(&app_clone);
+        }
+        if emit_inactive {
+            let _ = app_clone.emit(EMBED_EVENT, GameEmbedStatus::default());
+        }
     });
-    (bounds, seq)
+}
+
+fn finalize_window_detach(app: AppHandle, session: Arc<ActiveSession>) {
+    let attach_rect = *session
+        .attach_win_rect
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *session
+        .pre_expand_win_rect
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    let prev_clip = session.prev_host_clipchildren.load(Ordering::Acquire);
+    restore_full_webview(&app, attach_rect, Some(prev_clip), true);
 }
 
 fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) {
     let host_hwnd = host_id as usize as win32::HWND;
-    let mut last_seq = u64::MAX;
     let mut delayed_focus_at: Option<std::time::Instant> = None;
 
     while !session.stop.load(Ordering::Acquire) {
         let mut mc_id = session.game_win.load(Ordering::Acquire);
         if mc_id != 0 && !win32::is_valid(mc_id as usize as win32::HWND) {
             mc_id = 0;
-            session.game_win.store(0, Ordering::Release);
-            last_seq = u64::MAX;
             delayed_focus_at = None;
+            if session.mark_window_detached() {
+                finalize_window_detach(app.clone(), session.clone());
+            }
         }
 
         if mc_id == 0 {
             if let Some(found) = win32::find_game_window(session.pid, host_hwnd) {
-                let (bounds, seq) = active_bounds(&app);
-                if win32::attach_and_place(found, host_hwnd, bounds) {
-                    let found_id = found as usize as u64;
-                    mark_attached(&app, &session, found_id);
-                    last_seq = seq;
+                let found_id = found as usize as u64;
+                if try_attach_game_window(&app, &session, host_id, found_id) {
                     delayed_focus_at = Some(std::time::Instant::now() + Duration::from_millis(60));
                 }
             }
@@ -460,13 +682,10 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
         }
 
         let mc_hwnd = mc_id as usize as win32::HWND;
-        let (bounds, seq) = active_bounds(&app);
-        if seq != last_seq || win32::needs_bounds_sync(mc_hwnd, bounds) {
-            win32::apply_bounds(mc_hwnd, bounds);
-            if seq != last_seq {
-                win32::dispatch_host_clipping(&app, host_id, mc_id, Some(bounds));
+        if let Some(layout) = win32::layout_for_host(host_hwnd) {
+            if win32::needs_bounds_sync(mc_hwnd, host_hwnd, layout.stage) {
+                win32::apply_bounds(mc_hwnd, layout.stage);
             }
-            last_seq = seq;
         }
         if session.focus_requested.swap(false, Ordering::AcqRel) {
             delayed_focus_at = Some(std::time::Instant::now() + Duration::from_millis(60));
@@ -485,30 +704,299 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 // ===================================================================================== Windows FFI
 
 mod win32 {
-    use super::StageBounds;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     use tauri::AppHandle;
+    pub use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
     use windows_sys::core::BOOL;
     pub use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::Foundation::{LPARAM, POINT, RECT};
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_DONOTROUND,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        ClientToScreen, CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject,
-        GetMonitorInfoW, MonitorFromWindow, RedrawWindow, SetWindowRgn, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_INVALIDATE, RGN_DIFF,
+        ClientToScreen, GetMonitorInfoW, MonitorFromWindow, RedrawWindow, ScreenToClient,
+        MONITORINFO, MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
+    };
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Shell::{
+        DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, EnumChildWindows, EnumWindows, GetClientRect, GetParent, GetWindow,
-        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-        PostMessageW, SetParent, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
-        HWND_BOTTOM, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SWP_SHOWWINDOW, WM_CLOSE, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME, WS_VISIBLE,
+        EnumWindows, GetClientRect, GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
+        SetParent, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
+        SIZE_MINIMIZED, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_APP, WM_CLOSE, WM_DESTROY,
+        WM_DPICHANGED, WM_NCDESTROY, WM_PARENTNOTIFY, WM_SIZE, WM_WINDOWPOSCHANGED,
+        WM_WINDOWPOSCHANGING, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+        WS_EX_APPWINDOW, WS_EX_NOPARENTNOTIFY, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+        WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
     };
 
+    use super::{compute_framed_layout, ActiveSession, FramedLayout, StageBounds};
+
     const HWND_TOP: HWND = std::ptr::null_mut();
+    const EMBED_SUBCLASS_ID: usize = 0x434C_4144_4501;
+    const WRY_SUBCLASS_ID: usize = 0x434C_4144_4502;
+    const WM_CLADE_SYNC_STRIP: u32 = WM_APP + 0x41;
+    const WM_CLADE_FINALIZE_DETACH: u32 = WM_APP + 0x42;
+
+    pub(super) struct HostSubclassState {
+        pub(super) app: AppHandle,
+        pub(super) controller: ICoreWebView2Controller,
+        pub(super) wry_hwnd: HWND,
+        pub(super) session: Arc<ActiveSession>,
+    }
+
+    pub(super) struct WrySubclassState {
+        pub(super) host_hwnd: HWND,
+        pub(super) controller: ICoreWebView2Controller,
+        pub(super) session: Arc<ActiveSession>,
+        pub(super) sync_pending: AtomicBool,
+    }
+
+    pub unsafe fn install_host_subclass(host: HWND, state: HostSubclassState) {
+        uninstall_host_subclass(host);
+        let raw = Box::into_raw(Box::new(state));
+        if SetWindowSubclass(
+            host,
+            Some(embed_host_subclass_proc),
+            EMBED_SUBCLASS_ID,
+            raw as usize,
+        ) == 0
+        {
+            drop(Box::from_raw(raw));
+        }
+    }
+
+    pub unsafe fn uninstall_host_subclass(host: HWND) {
+        let mut data: usize = 0;
+        if GetWindowSubclass(
+            host,
+            Some(embed_host_subclass_proc),
+            EMBED_SUBCLASS_ID,
+            &mut data,
+        ) != 0
+            && RemoveWindowSubclass(host, Some(embed_host_subclass_proc), EMBED_SUBCLASS_ID) != 0
+            && data != 0
+        {
+            drop(Box::from_raw(data as *mut HostSubclassState));
+        }
+    }
+
+    unsafe extern "system" fn embed_host_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        uid_subclass: usize,
+        dw_ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            WM_NCDESTROY => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if RemoveWindowSubclass(hwnd, Some(embed_host_subclass_proc), uid_subclass) != 0
+                    && dw_ref_data != 0
+                {
+                    drop(Box::from_raw(dw_ref_data as *mut HostSubclassState));
+                }
+                return res;
+            }
+            WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
+                    let state = &*(dw_ref_data as *const HostSubclassState);
+                    sync_strip_layout_on_host(hwnd, state);
+                }
+                return res;
+            }
+            WM_DPICHANGED => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
+                    let state = &*(dw_ref_data as *const HostSubclassState);
+                    sync_strip_layout_on_host(hwnd, state);
+                }
+                return res;
+            }
+            WM_PARENTNOTIFY if (wparam & 0xFFFF) as u32 == WM_DESTROY && dw_ref_data != 0 => {
+                let should_detach = {
+                    let state = &*(dw_ref_data as *const HostSubclassState);
+                    let mc_id = state.session.game_win.load(Ordering::Acquire);
+                    let destroyed_id = lparam as usize as u64;
+                    mc_id != 0 && destroyed_id == mc_id && state.session.mark_window_detached()
+                };
+                if should_detach {
+                    // Defer cleanup off cross-process synchronous WM_PARENTNOTIFY so the game's
+                    // DestroyWindow finishes without deadlocking or unsubclassing mid-callback.
+                    let _ = PostMessageW(hwnd, WM_CLADE_FINALIZE_DETACH, 0, 0);
+                }
+            }
+            WM_CLADE_FINALIZE_DETACH if dw_ref_data != 0 => {
+                let (app, session) = {
+                    let state = &*(dw_ref_data as *const HostSubclassState);
+                    (state.app.clone(), state.session.clone())
+                };
+                super::finalize_window_detach(app, session);
+                return 0;
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    unsafe fn sync_strip_layout_on_host(hwnd: HWND, state: &HostSubclassState) {
+        if !state.session.strip_active.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(layout) = layout_for_host(hwnd) else {
+            return;
+        };
+        apply_webview_bounds(
+            &state.controller,
+            state.wry_hwnd,
+            layout.webview_width,
+            layout.webview_height,
+        );
+        let mc_id = state.session.game_win.load(Ordering::Acquire);
+        if mc_id != 0 {
+            let mc_hwnd = mc_id as usize as HWND;
+            if IsWindow(mc_hwnd) != 0 && GetParent(mc_hwnd) == hwnd {
+                apply_bounds(mc_hwnd, layout.stage);
+            }
+        }
+    }
+
+    pub unsafe fn install_wry_subclass(wry_hwnd: HWND, state: WrySubclassState) {
+        if wry_hwnd.is_null() || IsWindow(wry_hwnd) == 0 {
+            return;
+        }
+        uninstall_wry_subclass(wry_hwnd);
+        let raw = Box::into_raw(Box::new(state));
+        if SetWindowSubclass(
+            wry_hwnd,
+            Some(wry_strip_subclass_proc),
+            WRY_SUBCLASS_ID,
+            raw as usize,
+        ) == 0
+        {
+            drop(Box::from_raw(raw));
+        }
+    }
+
+    pub unsafe fn uninstall_wry_subclass(wry_hwnd: HWND) {
+        if wry_hwnd.is_null() || IsWindow(wry_hwnd) == 0 {
+            return;
+        }
+        let mut data: usize = 0;
+        if GetWindowSubclass(
+            wry_hwnd,
+            Some(wry_strip_subclass_proc),
+            WRY_SUBCLASS_ID,
+            &mut data,
+        ) != 0
+            && RemoveWindowSubclass(wry_hwnd, Some(wry_strip_subclass_proc), WRY_SUBCLASS_ID) != 0
+            && data != 0
+        {
+            drop(Box::from_raw(data as *mut WrySubclassState));
+        }
+    }
+
+    unsafe fn clamp_controller_bounds_if_needed(
+        controller: &ICoreWebView2Controller,
+        width: i32,
+        height: i32,
+    ) {
+        let w = width.max(1);
+        let h = height.max(1);
+        if !controller_matches_bounds(controller, w, h) {
+            let _ = controller.SetBounds(windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            });
+            let _ = controller.NotifyParentWindowPositionChanged();
+        }
+    }
+
+    unsafe extern "system" fn wry_strip_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        uid_subclass: usize,
+        dw_ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            WM_NCDESTROY => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if RemoveWindowSubclass(hwnd, Some(wry_strip_subclass_proc), uid_subclass) != 0
+                    && dw_ref_data != 0
+                {
+                    drop(Box::from_raw(dw_ref_data as *mut WrySubclassState));
+                }
+                return res;
+            }
+            WM_WINDOWPOSCHANGING if dw_ref_data != 0 && lparam != 0 => {
+                let state = &*(dw_ref_data as *const WrySubclassState);
+                if state.session.strip_active.load(Ordering::Acquire) {
+                    if let Some(layout) = layout_for_host(state.host_hwnd) {
+                        let wp = &mut *(lparam as *mut WINDOWPOS);
+                        if (wp.flags & SWP_NOMOVE) == 0 {
+                            wp.x = 0;
+                            wp.y = 0;
+                        }
+                        if (wp.flags & SWP_NOSIZE) == 0 {
+                            wp.cx = layout.webview_width.max(1);
+                            wp.cy = layout.webview_height.max(1);
+                        }
+                        if state
+                            .sync_pending
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            let _ = PostMessageW(hwnd, WM_CLADE_SYNC_STRIP, 0, 0);
+                        }
+                    }
+                }
+            }
+            WM_WINDOWPOSCHANGED => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
+                    let state = &*(dw_ref_data as *const WrySubclassState);
+                    if state.session.strip_active.load(Ordering::Acquire) {
+                        if let Some(layout) = layout_for_host(state.host_hwnd) {
+                            clamp_controller_bounds_if_needed(
+                                &state.controller,
+                                layout.webview_width,
+                                layout.webview_height,
+                            );
+                        }
+                    }
+                }
+                return res;
+            }
+            WM_CLADE_SYNC_STRIP if dw_ref_data != 0 => {
+                let state = &*(dw_ref_data as *const WrySubclassState);
+                state.sync_pending.store(false, Ordering::Release);
+                if IsWindow(hwnd) != 0 && state.session.strip_active.load(Ordering::Acquire) {
+                    if let Some(layout) = layout_for_host(state.host_hwnd) {
+                        clamp_controller_bounds_if_needed(
+                            &state.controller,
+                            layout.webview_width,
+                            layout.webview_height,
+                        );
+                    }
+                }
+                return 0;
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
 
     struct Search {
         pid: u32,
@@ -560,9 +1048,227 @@ mod win32 {
         search.found
     }
 
+    pub fn is_host_alive(hwnd: HWND) -> bool {
+        // SAFETY: Win32 handles invalid pointers safely by returning 0.
+        unsafe { !hwnd.is_null() && IsWindow(hwnd) != 0 }
+    }
+
     pub fn is_valid(hwnd: HWND) -> bool {
         // SAFETY: Win32 handles non-window pointers safely by returning 0.
-        unsafe { IsWindow(hwnd) != 0 && IsWindowVisible(hwnd) != 0 }
+        unsafe { !hwnd.is_null() && IsWindow(hwnd) != 0 && IsWindowVisible(hwnd) != 0 }
+    }
+
+    pub fn layout_for_host(host: HWND) -> Option<FramedLayout> {
+        let mut cr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: reads live client area dimensions and monitor DPI on `host`.
+        let dpi = unsafe {
+            if !is_host_alive(host) || GetClientRect(host, &mut cr) == 0 {
+                return None;
+            }
+            let raw = GetDpiForWindow(host);
+            if raw == 0 {
+                96
+            } else {
+                raw
+            }
+        };
+        compute_framed_layout(cr.right - cr.left, cr.bottom - cr.top, dpi)
+    }
+
+    pub fn controller_wry_hwnd(controller: &ICoreWebView2Controller) -> HWND {
+        let mut raw = windows::Win32::Foundation::HWND::default();
+        // SAFETY: `ParentWindow` writes WebView2's host child HWND (`WRY_WEBVIEW`).
+        if unsafe { controller.ParentWindow(&mut raw) }.is_ok() {
+            raw.0.cast()
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    pub fn apply_webview_bounds(
+        controller: &ICoreWebView2Controller,
+        wry_hwnd: HWND,
+        width: i32,
+        height: i32,
+    ) {
+        let w = width.max(1);
+        let h = height.max(1);
+        // SAFETY: invoked on the main UI STA thread owning `controller` and `wry_hwnd`.
+        unsafe {
+            let _ = controller.SetBounds(windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            });
+            if !wry_hwnd.is_null() && IsWindow(wry_hwnd) != 0 {
+                SetWindowPos(
+                    wry_hwnd,
+                    HWND_TOP,
+                    0,
+                    0,
+                    w,
+                    h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+            let _ = controller.SetIsVisible(true);
+            let _ = controller.NotifyParentWindowPositionChanged();
+        }
+    }
+
+    fn controller_matches_bounds(
+        controller: &ICoreWebView2Controller,
+        width: i32,
+        height: i32,
+    ) -> bool {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        // SAFETY: invoked on the main UI STA thread owning `controller`.
+        unsafe { controller.Bounds(&mut rect) }.is_ok()
+            && rect.left == 0
+            && rect.top == 0
+            && rect.right == width.max(1)
+            && rect.bottom == height.max(1)
+    }
+
+    pub fn sync_webview_bounds_if_needed(
+        controller: &ICoreWebView2Controller,
+        wry_hwnd: HWND,
+        width: i32,
+        height: i32,
+    ) {
+        let ctrl_matches = controller_matches_bounds(controller, width, height);
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let hwnd_matches = !wry_hwnd.is_null()
+            && unsafe { GetClientRect(wry_hwnd, &mut wr) } != 0
+            && (wr.right - wr.left) == width.max(1)
+            && (wr.bottom - wr.top) == height.max(1);
+        if !ctrl_matches || !hwnd_matches {
+            apply_webview_bounds(controller, wry_hwnd, width, height);
+        }
+    }
+
+    pub fn restore_webview_to_client(
+        host: HWND,
+        controller: &ICoreWebView2Controller,
+        wry_hwnd: HWND,
+    ) {
+        restore_webview_to_client_with_visibility(host, controller, wry_hwnd, true);
+    }
+
+    pub fn restore_webview_to_client_with_visibility(
+        host: HWND,
+        controller: &ICoreWebView2Controller,
+        wry_hwnd: HWND,
+        visible: bool,
+    ) {
+        let mut cr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: invoked on the main UI STA thread owning `host` and `controller`.
+        unsafe {
+            if !is_host_alive(host) || GetClientRect(host, &mut cr) == 0 {
+                return;
+            }
+            let w = (cr.right - cr.left).max(1);
+            let h = (cr.bottom - cr.top).max(1);
+            let _ = controller.SetBounds(windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            });
+            if !wry_hwnd.is_null() && IsWindow(wry_hwnd) != 0 {
+                SetWindowPos(
+                    wry_hwnd,
+                    HWND_TOP,
+                    0,
+                    0,
+                    w,
+                    h,
+                    SWP_NOACTIVATE | if visible { SWP_SHOWWINDOW } else { 0 },
+                );
+            }
+            if visible {
+                let _ = controller.SetIsVisible(true);
+            }
+            let _ = controller.NotifyParentWindowPositionChanged();
+        }
+    }
+
+    pub fn focus_webview_if_foreground(host: HWND, controller: &ICoreWebView2Controller) {
+        // SAFETY: invoked on the main UI STA thread; raises WebView2 focus only if host is active.
+        unsafe {
+            if is_host_alive(host) && GetForegroundWindow() == host {
+                let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            }
+        }
+    }
+
+    pub fn redraw_all(host: HWND) {
+        // SAFETY: invalidates and repaints `host` and child surfaces on the UI thread.
+        unsafe {
+            if is_host_alive(host) {
+                RedrawWindow(
+                    host,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
+                );
+            }
+        }
+    }
+
+    pub fn host_has_clip_children(host: HWND) -> bool {
+        // SAFETY: reads style flags on live `host`.
+        unsafe {
+            is_host_alive(host)
+                && ((GetWindowLongPtrW(host, GWL_STYLE) as u32) & WS_CLIPCHILDREN) != 0
+        }
+    }
+
+    pub fn set_host_clip_children(host: HWND, enable: bool) {
+        // SAFETY: toggles `WS_CLIPCHILDREN` on live `host` owned by the UI thread.
+        unsafe {
+            if !is_host_alive(host) {
+                return;
+            }
+            let style = GetWindowLongPtrW(host, GWL_STYLE) as u32;
+            let next = if enable {
+                style | WS_CLIPCHILDREN
+            } else {
+                style & !WS_CLIPCHILDREN
+            };
+            if next != style {
+                SetWindowLongPtrW(host, GWL_STYLE, next as i32 as isize);
+            }
+        }
+    }
+
+    pub fn ensure_child_clipsiblings(child: HWND) {
+        // SAFETY: ensures `WRY_WEBVIEW` has `WS_CLIPSIBLINGS` set.
+        unsafe {
+            if child.is_null() || IsWindow(child) == 0 {
+                return;
+            }
+            let style = GetWindowLongPtrW(child, GWL_STYLE) as u32;
+            if (style & WS_CLIPSIBLINGS) == 0 {
+                SetWindowLongPtrW(child, GWL_STYLE, (style | WS_CLIPSIBLINGS) as i32 as isize);
+            }
+        }
     }
 
     pub fn attach_and_place(mc: HWND, host: HWND, b: StageBounds) -> bool {
@@ -579,15 +1285,20 @@ mod win32 {
             SetWindowLongPtrW(mc, GWL_STYLE, ((style & !strip) | add) as i32 as isize);
 
             let ex = GetWindowLongPtrW(mc, GWL_EXSTYLE) as u32;
-            SetWindowLongPtrW(mc, GWL_EXSTYLE, (ex & !WS_EX_APPWINDOW) as i32 as isize);
+            SetWindowLongPtrW(
+                mc,
+                GWL_EXSTYLE,
+                (ex & !(WS_EX_APPWINDOW | WS_EX_NOPARENTNOTIFY)) as i32 as isize,
+            );
 
             // Clear any stale region once without re-applying per resize so WGL flip swapchains stay intact.
-            SetWindowRgn(mc, std::ptr::null_mut(), 0);
-            if SetParent(mc, host).is_null() {
+            windows_sys::Win32::Graphics::Gdi::SetWindowRgn(mc, std::ptr::null_mut(), 0);
+            let prev = SetParent(mc, host);
+            if prev.is_null() && GetParent(mc) != host {
                 return false;
             }
             apply_bounds(mc, b);
-            BringWindowToTop(mc);
+            lift_window_async(mc);
             true
         }
     }
@@ -595,9 +1306,8 @@ mod win32 {
     pub fn apply_bounds(mc: HWND, b: StageBounds) {
         let w = i32::try_from(b.width).unwrap_or(1280);
         let h = i32::try_from(b.height).unwrap_or(720);
-        let corner = i32::try_from(b.radius.saturating_mul(2)).unwrap_or(0);
-        // SAFETY: `mc` is a child window inside the launcher; ownership of `rgn` transfers to Windows
-        // on non-zero return of `SetWindowRgn`.
+        // SAFETY: `mc` is a child window inside the launcher; async flags avoid blocking Clade's
+        // UI thread on cross-process OpenGL frame swaps.
         unsafe {
             SetWindowPos(
                 mc,
@@ -606,14 +1316,8 @@ mod win32 {
                 b.y,
                 w,
                 h,
-                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
             );
-            if corner > 0 {
-                let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner, corner);
-                if SetWindowRgn(mc, rgn, 1) == 0 && !rgn.is_null() {
-                    DeleteObject(rgn);
-                }
-            }
         }
     }
 
@@ -672,116 +1376,6 @@ mod win32 {
                 );
             }
         }
-    }
-
-    struct ClipChildrenCtx {
-        host: HWND,
-        mc: HWND,
-        client_w: i32,
-        client_h: i32,
-        hole: Option<(i32, i32, i32, i32)>,
-    }
-
-    unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &*(lparam as *const ClipChildrenCtx);
-        if GetParent(child) != ctx.host || child == ctx.mc {
-            return 1;
-        }
-        if let Some((hx, hy, hw, hh)) = ctx.hole {
-            let cstyle = GetWindowLongPtrW(child, GWL_STYLE) as u32;
-            if (cstyle & WS_CLIPSIBLINGS) == 0 {
-                SetWindowLongPtrW(child, GWL_STYLE, (cstyle | WS_CLIPSIBLINGS) as i32 as isize);
-            }
-            let outer = CreateRectRgn(0, 0, ctx.client_w, ctx.client_h);
-            if !outer.is_null() {
-                let cut = CreateRectRgn(hx, hy, hx + hw, hy + hh);
-                if !cut.is_null() {
-                    let combined = CombineRgn(outer, outer, cut, RGN_DIFF);
-                    DeleteObject(cut);
-                    if combined != 0 {
-                        if SetWindowRgn(child, outer, 1) == 0 {
-                            DeleteObject(outer);
-                        }
-                    } else {
-                        DeleteObject(outer);
-                    }
-                } else {
-                    DeleteObject(outer);
-                }
-            }
-            SetWindowPos(
-                child,
-                HWND_BOTTOM,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        } else {
-            SetWindowRgn(child, std::ptr::null_mut(), 1);
-            RedrawWindow(
-                child,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                RDW_INVALIDATE | RDW_ALLCHILDREN,
-            );
-        }
-        1
-    }
-
-    pub fn sync_host_clipping(host: HWND, mc: HWND, hole: Option<StageBounds>) {
-        // SAFETY: invoked on the main UI thread owning `host` and its `WRY_WEBVIEW` child;
-        // transfers cutout `HRGN` ownership on successful `SetWindowRgn`.
-        unsafe {
-            if IsWindow(host) == 0 {
-                return;
-            }
-            let style = GetWindowLongPtrW(host, GWL_STYLE) as u32;
-            if (style & WS_CLIPCHILDREN) == 0 {
-                SetWindowLongPtrW(host, GWL_STYLE, (style | WS_CLIPCHILDREN) as i32 as isize);
-            }
-            let mut cr = RECT {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            if GetClientRect(host, &mut cr) == 0 || cr.right <= 0 || cr.bottom <= 0 {
-                return;
-            }
-            let hole_rect = hole.map(|b| {
-                let w = i32::try_from(b.width).unwrap_or(1244).max(1);
-                let h = i32::try_from(b.height).unwrap_or(658).max(1);
-                (b.x, b.y, w, h)
-            });
-            let mut ctx = ClipChildrenCtx {
-                host,
-                mc,
-                client_w: cr.right,
-                client_h: cr.bottom,
-                hole: hole_rect,
-            };
-            EnumChildWindows(
-                host,
-                Some(enum_children_proc),
-                std::ptr::addr_of_mut!(ctx) as LPARAM,
-            );
-            if hole.is_some() && !mc.is_null() && IsWindow(mc) != 0 {
-                BringWindowToTop(mc);
-            }
-        }
-    }
-
-    pub fn dispatch_host_clipping(
-        app: &AppHandle,
-        host_id: u64,
-        mc_id: u64,
-        hole: Option<StageBounds>,
-    ) {
-        let _ = app.run_on_main_thread(move || {
-            sync_host_clipping(host_id as usize as HWND, mc_id as usize as HWND, hole);
-        });
     }
 
     pub fn set_work_area_expanded(host: HWND, expand: bool, session: &super::ActiveSession) {
@@ -853,40 +1447,62 @@ mod win32 {
                 );
             } else {
                 set_corner_preference(host, false);
-                if let Some((rx, ry, rw, rh)) = *session
+                let saved = *session
                     .pre_expand_win_rect
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                {
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some((rx, ry, rw, rh)) = saved {
                     set_window_rect(host, rx, ry, rw, rh);
                 }
             }
         }
     }
 
-    pub fn needs_bounds_sync(mc: HWND, b: StageBounds) -> bool {
+    pub fn needs_bounds_sync(mc: HWND, host: HWND, b: StageBounds) -> bool {
         let w = i32::try_from(b.width).unwrap_or(1280);
         let h = i32::try_from(b.height).unwrap_or(720);
-        let mut rect = RECT {
+        let mut wr = RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
         };
-        // SAFETY: valid live HWND checked with IsWindowVisible.
+        // SAFETY: checks live child window visibility, parent, and bounds relative to `host`.
         unsafe {
-            if IsWindowVisible(mc) == 0 || GetClientRect(mc, &mut rect) == 0 {
+            if IsWindowVisible(mc) == 0 || GetParent(mc) != host || GetWindowRect(mc, &mut wr) == 0
+            {
                 return false;
             }
+            let mut tl = POINT {
+                x: wr.left,
+                y: wr.top,
+            };
+            if ScreenToClient(host, &mut tl) == 0 {
+                return false;
+            }
+            tl.x != b.x || tl.y != b.y || (wr.right - wr.left) != w || (wr.bottom - wr.top) != h
         }
-        (rect.right - rect.left) != w || (rect.bottom - rect.top) != h
+    }
+
+    fn lift_window_async(mc: HWND) {
+        // SAFETY: asynchronous z-order lift avoids blocking on cross-process UI/GL threads.
+        unsafe {
+            if IsWindow(mc) != 0 {
+                SetWindowPos(
+                    mc,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                );
+            }
+        }
     }
 
     pub fn focus_window(mc: HWND) {
-        // SAFETY: best-effort z-order lift when host window regains focus.
-        unsafe {
-            BringWindowToTop(mc);
-        }
+        lift_window_async(mc);
     }
 
     pub fn request_close(mc: HWND) {
@@ -928,7 +1544,36 @@ mod tests {
     }
 
     #[test]
-    fn embed_state_tracks_attachment_bounds_and_reset() {
+    fn compute_framed_layout_scales_cleanly_and_is_disjoint_across_dpis() {
+        assert!(compute_framed_layout(0, 720, 96).is_none());
+        assert!(compute_framed_layout(1280, 63, 96).is_none());
+        assert!(compute_framed_layout(63, 720, 96).is_none());
+
+        for (dpi, expected_header) in [(96, 44), (120, 55), (144, 66), (192, 88)] {
+            let layout = compute_framed_layout(1280, 720, dpi).expect("valid layout");
+            assert_eq!(layout.webview_width, 1280);
+            assert_eq!(layout.webview_height, expected_header);
+            assert_eq!(
+                layout.stage,
+                StageBounds {
+                    x: 0,
+                    y: expected_header,
+                    width: 1280,
+                    height: (720 - expected_header) as u32,
+                    radius: 0,
+                }
+            );
+            assert_eq!(layout.webview_height, layout.stage.y);
+            assert_eq!(
+                layout.webview_height as u32 + layout.stage.height,
+                720,
+                "rectangles must partition full host height cleanly at dpi {dpi}"
+            );
+        }
+    }
+
+    #[test]
+    fn embed_state_tracks_early_detach_reattach_and_idempotent_finish() {
         let state = EmbedState::new();
         assert_eq!(state.status(), GameEmbedStatus::default());
 
@@ -939,35 +1584,55 @@ mod tests {
         );
         assert!(state.current_bounds().0.is_none());
 
-        state.set_bounds(StageBounds::clamped(14, 44, 1200, 650, 16));
+        state.set_bounds(StageBounds::clamped(0, 44, 1280, 676, 0));
         let (bounds, seq1) = state.current_bounds();
         assert_eq!(
             bounds,
             Some(StageBounds {
-                x: 14,
+                x: 0,
                 y: 44,
-                width: 1200,
-                height: 650,
-                radius: 16
+                width: 1280,
+                height: 676,
+                radius: 0,
             })
         );
         assert_eq!(seq1, 1);
 
         s1.game_win.store(42, Ordering::Release);
         s1.attached.store(true, Ordering::Release);
+        s1.ever_attached.store(true, Ordering::Release);
+        s1.strip_active.store(true, Ordering::Release);
+        s1.maximized.store(true, Ordering::Release);
+        s1.prev_host_clipchildren.store(false, Ordering::Release);
         *s1.attach_win_rect.lock().unwrap() = Some((100, 100, 1280, 720));
+
         assert_eq!(
             state.status(),
             GameEmbedStatus {
                 active: true,
                 instance_id: Some("survival".into()),
-                maximized: false,
+                maximized: true,
             }
+        );
+
+        // Simulated WM_PARENTNOTIFY / early window destruction before JVM exits:
+        assert!(s1.mark_window_detached());
+        assert!(!s1.mark_window_detached(), "second detach call is a no-op");
+        assert!(!state.is_active());
+        assert_eq!(s1.game_win.load(Ordering::Acquire), 0);
+        assert!(!s1.maximized.load(Ordering::Acquire));
+        assert!(s1.ever_attached.load(Ordering::Acquire));
+        assert_eq!(
+            *s1.attach_win_rect.lock().unwrap(),
+            Some((100, 100, 1280, 720))
         );
 
         assert!(state.finish("other").is_none());
         let ended = state.finish("survival").unwrap();
-        assert!(ended.was_attached);
+        assert!(!ended.was_attached);
+        assert!(ended.ever_attached);
+        assert!(!ended.strip_active);
+        assert!(!ended.prev_host_clipchildren);
         assert_eq!(ended.attach_win_rect, Some((100, 100, 1280, 720)));
         assert!(s1.stop.load(Ordering::Acquire));
         assert!(!state.is_active());

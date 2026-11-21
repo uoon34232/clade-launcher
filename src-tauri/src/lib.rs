@@ -269,6 +269,7 @@ pub fn run() {
                     .app_handle()
                     .state::<launch_cmd::LaunchState>()
                     .has_live_game()
+                    && !game_embed::is_active(window.app_handle())
                     && window.is_visible().unwrap_or(false)
                 {
                     webview::throttle_unfocused_window(window.app_handle());

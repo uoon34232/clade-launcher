@@ -426,15 +426,15 @@ export function LauncherHome({
           aria-hidden={!embed.active}
           className={
             embed.active
-              ? "bg-sand/85 ring-graphite/12 pointer-events-none absolute top-11 right-3 bottom-3 left-3 rounded-xl p-1.5 shadow-[0_20px_48px_-18px_rgb(43_38_34/0.4)] ring-1"
-              : "pointer-events-none invisible absolute top-11 right-3 bottom-3 left-3 rounded-xl p-1.5"
+              ? "pointer-events-none absolute inset-x-0 top-[44px] bottom-0"
+              : "pointer-events-none invisible absolute inset-x-0 top-[44px] bottom-0"
           }
         >
           <div
             ref={stageRef}
             data-testid="game-stage"
             aria-hidden={!embed.active}
-            className={embed.active ? "ring-graphite/15 h-full w-full ring-1" : "h-full w-full"}
+            className="h-full w-full"
           />
         </div>
         {!embed.active && (

@@ -195,13 +195,19 @@ impl GlassState {
 
     fn apply_suspend(&self, backdrop: &dyn Backdrop) {
         self.suspended.store(true, Ordering::Release);
-        let mut applied = self
-            .applied_backdrop
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if *applied != Some(false) {
+        let needs_clear = {
+            let applied = self
+                .applied_backdrop
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *applied != Some(false)
+        };
+        if needs_clear {
             let _ = backdrop.set(false);
-            *applied = Some(false);
+            *self
+                .applied_backdrop
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(false);
         }
     }
 
@@ -223,15 +229,23 @@ struct DedupBackdrop<'a> {
 
 impl Backdrop for DedupBackdrop<'_> {
     fn set(&self, on: bool) -> Result<(), String> {
+        {
+            let applied = self
+                .state
+                .applied_backdrop
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *applied == Some(on) {
+                return Ok(());
+            }
+        }
+        let result = self.inner.set(on);
         let mut applied = self
             .state
             .applied_backdrop
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if *applied == Some(on) {
-            return Ok(());
-        }
-        match self.inner.set(on) {
+        match result {
             Ok(()) => {
                 *applied = Some(on);
                 Ok(())
@@ -303,7 +317,8 @@ pub fn watch_system_preference(app: AppHandle) {
             };
             app.state::<GlassState>()
                 .set_system_effects(settings.AdvancedEffectsEnabled().ok());
-            refresh(&app);
+            let initial_app = app.clone();
+            let _ = app.run_on_main_thread(move || refresh(&initial_app));
 
             let handler_app = app.clone();
             let handler = TypedEventHandler::<UISettings, IInspectable>::new(move |sender, _| {
@@ -312,7 +327,8 @@ pub fn watch_system_preference(app: AppHandle) {
                         .state::<GlassState>()
                         .set_system_effects(u.AdvancedEffectsEnabled().ok());
                 }
-                refresh(&handler_app);
+                let ui_app = handler_app.clone();
+                let _ = handler_app.run_on_main_thread(move || refresh(&ui_app));
                 Ok(())
             });
             if settings.AdvancedEffectsEnabledChanged(&handler).is_err() {
@@ -623,5 +639,38 @@ mod tests {
         // Subsequent off refreshes see `applied_backdrop == Some(false)` and skip DWM.
         assert_eq!(s.apply_refresh("off", false, false, &b), None);
         assert_eq!(*b.calls.borrow(), [true, false]);
+    }
+
+    #[test]
+    fn backdrop_set_releases_mutex_before_native_call() {
+        struct ReentrantBackdrop<'a> {
+            state: &'a GlassState,
+            reentered: AtomicBool,
+            calls: RefCell<Vec<bool>>,
+        }
+
+        impl Backdrop for ReentrantBackdrop<'_> {
+            fn set(&self, on: bool) -> Result<(), String> {
+                self.calls.borrow_mut().push(on);
+                if !self.reentered.swap(true, Ordering::AcqRel) {
+                    // Re-entering `GlassState` while the native backdrop call is in flight must not deadlock.
+                    let _ = self.state.apply_refresh("system", false, false, self);
+                    self.state.apply_suspend(self);
+                }
+                Ok(())
+            }
+        }
+
+        let s = GlassState::new();
+        s.set_system_effects(Some(true));
+        let b = ReentrantBackdrop {
+            state: &s,
+            reentered: AtomicBool::new(false),
+            calls: RefCell::new(Vec::new()),
+        };
+
+        let _ = s.apply_refresh("system", false, false, &b);
+        assert!(b.reentered.load(Ordering::Acquire));
+        assert_eq!(*b.calls.borrow(), vec![true, true, false]);
     }
 }
