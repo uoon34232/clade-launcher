@@ -66,13 +66,27 @@ export function CreateProfileDialog({
   api = profilesApi,
 }: Props) {
   const nameRef = useRef<HTMLInputElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setSubmitting(false);
+  }
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange} initialFocus={nameRef} closeOnBackdrop={false}>
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      initialFocus={nameRef}
+      locked={submitting}
+      closeOnBackdrop={false}
+    >
       <ProfileForm
         nameRef={nameRef}
         existingNames={existingNames}
         api={api}
+        submitting={submitting}
+        setSubmitting={setSubmitting}
         onCancel={() => {
           playSound("click");
           onOpenChange(false);
@@ -90,14 +104,31 @@ interface FormProps {
   nameRef: RefObject<HTMLInputElement | null>;
   existingNames: readonly string[];
   api: ProfilesApi;
+  submitting: boolean;
+  setSubmitting: (submitting: boolean) => void;
   onCancel: () => void;
   onCreated: (snapshot: ProfilesSnapshot) => void;
 }
 
-function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormProps) {
+function ProfileForm({
+  nameRef,
+  existingNames,
+  api,
+  submitting,
+  setSubmitting,
+  onCancel,
+  onCreated,
+}: FormProps) {
   const t = useT();
   const ui = useUiSettings();
   const isAdvanced = ui.uiMode === "advanced";
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [filter, setFilter] = useState<VersionFilter>("releases");
@@ -114,7 +145,6 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     mc: string;
     options: LoaderOption[] | null;
   } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   // "Loading" is derived: a result only counts if it belongs to the current request.
@@ -233,10 +263,13 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     setSubmitError(null);
     api.create(request).then(
       (snapshot) => {
+        if (!mountedRef.current) return;
+        setSubmitting(false);
         playSound("primary");
         onCreated(snapshot);
       },
       (err: unknown) => {
+        if (!mountedRef.current) return;
         setSubmitting(false);
         setSubmitError(describeError("profile", err));
       },
@@ -489,7 +522,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
       )}
 
       <ModalFooter>
-        <button type="button" onClick={onCancel} className={BUTTON_QUIET}>
+        <button type="button" disabled={submitting} onClick={onCancel} className={BUTTON_QUIET}>
           {t("common.cancel")}
         </button>
         <button type="submit" disabled={!canSubmit} className={BUTTON_PRIMARY}>

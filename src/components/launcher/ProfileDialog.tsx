@@ -109,7 +109,6 @@ export function ProfileDialog({
   const [dirty, setDirty] = useState(false);
 
   if (profile && profile !== shown) {
-    if (shown && profile.name !== shown.name) setDirty(false);
     setShown(profile);
   }
   const isOpen = profile !== null;
@@ -258,16 +257,18 @@ function Body({
     nextJvmArgs.every((arg, i) => arg === savedJvmArgs[i]);
 
   const [changingVersion, setChangingVersion] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
 
   const computeDirty = (over?: {
+    baselineName?: string;
     name?: string;
     changingVersion?: boolean;
     resDirty?: boolean;
     jvmDirty?: boolean;
   }) =>
-    (over?.name ?? name) !== profile.name ||
+    (over?.name ?? name) !== (over?.baselineName ?? profile.name) ||
     (over?.changingVersion ?? changingVersion) ||
     (over?.resDirty ?? !resolutionUnchanged) ||
     (over?.jvmDirty ?? !jvmUnchanged);
@@ -276,18 +277,21 @@ function Body({
     e.preventDefault();
     setNameTouched(true);
     if (unchanged || nameError !== null || running || saving) return;
+    setRenaming(true);
     setSaving(true);
     setRenameError(null);
     api.rename(profile.id, trimmed).then(
       (snapshot) => {
         playSound("primary");
+        setRenaming(false);
         setSaving(false);
-        setDirty(computeDirty({ name: trimmed }));
+        setDirty(computeDirty({ baselineName: trimmed, name: trimmed }));
         setName(trimmed);
         setNameTouched(false);
         onUpdated(snapshot);
       },
       (err: unknown) => {
+        setRenaming(false);
         setSaving(false);
         setRenameError(describeError("profile", err));
       },
@@ -432,7 +436,7 @@ function Body({
             disabled={unchanged || nameError !== null || running || saving}
             className={`${BUTTON_SOFT} h-10 shrink-0 px-4`}
           >
-            {saving ? t("profileModal.saving") : t("profileModal.saveName")}
+            {renaming ? t("profileModal.saving") : t("profileModal.saveName")}
           </button>
         </div>
         {showNameError && (

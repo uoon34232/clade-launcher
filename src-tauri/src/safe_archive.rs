@@ -56,6 +56,8 @@ pub enum ExtractError {
     DestinationExists,
     #[error("zip error: {0}")]
     Zip(#[from] zip::result::ZipError),
+    #[error("extraction cancelled")]
+    Cancelled,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }
@@ -169,6 +171,19 @@ pub fn extract_zip_into<R: Read + Seek>(
     base: &Path,
     limits: Limits,
 ) -> Result<Report, ExtractError> {
+    extract_zip_into_cancellable(reader, base, limits, &|| false)
+}
+
+/// Extracts into an existing, empty-ish directory, polling `should_cancel` between entries and chunks.
+pub fn extract_zip_into_cancellable<R: Read + Seek>(
+    reader: R,
+    base: &Path,
+    limits: Limits,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Report, ExtractError> {
+    if should_cancel() {
+        return Err(ExtractError::Cancelled);
+    }
     let mut zip = ZipArchive::new(reader)?;
     if zip.len() > limits.max_entries {
         return Err(ExtractError::LimitExceeded("too many entries"));
@@ -177,6 +192,9 @@ pub fn extract_zip_into<R: Read + Seek>(
     // Pass 1: validate every name before writing anything.
     let mut seen = HashSet::new();
     for i in 0..zip.len() {
+        if should_cancel() {
+            return Err(ExtractError::Cancelled);
+        }
         let e = zip.by_index_raw(i)?;
         let name = e.name().to_owned();
         let rel = entry_path(&name)?;
@@ -194,6 +212,9 @@ pub fn extract_zip_into<R: Read + Seek>(
     checked_dirs.insert(base.to_path_buf());
     let mut report = Report::default();
     for i in 0..zip.len() {
+        if should_cancel() {
+            return Err(ExtractError::Cancelled);
+        }
         let mut e = zip.by_index(i)?;
         let name = e.name().to_owned();
         if e.is_symlink() || e.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
@@ -215,7 +236,14 @@ pub fn extract_zip_into<R: Read + Seek>(
             .write(true)
             .create_new(true)
             .open(&out)?;
-        let written = copy_limited(&mut e, &mut file, compressed, report.bytes, &limits)?;
+        let written = copy_limited(
+            &mut e,
+            &mut file,
+            compressed,
+            report.bytes,
+            &limits,
+            should_cancel,
+        )?;
         report.bytes = report.bytes.saturating_add(written);
         report.files += 1;
     }
@@ -236,10 +264,14 @@ fn copy_limited(
     compressed: u64,
     total_so_far: u64,
     limits: &Limits,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<u64, ExtractError> {
     let mut buf = [0u8; 64 * 1024];
     let mut entry_bytes = 0u64;
     loop {
+        if should_cancel() {
+            return Err(ExtractError::Cancelled);
+        }
         let n = r.read(&mut buf)?;
         if n == 0 {
             return Ok(entry_bytes);

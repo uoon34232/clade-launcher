@@ -21,7 +21,7 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::accounts::AccountsFile;
 use crate::coded_error::CodedError;
 use crate::instances::{InstanceStore, Profile, SetupState};
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, is_link, reject_links_between};
 use crate::portable::PortableRoot;
 use crate::settings::LauncherSettings;
 
@@ -350,8 +350,10 @@ fn redact_emails(line: &str) -> String {
     let mut rest = line;
     while let Some(at) = rest.find('@') {
         let local_start = rest[..at]
-            .rfind(|c: char| !(c.is_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
-            .map_or(0, |p| p + 1);
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !(c.is_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
+            .map_or(0, |(p, c)| p + c.len_utf8());
         let domain_len: usize = rest[at + 1..]
             .chars()
             .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-'))
@@ -541,10 +543,14 @@ fn replace_ignore_case(text: &str, needle: &str, with: &str) -> String {
 
 // ------------------------------------------------------------------------------------- content
 
-/// The last `max_bytes` of a text file, starting at a line boundary. A missing or unreadable
-/// file is simply absent from the export.
-fn tail_bytes(path: &Path, max_bytes: u64) -> Option<String> {
+/// The last `max_bytes` of a text file inside `root`, starting at a line boundary. A missing,
+/// unreadable, or symlink/junction-redirected file is simply absent from the export.
+fn tail_bytes_in(root: &Path, path: &Path, max_bytes: u64) -> Option<String> {
     if max_bytes == 0 {
+        return None;
+    }
+    reject_links_between(root, path).ok()?;
+    if is_link(path).unwrap_or(true) {
         return None;
     }
     let mut f = fs::File::open(path).ok()?;
@@ -568,23 +574,33 @@ fn tail_bytes(path: &Path, max_bytes: u64) -> Option<String> {
 
 /// The last `LOG_TAIL_BYTES` of a text file, starting at a line boundary. A missing or unreadable
 /// file is simply absent from the export.
+#[cfg(test)]
 fn tail(path: &Path) -> Option<String> {
-    tail_bytes(path, LOG_TAIL_BYTES)
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(path);
+    tail_bytes_in(base, path, LOG_TAIL_BYTES)
 }
 
 /// Reads `logs/clade.log`, prepending the tail of `logs/clade.old.log` when `clade.log` is smaller
 /// than [`LOG_TAIL_BYTES`] so a fresh rotation does not discard recent history.
-fn clade_log_tail(logs_dir: &Path) -> Option<String> {
+fn clade_log_tail(root: &PortableRoot) -> Option<String> {
+    let logs_dir = root.logs_dir();
     let cur_path = logs_dir.join("clade.log");
-    let cur_meta_len = fs::metadata(&cur_path).ok().map(|m| m.len());
-    let cur = tail_bytes(&cur_path, LOG_TAIL_BYTES);
+    let cur = tail_bytes_in(root.path(), &cur_path, LOG_TAIL_BYTES);
+    let cur_meta_len = if cur.is_some() {
+        fs::symlink_metadata(&cur_path).ok().map(|m| m.len())
+    } else {
+        None
+    };
     if cur_meta_len.is_some_and(|len| len >= LOG_TAIL_BYTES) {
         return cur;
     }
     let cur_len = cur.as_ref().map_or(0, |s| s.len() as u64);
     let rem = LOG_TAIL_BYTES.saturating_sub(cur_len);
     let old_path = logs_dir.join("clade.old.log");
-    let old = tail_bytes(&old_path, rem).filter(|s| !s.is_empty());
+    let old = tail_bytes_in(root.path(), &old_path, rem).filter(|s| !s.is_empty());
     match (old, cur) {
         (Some(mut o), Some(c)) => {
             if !c.is_empty() {
@@ -609,6 +625,10 @@ fn minecraft_latest_log(root: &PortableRoot, settings: &LauncherSettings) -> Opt
             .join("game")
             .join("logs")
             .join("latest.log");
+        reject_links_between(root.path(), &p).ok()?;
+        if is_link(&p).unwrap_or(true) {
+            return None;
+        }
         p.is_file().then_some(p)
     };
     if let Some(p) = settings
@@ -623,7 +643,7 @@ fn minecraft_latest_log(root: &PortableRoot, settings: &LauncherSettings) -> Opt
         .instances
         .iter()
         .filter_map(|i| latest(i.id.as_str()))
-        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .filter_map(|p| Some((fs::symlink_metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
 }
@@ -738,14 +758,14 @@ pub fn collect(
             ),
         ),
     ];
-    if let Some(t) = clade_log_tail(&root.logs_dir()) {
+    if let Some(t) = clade_log_tail(root) {
         files.push((
             "logs/clade.log",
             redact_identities(&redact(root.path(), &t), &known),
         ));
     }
     if let Some(p) = minecraft_latest_log(root, settings) {
-        if let Some(t) = tail(&p) {
+        if let Some(t) = tail_bytes_in(root.path(), &p, LOG_TAIL_BYTES) {
             files.push((
                 "logs/minecraft-latest.log",
                 redact_identities(&redact(root.path(), &t), &known),
@@ -774,6 +794,7 @@ pub fn export(
 ) -> Result<(Exported, PathBuf), DiagError> {
     let bytes = zip_bytes(&collect(root, settings, facts))?;
     let dir = root.logs_dir().join("diagnostics");
+    reject_links_between(root.path(), &dir)?;
     let name = format!("Clade-Diagnostics-{}.zip", timestamp(facts.now_unix));
     let path = dir.join(&name);
     atomic_write(&path, &bytes)?;

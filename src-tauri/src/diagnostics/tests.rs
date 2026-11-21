@@ -820,3 +820,56 @@ fn clade_old_log_tail_is_prepended_only_when_current_log_is_below_budget() {
         "clade.old.log must not be prepended when clade.log >= LOG_TAIL_BYTES"
     );
 }
+
+#[test]
+fn redact_emails_handles_multibyte_utf8_delimiters_without_panicking() {
+    let d = tempfile::tempdir().unwrap();
+    for line in [
+        "§7player@server.net connected",
+        "Настройки аккаунта «user@example.com» обновлены",
+        "Ошибка —admin@test.org после запуска",
+        "Alert 🔥user@example.com here",
+        "user+tag@sub.example.com §aok",
+    ] {
+        let out = redact(d.path(), line);
+        assert!(
+            out.contains("<email>"),
+            "expected email redacted in {out:?}"
+        );
+        assert!(!out.contains('@'), "raw email leaked in {out:?}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn diagnostics_export_skips_junction_redirected_game_logs() {
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let outside = d.path().join("outside-secrets");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("latest.log"), "SENSITIVE_OUTSIDE_DATA").unwrap();
+
+    let game_dir = r.instances_dir().join("p").join("game");
+    fs::create_dir_all(&game_dir).unwrap();
+    let linked_logs = game_dir.join("logs");
+    let ok = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&linked_logs)
+        .arg(&outside)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    assert!(ok, "could not create directory junction for test");
+
+    let settings = LauncherSettings {
+        last_instance: Some(crate::instances::InstanceId::new("p").unwrap()),
+        ..LauncherSettings::default()
+    };
+    let collected = collect(&r, &settings, &facts(1_700_000_000));
+    assert!(
+        !collected
+            .iter()
+            .any(|(name, _)| *name == "logs/minecraft-latest.log"),
+        "junction-redirected game log must not be included"
+    );
+    let _ = fs::remove_dir(&linked_logs);
+}

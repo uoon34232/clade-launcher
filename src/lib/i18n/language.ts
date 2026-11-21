@@ -9,5 +9,5 @@ export async function chooseLanguage(next: Locale): Promise<void> {
   const previous = getLocale();
   if (next === previous) return;
   setLocale(next);
-  if (!(await saveLanguage(next))) setLocale(previous);
+  if (!(await saveLanguage(next)) && getLocale() === next) setLocale(previous);
 }

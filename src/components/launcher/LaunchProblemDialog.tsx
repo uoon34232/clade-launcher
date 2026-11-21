@@ -1,4 +1,4 @@
-import { useState, type ReactNode, type SubmitEvent } from "react";
+import { useEffect, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { hasMessage, tDynamic, useT, type MessageKey } from "@/lib/i18n";
 import { describeCode, describeError } from "@/lib/i18n/errors";
@@ -33,19 +33,36 @@ interface Props {
 export function LaunchProblemDialog(p: Props) {
   // Keep the last problem while the closing animation runs.
   const [shown, setShown] = useState(p.problem);
+  const [wasOpen, setWasOpen] = useState(p.problem !== null);
+  const isOpen = p.problem !== null;
   if (p.problem && p.problem !== shown) setShown(p.problem);
   const problem = p.problem ?? shown;
-  // "Start fresh?" is showing: Escape and the backdrop leave it alone.
+  // "Start fresh?" or vault KDF is running: Escape and the backdrop leave it alone.
   const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    setAsking(false);
+    setBusy(false);
+  }
   return (
     <Modal
-      open={p.problem !== null}
+      open={isOpen}
       onOpenChange={(o) => !o && p.onClose()}
       size="sm"
       closeOnBackdrop={false}
-      locked={asking}
+      locked={asking || busy}
     >
-      {problem && <Body key={problemKey(problem)} {...p} problem={problem} onAsking={setAsking} />}
+      {problem && (
+        <Body
+          key={problemKey(problem)}
+          {...p}
+          problem={problem}
+          busy={busy}
+          setBusy={setBusy}
+          onAsking={setAsking}
+        />
+      )}
     </Modal>
   );
 }
@@ -75,16 +92,30 @@ function Body({
   onRetry,
   onOpenLogs,
   onVaultReset,
+  busy,
+  setBusy,
   onAsking,
   accountsClient,
-}: Props & { problem: Problem; onAsking: (asking: boolean) => void }) {
+}: Props & {
+  problem: Problem;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onAsking: (asking: boolean) => void;
+}) {
   const t = useT();
   const [pass, setPass] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const quiet = (label: string, fn: () => void) => (
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const quiet = (label: string, fn: () => void, disabled = false) => (
     <button
       type="button"
+      disabled={disabled}
       className={BUTTON_QUIET}
       onClick={() => {
         playSound("click");
@@ -139,10 +170,13 @@ function Body({
       setError(null);
       accountsClient.unlockVault(pass).then(
         () => {
+          if (!mountedRef.current) return;
           setPass("");
+          setBusy(false);
           onRetry(profileId); // unlocked: play again straight away
         },
         (err: unknown) => {
+          if (!mountedRef.current) return;
           setBusy(false);
           setPass("");
           setError(describeError("vault", err));
@@ -177,7 +211,7 @@ function Body({
         )}
         {recoveryLink}
         <ModalFooter>
-          {quiet(t("common.cancel"), onClose)}
+          {quiet(t("common.cancel"), onClose, busy)}
           <button type="submit" disabled={busy || pass.length === 0} className={BUTTON_PRIMARY}>
             {busy ? t("common.working") : t("common.unlock")}
           </button>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
 import type { ProfileSummary, ProfilesApi, ProfilesSnapshot } from "@/lib/profiles/api";
@@ -22,19 +22,29 @@ interface Props {
 export function RemoveProfileDialog({ profile, onClose, onRemoved, api }: Props) {
   // Keep the last profile while the closing animation runs.
   const [shown, setShown] = useState(profile);
+  const [wasOpen, setWasOpen] = useState(profile !== null);
+  const [busy, setBusy] = useState(false);
+  const isOpen = profile !== null;
   if (profile && profile !== shown) setShown(profile);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    setBusy(false);
+  }
   const current = profile ?? shown;
   return (
     <Modal
-      open={profile !== null}
+      open={isOpen}
       onOpenChange={(o) => !o && onClose()}
       size="sm"
+      locked={busy}
       closeOnBackdrop={false}
     >
       {current && (
         <Body
           key={current.id}
           profile={current}
+          busy={busy}
+          setBusy={setBusy}
           onClose={onClose}
           onRemoved={onRemoved}
           api={api}
@@ -46,21 +56,39 @@ export function RemoveProfileDialog({ profile, onClose, onRemoved, api }: Props)
 
 function Body({
   profile,
+  busy,
+  setBusy,
   onClose,
   onRemoved,
   api,
-}: Omit<Props, "profile"> & { profile: ProfileSummary }) {
+}: Omit<Props, "profile"> & {
+  profile: ProfileSummary;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+}) {
   const t = useT();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const remove = () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     playSound("click");
     api.remove(profile.id).then(
-      (snapshot) => onRemoved(snapshot),
+      (snapshot) => {
+        if (!mountedRef.current) return;
+        setBusy(false);
+        onRemoved(snapshot);
+      },
       (e: unknown) => {
+        if (!mountedRef.current) return;
         setBusy(false);
         setError(describeError("profile", e));
       },

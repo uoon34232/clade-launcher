@@ -2,9 +2,7 @@
 // frontend never names a folder or a file, so it cannot ask the backend to open or export anything
 // else. Failures are `BackendError`s whose stable code the UI words in the current language.
 
-import { listen } from "@tauri-apps/api/event";
-import { call } from "@/lib/ipc";
-import { inTauri } from "@/lib/settings/uiSettings";
+import { call, listenEvent } from "@/lib/ipc";
 
 export interface DiagnosticsExport {
   /** The file name of the ZIP (never a path). */
@@ -120,13 +118,11 @@ export const supportApi = {
   applyStagedUpdate: async (): Promise<void> => {
     await call("apply_staged_update");
   },
-  onUpdateProgress: async (callback: (p: UpdateProgress) => void): Promise<() => void> => {
-    if (!inTauri()) return () => undefined;
-    return listen<unknown>("update-progress", (e) => {
-      const p = parseUpdateProgress(e.payload);
+  onUpdateProgress: async (callback: (p: UpdateProgress) => void): Promise<() => void> =>
+    listenEvent<unknown>("update-progress", (payload) => {
+      const p = parseUpdateProgress(payload);
       if (p) callback(p);
-    });
-  },
+    }),
 };
 
 type FullSupportApi = typeof supportApi;

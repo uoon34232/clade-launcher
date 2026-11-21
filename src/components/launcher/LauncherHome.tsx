@@ -153,6 +153,9 @@ export function LauncherHome({
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const [embed, setEmbed] = useState<GameEmbedStatus>(NO_EMBED);
   const stageRef = useRef<HTMLDivElement>(null);
+  const refreshSeqRef = useRef(0);
+  const accountsSeqRef = useRef(0);
+  const selectAccountSeqRef = useRef(0);
   const [problem, setProblem] = useState<Problem | null>(null);
   // The first-run introduction: only when the backend says it was never finished or skipped.
   const [introduction, setIntroduction] = useState(initialUi?.onboardingDone === false);
@@ -172,15 +175,33 @@ export function LauncherHome({
   }
 
   const refresh = useCallback(() => {
-    api.list().then(setSnapshot, () => setSnapshot(EMPTY)); // no backend, no profiles: nothing is invented
+    const seq = ++refreshSeqRef.current;
+    api.list().then(
+      (snap) => {
+        if (refreshSeqRef.current === seq) setSnapshot(snap);
+      },
+      () => {
+        if (refreshSeqRef.current === seq) setSnapshot(EMPTY);
+      },
+    ); // no backend, no profiles: nothing is invented
   }, [api]);
   useEffect(refresh, [refresh]);
 
   const refreshAccounts = useCallback(() => {
+    const seq = ++accountsSeqRef.current;
     accountsClient
       .list()
-      .then(setAccounts, () => setAccounts(NO_ACCOUNTS)) // no backend, no accounts: nothing is invented
-      .finally(() => setAccountsLoaded(true));
+      .then(
+        (snap) => {
+          if (accountsSeqRef.current === seq) setAccounts(snap);
+        },
+        () => {
+          if (accountsSeqRef.current === seq) setAccounts(NO_ACCOUNTS);
+        },
+      ) // no backend, no accounts: nothing is invented
+      .finally(() => {
+        if (accountsSeqRef.current === seq) setAccountsLoaded(true);
+      });
   }, [accountsClient]);
   useEffect(refreshAccounts, [refreshAccounts]);
 
@@ -203,12 +224,11 @@ export function LauncherHome({
   useEffect(() => {
     let stale = false;
     let off: (() => void) | null = null;
-    launchClient.status().then(
-      (list) => !stale && setRuns(Object.fromEntries(list.map((r) => [r.instanceId, r.state]))),
-      () => undefined, // no backend, nothing is running
-    );
+    const seenFromEvent = new Set<string>();
     void launchClient
       .onState((ev) => {
+        if (stale) return;
+        seenFromEvent.add(ev.instanceId);
         setRuns((prev) => {
           const next = { ...prev };
           if (ev.state === "stopped") delete next[ev.instanceId];
@@ -220,6 +240,7 @@ export function LauncherHome({
           refresh(); // the playtime moved
           refreshAccounts(); // a launch may have refreshed the sign-in and noted a new skin
           if (ev.exit && ev.exit.kind !== "normal") {
+            setSurface((cur) => (cur.kind === "none" ? cur : { kind: "none" }));
             setProblem({ kind: "ended", profileId: ev.instanceId, exit: ev.exit });
           }
         }
@@ -228,6 +249,19 @@ export function LauncherHome({
         if (stale) u();
         else off = u;
       });
+    launchClient.status().then(
+      (list) => {
+        if (stale) return;
+        setRuns((prev) => {
+          const next = { ...prev };
+          for (const r of list) {
+            if (!seenFromEvent.has(r.instanceId)) next[r.instanceId] = r.state;
+          }
+          return next;
+        });
+      },
+      () => undefined, // no backend, nothing is running
+    );
     return () => {
       stale = true;
       off?.();
@@ -296,8 +330,16 @@ export function LauncherHome({
 
   // Choosing an account changes who plays, never what is played: no profile is touched.
   const selectAccount = (id: string) => {
+    const seq = ++selectAccountSeqRef.current;
     setAccounts((a) => ({ ...a, active: id }));
-    accountsClient.select(id).then(setAccounts, refreshAccounts);
+    accountsClient.select(id).then(
+      (snap) => {
+        if (selectAccountSeqRef.current === seq) setAccounts(snap);
+      },
+      () => {
+        if (selectAccountSeqRef.current === seq) refreshAccounts();
+      },
+    );
   };
 
   // "+ Add account" and "Sign in again" both open the sign-in modal; the flow lives there.
@@ -335,7 +377,15 @@ export function LauncherHome({
         setSurface({ kind: "prepare", id }); // repair through the same preparation
       } else if (e instanceof LaunchRefused && e.code === "already_running") {
         setRuns((r) => ({ ...r, [id]: "playing" }));
+        void launchClient
+          .status()
+          .then((list) => {
+            const cur = list.find((item) => item.instanceId === id);
+            if (cur) setRuns((r) => ({ ...r, [id]: cur.state }));
+          })
+          .catch(() => undefined);
       } else {
+        setSurface((cur) => (cur.kind === "none" ? cur : { kind: "none" }));
         setProblem({
           kind: "refused",
           profileId: id,

@@ -212,9 +212,18 @@ impl EmbedState {
 
     fn begin(&self, instance_id: String, pid: u32) -> Arc<ActiveSession> {
         let next = Arc::new(ActiveSession::new(instance_id, pid));
-        let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(prev) = guard.replace(next.clone()) {
+        let prev = {
+            let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
+            guard.replace(next.clone())
+        };
+        if let Some(prev) = prev {
             prev.stop.store(true, Ordering::Release);
+            prev.strip_active.store(false, Ordering::Release);
+            let prev_mc = prev.game_win.swap(0, Ordering::AcqRel);
+            if prev.attached.swap(false, Ordering::AcqRel) && prev_mc != 0 {
+                #[cfg(windows)]
+                win32::detach_to_standalone(prev_mc as usize as win32::HWND);
+            }
         }
         next
     }
@@ -427,10 +436,10 @@ pub fn on_host_resized(app: &AppHandle) {
 /// inside the frame; a second close click detaches the game to a standalone window and falls
 /// through to Clade's background-exit handling.
 pub fn request_close_or_detach(app: &AppHandle) -> bool {
-    let Some(session) = app
-        .try_state::<EmbedState>()
-        .and_then(|s| s.current_session())
-    else {
+    let Some(embed) = app.try_state::<EmbedState>() else {
+        return false;
+    };
+    let Some(session) = embed.current_session() else {
         return false;
     };
     let mc_id = session.game_win.load(Ordering::Acquire);
@@ -441,10 +450,12 @@ pub fn request_close_or_detach(app: &AppHandle) -> bool {
         session.close_requested.store(true, Ordering::Release);
         return true;
     }
+    session.stop.store(true, Ordering::Release);
     win32::detach_to_standalone(mc_id as usize as win32::HWND);
     if session.mark_window_detached() {
-        finalize_window_detach(app.clone(), session);
+        finalize_window_detach(app.clone(), session.clone());
     }
+    let _ = embed.finish(&session.instance_id);
     false
 }
 
@@ -514,7 +525,7 @@ fn try_attach_game_window(
         }
         let host_hwnd = host_id as usize as win32::HWND;
         let mc_hwnd = mc_id as usize as win32::HWND;
-        if !win32::is_host_alive(host_hwnd) || !win32::is_valid(mc_hwnd) {
+        if !win32::is_valid(host_hwnd) || !win32::is_valid(mc_hwnd) {
             let _ = tx.send(false);
             return;
         }
@@ -522,6 +533,10 @@ fn try_attach_game_window(
             let _ = tx.send(false);
             return;
         };
+        if win32::stage_screen_rect(host_hwnd, layout.stage).is_none() {
+            let _ = tx.send(false);
+            return;
+        }
 
         {
             let mut rect_guard = session_clone
@@ -724,6 +739,7 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 // ===================================================================================== Windows FFI
 
 mod win32 {
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -780,7 +796,7 @@ mod win32 {
 
     pub unsafe fn install_host_subclass(host: HWND, state: HostSubclassState) {
         uninstall_host_subclass(host);
-        let raw = Box::into_raw(Box::new(state));
+        let raw = Rc::into_raw(Rc::new(state));
         if SetWindowSubclass(
             host,
             Some(embed_host_subclass_proc),
@@ -788,7 +804,7 @@ mod win32 {
             raw as usize,
         ) == 0
         {
-            drop(Box::from_raw(raw));
+            drop(Rc::from_raw(raw));
         }
     }
 
@@ -803,8 +819,31 @@ mod win32 {
             && RemoveWindowSubclass(host, Some(embed_host_subclass_proc), EMBED_SUBCLASS_ID) != 0
             && data != 0
         {
-            drop(Box::from_raw(data as *mut HostSubclassState));
+            drop(Rc::from_raw(data as *const HostSubclassState));
         }
+    }
+
+    unsafe fn clone_host_subclass_state(
+        hwnd: HWND,
+        expected: usize,
+    ) -> Option<Rc<HostSubclassState>> {
+        if expected == 0 || IsWindow(hwnd) == 0 {
+            return None;
+        }
+        let mut current: usize = 0;
+        if GetWindowSubclass(
+            hwnd,
+            Some(embed_host_subclass_proc),
+            EMBED_SUBCLASS_ID,
+            &mut current,
+        ) == 0
+            || current != expected
+        {
+            return None;
+        }
+        let ptr = expected as *const HostSubclassState;
+        Rc::increment_strong_count(ptr);
+        Some(Rc::from_raw(ptr))
     }
 
     unsafe extern "system" fn embed_host_subclass_proc(
@@ -821,43 +860,37 @@ mod win32 {
                 if RemoveWindowSubclass(hwnd, Some(embed_host_subclass_proc), uid_subclass) != 0
                     && dw_ref_data != 0
                 {
-                    drop(Box::from_raw(dw_ref_data as *mut HostSubclassState));
+                    drop(Rc::from_raw(dw_ref_data as *const HostSubclassState));
                 }
                 return res;
             }
             WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
                 let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
-                    let state = &*(dw_ref_data as *const HostSubclassState);
-                    sync_strip_layout_on_host(hwnd, state);
+                if let Some(state) = clone_host_subclass_state(hwnd, dw_ref_data) {
+                    sync_strip_layout_on_host(hwnd, &state);
                 }
                 return res;
             }
             WM_DPICHANGED => {
                 let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
-                    let state = &*(dw_ref_data as *const HostSubclassState);
-                    sync_strip_layout_on_host(hwnd, state);
+                if let Some(state) = clone_host_subclass_state(hwnd, dw_ref_data) {
+                    sync_strip_layout_on_host(hwnd, &state);
                 }
                 return res;
             }
             WM_WINDOWPOSCHANGED => {
                 let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                if dw_ref_data != 0
-                    && IsWindow(hwnd) != 0
-                    && IsIconic(hwnd) == 0
-                    && IsWindowVisible(hwnd) != 0
-                {
-                    let state = &*(dw_ref_data as *const HostSubclassState);
-                    sync_stage_position_on_host(hwnd, state);
+                if IsWindow(hwnd) != 0 && IsIconic(hwnd) == 0 && IsWindowVisible(hwnd) != 0 {
+                    if let Some(state) = clone_host_subclass_state(hwnd, dw_ref_data) {
+                        sync_stage_position_on_host(hwnd, &state);
+                    }
                 }
                 return res;
             }
             WM_EXITSIZEMOVE => {
                 let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
-                    let state = &*(dw_ref_data as *const HostSubclassState);
-                    sync_stage_position_on_host(hwnd, state);
+                if let Some(state) = clone_host_subclass_state(hwnd, dw_ref_data) {
+                    sync_stage_position_on_host(hwnd, &state);
                     if GetForegroundWindow() == hwnd && should_hand_focus_to_game(hwnd) {
                         let mc_id = state.session.game_win.load(Ordering::Acquire);
                         if mc_id != 0 {
@@ -930,7 +963,7 @@ mod win32 {
             return;
         }
         uninstall_wry_subclass(wry_hwnd);
-        let raw = Box::into_raw(Box::new(state));
+        let raw = Rc::into_raw(Rc::new(state));
         if SetWindowSubclass(
             wry_hwnd,
             Some(wry_strip_subclass_proc),
@@ -938,7 +971,7 @@ mod win32 {
             raw as usize,
         ) == 0
         {
-            drop(Box::from_raw(raw));
+            drop(Rc::from_raw(raw));
         }
     }
 
@@ -956,8 +989,31 @@ mod win32 {
             && RemoveWindowSubclass(wry_hwnd, Some(wry_strip_subclass_proc), WRY_SUBCLASS_ID) != 0
             && data != 0
         {
-            drop(Box::from_raw(data as *mut WrySubclassState));
+            drop(Rc::from_raw(data as *const WrySubclassState));
         }
+    }
+
+    unsafe fn clone_wry_subclass_state(
+        hwnd: HWND,
+        expected: usize,
+    ) -> Option<Rc<WrySubclassState>> {
+        if expected == 0 || IsWindow(hwnd) == 0 {
+            return None;
+        }
+        let mut current: usize = 0;
+        if GetWindowSubclass(
+            hwnd,
+            Some(wry_strip_subclass_proc),
+            WRY_SUBCLASS_ID,
+            &mut current,
+        ) == 0
+            || current != expected
+        {
+            return None;
+        }
+        let ptr = expected as *const WrySubclassState;
+        Rc::increment_strong_count(ptr);
+        Some(Rc::from_raw(ptr))
     }
 
     unsafe fn clamp_controller_bounds_if_needed(
@@ -992,37 +1048,37 @@ mod win32 {
                 if RemoveWindowSubclass(hwnd, Some(wry_strip_subclass_proc), uid_subclass) != 0
                     && dw_ref_data != 0
                 {
-                    drop(Box::from_raw(dw_ref_data as *mut WrySubclassState));
+                    drop(Rc::from_raw(dw_ref_data as *const WrySubclassState));
                 }
                 return res;
             }
-            WM_WINDOWPOSCHANGING if dw_ref_data != 0 && lparam != 0 => {
-                let state = &*(dw_ref_data as *const WrySubclassState);
-                if state.session.strip_active.load(Ordering::Acquire) {
-                    if let Some(layout) = layout_for_host(state.host_hwnd) {
-                        let wp = &mut *(lparam as *mut WINDOWPOS);
-                        if (wp.flags & SWP_NOMOVE) == 0 {
-                            wp.x = 0;
-                            wp.y = 0;
-                        }
-                        if (wp.flags & SWP_NOSIZE) == 0 {
-                            wp.cx = layout.webview_width.max(1);
-                            wp.cy = layout.webview_height.max(1);
-                        }
-                        if state
-                            .sync_pending
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                        {
-                            let _ = PostMessageW(hwnd, WM_CLADE_SYNC_STRIP, 0, 0);
+            WM_WINDOWPOSCHANGING if lparam != 0 => {
+                if let Some(state) = clone_wry_subclass_state(hwnd, dw_ref_data) {
+                    if state.session.strip_active.load(Ordering::Acquire) {
+                        if let Some(layout) = layout_for_host(state.host_hwnd) {
+                            let wp = &mut *(lparam as *mut WINDOWPOS);
+                            if (wp.flags & SWP_NOMOVE) == 0 {
+                                wp.x = 0;
+                                wp.y = 0;
+                            }
+                            if (wp.flags & SWP_NOSIZE) == 0 {
+                                wp.cx = layout.webview_width.max(1);
+                                wp.cy = layout.webview_height.max(1);
+                            }
+                            if state
+                                .sync_pending
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                let _ = PostMessageW(hwnd, WM_CLADE_SYNC_STRIP, 0, 0);
+                            }
                         }
                     }
                 }
             }
             WM_WINDOWPOSCHANGED => {
                 let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
-                    let state = &*(dw_ref_data as *const WrySubclassState);
+                if let Some(state) = clone_wry_subclass_state(hwnd, dw_ref_data) {
                     if state.session.strip_active.load(Ordering::Acquire) {
                         if let Some(layout) = layout_for_host(state.host_hwnd) {
                             clamp_controller_bounds_if_needed(
@@ -1035,16 +1091,17 @@ mod win32 {
                 }
                 return res;
             }
-            WM_CLADE_SYNC_STRIP if dw_ref_data != 0 => {
-                let state = &*(dw_ref_data as *const WrySubclassState);
-                state.sync_pending.store(false, Ordering::Release);
-                if IsWindow(hwnd) != 0 && state.session.strip_active.load(Ordering::Acquire) {
-                    if let Some(layout) = layout_for_host(state.host_hwnd) {
-                        clamp_controller_bounds_if_needed(
-                            &state.controller,
-                            layout.webview_width,
-                            layout.webview_height,
-                        );
+            WM_CLADE_SYNC_STRIP => {
+                if let Some(state) = clone_wry_subclass_state(hwnd, dw_ref_data) {
+                    state.sync_pending.store(false, Ordering::Release);
+                    if IsWindow(hwnd) != 0 && state.session.strip_active.load(Ordering::Acquire) {
+                        if let Some(layout) = layout_for_host(state.host_hwnd) {
+                            clamp_controller_bounds_if_needed(
+                                &state.controller,
+                                layout.webview_width,
+                                layout.webview_height,
+                            );
+                        }
                     }
                 }
                 return 0;
@@ -1347,6 +1404,13 @@ mod win32 {
         };
         // SAFETY: valid live HWNDs belonging to the game window and launcher host.
         unsafe {
+            // Assign ownership before stripping the native frame so a refused owner assignment never
+            // leaves the standalone Minecraft window borderless and off the taskbar.
+            SetWindowLongPtrW(mc, GWLP_HWNDPARENT, host as isize);
+            if GetWindow(mc, GW_OWNER) != host {
+                return false;
+            }
+
             let style = GetWindowLongPtrW(mc, GWL_STYLE) as u32;
             let strip = WS_CAPTION
                 | WS_THICKFRAME
@@ -1368,10 +1432,6 @@ mod win32 {
             // Clear any stale region once without re-applying per resize so WGL flip swapchains stay intact.
             windows_sys::Win32::Graphics::Gdi::SetWindowRgn(mc, std::ptr::null_mut(), 0);
             set_corner_preference(mc, true);
-            SetWindowLongPtrW(mc, GWLP_HWNDPARENT, host as isize);
-            if GetWindow(mc, GW_OWNER) != host {
-                return false;
-            }
             apply_screen_bounds(mc, sx, sy, sw, sh, true, Some(host));
             if GetForegroundWindow() == host {
                 let _ = SetForegroundWindow(mc);

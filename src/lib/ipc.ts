@@ -3,7 +3,22 @@
 // is invented.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "@/lib/settings/uiSettings";
+
+/** Subscribes to a Tauri backend event without rejecting if listener registration fails. */
+export async function listenEvent<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => undefined;
+  try {
+    return await listen<T>(event, (e) => handler(e.payload));
+  } catch (e) {
+    console.warn(`Clade ipc: could not subscribe to ${event}`, e);
+    return () => undefined;
+  }
+}
 
 /**
  * A failure reported by the backend: a stable `code` and named `params` (facts such as a profile

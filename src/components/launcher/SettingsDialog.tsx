@@ -54,12 +54,20 @@ type UpdateUiState =
       bytesDone: number;
       bytesTotal: number;
     }
-  | { kind: "ready"; version: string }
+  | { kind: "ready"; version: string; error?: unknown }
   | { kind: "applying"; version: string }
   | { kind: "error"; error: unknown };
 
-function applyUpdateProgress(prev: UpdateUiState, p: UpdateProgress): UpdateUiState {
+function applyUpdateProgress(
+  prev: UpdateUiState,
+  p: UpdateProgress,
+  allowWorking: boolean,
+): UpdateUiState {
+  if (p.stage === "idle") {
+    return prev.kind === "working" || prev.kind === "applying" ? { kind: "idle" } : prev;
+  }
   if (p.stage === "downloading" || p.stage === "verifying" || p.stage === "extracting") {
+    if (!allowWorking) return prev;
     return {
       kind: "working",
       stage: p.stage,
@@ -72,6 +80,7 @@ function applyUpdateProgress(prev: UpdateUiState, p: UpdateProgress): UpdateUiSt
     return {
       kind: "ready",
       version: p.version ?? (prev.kind === "working" || prev.kind === "ready" ? prev.version : ""),
+      error: prev.kind === "ready" ? prev.error : undefined,
     };
   }
   if (p.stage === "applying") {
@@ -96,6 +105,16 @@ export function SettingsDialog({ open, onOpenChange, support = supportApi }: Pro
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   // Only checked on an explicit click; never triggers a network call automatically.
   const [updateState, setUpdateState] = useState<UpdateUiState>({ kind: "idle" });
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (!open) {
+      setConfirmAction(null);
+      setUpdateState((prev) =>
+        prev.kind === "ready" ? { kind: "ready", version: prev.version } : { kind: "idle" },
+      );
+    }
+  }
   const updateBusy = updateState.kind === "working" || updateState.kind === "applying";
   const locked = confirmAction !== null || updateBusy;
   const close = (next: boolean) => {
@@ -164,18 +183,35 @@ function SettingsBody({
   const s = useUiSettings();
   const isAdvanced = s.uiMode === "advanced";
   const [cancellingUpdate, setCancellingUpdate] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (!open) setCancellingUpdate(false);
+  }
+  const openRef = useRef(open);
+  const checkSeqRef = useRef(0);
+  const installActiveRef = useRef(false);
   const updateBusy = updateState.kind === "working" || updateState.kind === "applying";
   const controlsLocked = confirmAction !== null || updateBusy;
 
   useEffect(() => {
-    if (!open) return;
+    openRef.current = open;
+    if (!open) {
+      checkSeqRef.current += 1;
+      installActiveRef.current = false;
+      return;
+    }
     let cancelled = false;
     if (support.getUpdateStatus) {
       support
         .getUpdateStatus()
         .then((p) => {
-          if (!cancelled && p.stage !== "idle") {
-            setUpdateState((prev) => applyUpdateProgress(prev, p));
+          if (cancelled) return;
+          if (p.stage === "downloading" || p.stage === "verifying" || p.stage === "extracting") {
+            installActiveRef.current = true;
+          }
+          if (p.stage !== "idle") {
+            setUpdateState((prev) => applyUpdateProgress(prev, p, true));
           }
         })
         .catch(() => undefined);
@@ -184,8 +220,8 @@ function SettingsBody({
     if (support.onUpdateProgress) {
       void support
         .onUpdateProgress((p) => {
-          if (!cancelled && p.stage !== "idle") {
-            setUpdateState((prev) => applyUpdateProgress(prev, p));
+          if (!cancelled) {
+            setUpdateState((prev) => applyUpdateProgress(prev, p, installActiveRef.current));
           }
         })
         .then((stop) => {
@@ -204,10 +240,12 @@ function SettingsBody({
     if (!support.checkForUpdates || updateState.kind === "checking" || controlsLocked) {
       return;
     }
+    const seq = ++checkSeqRef.current;
     playSound("click");
     setUpdateState({ kind: "checking" });
     support.checkForUpdates().then(
       (res) => {
+        if (!openRef.current || checkSeqRef.current !== seq) return;
         if (res.status === "update_available" && res.latestVersion) {
           setUpdateState({
             kind: "available",
@@ -220,6 +258,7 @@ function SettingsBody({
         }
       },
       (e: unknown) => {
+        if (!openRef.current || checkSeqRef.current !== seq) return;
         setUpdateState({ kind: "error", error: e });
       },
     );
@@ -227,8 +266,10 @@ function SettingsBody({
 
   const openRelease = (tag: string) => {
     if (!support.openReleasePage || controlsLocked) return;
+    const seq = ++checkSeqRef.current;
     playSound("click");
     support.openReleasePage(tag).catch((e: unknown) => {
+      if (!openRef.current || checkSeqRef.current !== seq) return;
       setUpdateState({ kind: "error", error: e });
     });
   };
@@ -238,6 +279,7 @@ function SettingsBody({
     const { latestVersion, canInstall, assetSize } = updateState;
     playSound("click");
     setCancellingUpdate(false);
+    installActiveRef.current = true;
     setUpdateState({
       kind: "working",
       stage: "downloading",
@@ -247,6 +289,7 @@ function SettingsBody({
     });
     support.installUpdate(latestVersion).then(
       (res) => {
+        installActiveRef.current = false;
         setCancellingUpdate(false);
         if (res.stage === "ready") {
           setUpdateState({ kind: "ready", version: res.version ?? latestVersion });
@@ -255,6 +298,7 @@ function SettingsBody({
         }
       },
       (e: unknown) => {
+        installActiveRef.current = false;
         setCancellingUpdate(false);
         if (errorCode(e) === "update_cancelled") {
           setUpdateState({ kind: "available", latestVersion, canInstall, assetSize });
@@ -282,7 +326,16 @@ function SettingsBody({
     playSound("click");
     setUpdateState({ kind: "applying", version });
     support.applyStagedUpdate().catch((e: unknown) => {
-      setUpdateState({ kind: "error", error: e });
+      const code = errorCode(e);
+      if (
+        code === "update_game_running" ||
+        code === "update_prepare_running" ||
+        code === "update_install_failed"
+      ) {
+        setUpdateState({ kind: "ready", version, error: e });
+      } else {
+        setUpdateState({ kind: "error", error: e });
+      }
     });
   };
 
@@ -294,21 +347,28 @@ function SettingsBody({
       : null;
 
   const errorText =
-    updateState.kind === "error" ? describeError("settings", updateState.error) : null;
+    updateState.kind === "error"
+      ? describeError("settings", updateState.error)
+      : updateState.kind === "ready" && updateState.error
+        ? describeError("settings", updateState.error)
+        : null;
 
   return (
     <>
       <div className="grid gap-x-6 sm:grid-cols-2 lg:gap-x-8">
         <div className="flex min-w-0 flex-col">
-          <InterfaceSection isAdvanced={isAdvanced} />
-          {isAdvanced && <MinecraftSection />}
+          <InterfaceSection isAdvanced={isAdvanced} disabled={controlsLocked} />
+          {isAdvanced && <MinecraftSection disabled={controlsLocked} />}
         </div>
         <div className="flex min-w-0 flex-col">
-          {isAdvanced && <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} />}
+          {isAdvanced && (
+            <BehaviorSection onLaunch={s.onLaunch} onExit={s.onExit} disabled={controlsLocked} />
+          )}
           <SupportSection
             open={open}
             support={support}
             isAdvanced={isAdvanced}
+            disabled={updateBusy}
             confirmAction={confirmAction}
             setConfirmAction={setConfirmAction}
           />
@@ -369,7 +429,7 @@ function SettingsBody({
                   )}
                 </>
               )}
-              {updateState.kind === "ready" && (
+              {updateState.kind === "ready" && !errorText && (
                 <span
                   role="status"
                   className="text-clay-deep truncate text-[0.8125rem] font-medium"
@@ -505,7 +565,7 @@ function Row({
 
 // ------------------------------------------------------------------------------ Interface
 
-function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
+function InterfaceSection({ isAdvanced, disabled }: { isAdvanced: boolean; disabled: boolean }) {
   const t = useT();
   const locale = useLocale();
   const ui = useUiSettings();
@@ -517,6 +577,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
       <Row id="language-label" label={t("settings.language")}>
         <Segmented
           compact
+          disabled={disabled}
           label={t("settings.language")}
           value={locale}
           onChange={(next) => {
@@ -531,13 +592,14 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
         <button
           type="button"
           role="switch"
+          disabled={disabled}
           aria-checked={s.enabled}
           aria-labelledby="sound-effects-label"
           onClick={() => {
             sound.setSettings({ enabled: !s.enabled });
             if (!s.enabled) playSound("select"); // a tick to confirm it is back on
           }}
-          className={`dock-item focus-visible:ring-clay/50 focus-visible:ring-offset-card relative h-7 w-12 shrink-0 cursor-default rounded-full transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${s.enabled ? "bg-clay" : "bg-sand"}`}
+          className={`dock-item focus-visible:ring-clay/50 focus-visible:ring-offset-card relative h-7 w-12 shrink-0 cursor-default rounded-full transition-colors duration-200 outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 ${s.enabled ? "bg-clay" : "bg-sand"}`}
         >
           <span
             aria-hidden
@@ -546,7 +608,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
         </button>
       </Row>
       <div
-        className={`flex items-center gap-4 transition-opacity duration-200 ${s.enabled ? "" : "opacity-45"}`}
+        className={`flex items-center gap-4 transition-opacity duration-200 ${s.enabled && !disabled ? "" : "opacity-45"}`}
       >
         <label htmlFor="ui-volume" className="text-graphite text-[0.9375rem]">
           {t("settings.volume")}
@@ -557,7 +619,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
           min={0}
           max={100}
           step={5}
-          disabled={!s.enabled}
+          disabled={!s.enabled || disabled}
           value={Math.round(s.volume * 100)}
           onChange={(e) => sound.setSettings({ volume: Number(e.target.value) / 100 })}
           onPointerUp={() => playSound("select")}
@@ -572,6 +634,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
           <Row id="motion-label" label={t("settings.motion")} stacked>
             <Segmented<MotionMode>
               compact
+              disabled={disabled}
               label={t("settings.motion")}
               value={ui.reducedMotion}
               onChange={(mode) => {
@@ -589,6 +652,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
           <Row id="transparency-label" label={t("settings.transparency")} stacked>
             <Segmented<TransparencyMode>
               compact
+              disabled={disabled}
               label={t("settings.transparency")}
               value={ui.transparency}
               onChange={(mode) => {
@@ -610,7 +674,7 @@ function InterfaceSection({ isAdvanced }: { isAdvanced: boolean }) {
 
 // ------------------------------------------------------------------------------ Minecraft
 
-function MinecraftSection() {
+function MinecraftSection({ disabled }: { disabled: boolean }) {
   const t = useT();
   const ui = useUiSettings();
   const { min, max, auto } = ui.memory;
@@ -621,8 +685,13 @@ function MinecraftSection() {
 
   const report = (r: SaveResult) => setError(r.ok ? null : describeError("settings", r.error));
   const commit = (mb: number) => {
-    setDraft(null);
-    if (mb !== ui.memoryMb) void saveMemory(mb).then(report);
+    if (mb === ui.memoryMb) {
+      setDraft(null);
+      return;
+    }
+    void saveMemory(mb)
+      .then(report)
+      .finally(() => setDraft(null));
   };
 
   return (
@@ -630,6 +699,7 @@ function MinecraftSection() {
       <Row id="memory-label" label={t("settings.memory")} stacked>
         <Segmented<"auto" | "custom">
           compact
+          disabled={disabled}
           label={t("settings.memory")}
           value={custom ? "custom" : "auto"}
           onChange={(mode) => {
@@ -651,6 +721,7 @@ function MinecraftSection() {
             min={min}
             max={max}
             step={256}
+            disabled={disabled}
             value={value}
             onChange={(e) => setDraft(Number(e.target.value))}
             onPointerUp={() => commit(value)}
@@ -658,7 +729,7 @@ function MinecraftSection() {
             onBlur={() => commit(value)}
             aria-label={t("settings.memory.slider")}
             aria-valuetext={formatGigabytes(value)}
-            className="accent-clay focus-visible:ring-clay/45 h-6 min-w-0 flex-1 cursor-default outline-none focus-visible:ring-2"
+            className="accent-clay focus-visible:ring-clay/45 h-6 min-w-0 flex-1 cursor-default outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50"
           />
           <span aria-hidden className="text-graphite w-14 text-right text-[0.875rem] tabular-nums">
             {formatGigabytes(value)}
@@ -680,13 +751,22 @@ function MinecraftSection() {
 
 // ------------------------------------------------------------------------------- Behavior
 
-function BehaviorSection({ onLaunch, onExit }: { onLaunch: OnLaunch; onExit: OnExit }) {
+function BehaviorSection({
+  onLaunch,
+  onExit,
+  disabled,
+}: {
+  onLaunch: OnLaunch;
+  onExit: OnExit;
+  disabled: boolean;
+}) {
   const t = useT();
   return (
     <ModalSection title={t("settings.behavior")} compact>
       <Row id="on-launch-label" label={t("settings.onLaunch")} stacked>
         <Segmented<OnLaunch>
           compact
+          disabled={disabled}
           label={t("settings.onLaunch")}
           value={onLaunch}
           onChange={(v) => {
@@ -703,6 +783,7 @@ function BehaviorSection({ onLaunch, onExit }: { onLaunch: OnLaunch; onExit: OnE
       <Row id="on-exit-label" label={t("settings.onExit")} stacked>
         <Segmented<OnExit>
           compact
+          disabled={disabled}
           label={t("settings.onExit")}
           value={onExit}
           onChange={(v) => {
@@ -730,12 +811,14 @@ function SupportSection({
   open,
   support,
   isAdvanced,
+  disabled,
   confirmAction,
   setConfirmAction,
 }: {
   open: boolean;
   support: SupportApi;
   isAdvanced: boolean;
+  disabled: boolean;
   confirmAction: ConfirmAction;
   setConfirmAction: (v: ConfirmAction) => void;
 }) {
@@ -888,6 +971,7 @@ function SupportSection({
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
+              disabled={disabled}
               className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
               onClick={() => run(() => support.openCladeFolder())}
             >
@@ -897,6 +981,7 @@ function SupportSection({
               <>
                 <button
                   type="button"
+                  disabled={disabled}
                   className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
                   onClick={() => run(() => support.openLogsFolder())}
                 >
@@ -905,7 +990,7 @@ function SupportSection({
                 <button
                   type="button"
                   className={`${BUTTON_SMALL_SOFT} min-w-0 truncate px-2.5`}
-                  disabled={exporting}
+                  disabled={disabled || exporting}
                   onClick={exportDiagnostics}
                 >
                   {exporting ? t("settings.exporting") : t("settings.exportDiagnostics")}
@@ -915,6 +1000,7 @@ function SupportSection({
             <button
               ref={resetTriggerRef}
               type="button"
+              disabled={disabled}
               className={`${BUTTON_SMALL_QUIET} min-w-0 truncate px-2.5`}
               onClick={() => {
                 playSound("click");
@@ -928,6 +1014,7 @@ function SupportSection({
               <button
                 ref={retiredTriggerRef}
                 type="button"
+                disabled={disabled}
                 className={`${BUTTON_SMALL_QUIET} col-span-2 min-w-0 truncate px-2.5`}
                 onClick={() => {
                   playSound("click");

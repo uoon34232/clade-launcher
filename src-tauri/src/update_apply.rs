@@ -28,7 +28,7 @@ use crate::portable::fsutil::{
 use crate::portable::relpath::RelPath;
 use crate::portable::{PortableRoot, RootLock};
 use crate::prepare_cmd::PrepareState;
-use crate::safe_archive::{extract_zip_into, ExtractError, Limits};
+use crate::safe_archive::{extract_zip_into_cancellable, ExtractError, Limits};
 use crate::startup;
 use crate::startup_text::StartupMessage;
 use crate::system;
@@ -124,6 +124,7 @@ pub struct ApplyRuntime {
 
 struct RuntimeInner {
     stage: UpdateStage,
+    starting: bool,
     version: Option<String>,
     bytes_done: u64,
     bytes_total: u64,
@@ -136,6 +137,7 @@ impl Default for ApplyRuntime {
         Self {
             inner: Mutex::new(RuntimeInner {
                 stage: UpdateStage::Idle,
+                starting: false,
                 version: None,
                 bytes_done: 0,
                 bytes_total: 0,
@@ -178,6 +180,7 @@ impl ApplyRuntime {
     fn reset_idle(&self) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.stage = UpdateStage::Idle;
+        g.starting = false;
         g.version = None;
         g.bytes_done = 0;
         g.bytes_total = 0;
@@ -285,7 +288,9 @@ fn check_allowed_relpath(rel: &str, is_dir: bool) -> Result<(), String> {
     };
     for dir in &segments[..dir_count] {
         let dl = dir.to_ascii_lowercase();
-        if FORBIDDEN_DIRS.contains(&dl.as_str()) && !(in_runtime && dl == "src") {
+        if (FORBIDDEN_DIRS.contains(&dl.as_str()) && !(in_runtime && dl == "src"))
+            || is_forbidden_filename(dir)
+        {
             return Err(format!("forbidden folder in package: {rel}"));
         }
     }
@@ -598,6 +603,7 @@ pub async fn download_and_stage_with<F: Fetcher, S: Streamer>(
     let updates_root = root.path().to_path_buf();
     let zip_read_path = zip_dest;
     let stage_dir_task = stage_dir.clone();
+    let cancel_extract = cancel.clone();
     let staged_res = tokio::task::spawn_blocking(move || -> Result<StagedUpdate, CodedError> {
         reject_links_between(&updates_root, &stage_dir_task)
             .map_err(|e| CodedError::new("update_install_failed", e.to_string()))?;
@@ -605,16 +611,27 @@ pub async fn download_and_stage_with<F: Fetcher, S: Streamer>(
             .map_err(|e| CodedError::new("update_install_failed", e.to_string()))?;
         let file = File::open(&zip_read_path)
             .map_err(|e| CodedError::new("update_install_failed", e.to_string()))?;
-        extract_zip_into(file, &stage_dir_task, stage_limits()).map_err(|e| match e {
+        extract_zip_into_cancellable(file, &stage_dir_task, stage_limits(), &|| {
+            cancel_extract.is_cancelled()
+        })
+        .map_err(|e| match e {
+            ExtractError::Cancelled => CodedError::new("update_cancelled", "update cancelled"),
             ExtractError::Io(ioe) => CodedError::new("update_install_failed", ioe.to_string()),
             other => CodedError::new("update_invalid_package", other.to_string()),
         })?;
+        if cancel_extract.is_cancelled() {
+            return Err(CodedError::new("update_cancelled", "update cancelled"));
+        }
         validate_staged_package(&stage_dir_task)
     })
     .await
     .map_err(|e| CodedError::new("update_install_failed", e.to_string()))?;
 
     let mut staged = match staged_res {
+        Ok(_s) if cancel.is_cancelled() => {
+            let _ = remove_dir_all_with_retry(&stage_dir);
+            return Err(CodedError::new("update_cancelled", "update cancelled"));
+        }
         Ok(s) => s,
         Err(e) => {
             let _ = remove_dir_all_with_retry(&stage_dir);
@@ -632,24 +649,48 @@ enum SwapAction {
     CreatedDir { target: PathBuf },
 }
 
-fn rollback_actions(actions: Vec<SwapAction>) {
+fn rollback_actions(actions: Vec<SwapAction>) -> bool {
+    let mut all_ok = true;
     for action in actions.into_iter().rev() {
         match action {
             SwapAction::ReplacedFile { target, backup } => {
-                let _ = rename_with_retry(&backup, &target);
+                if let Err(e) = rename_with_retry(&backup, &target) {
+                    tracing::warn!(target = %target.display(), error = %e, "update rollback failed restoring file");
+                    all_ok = false;
+                }
             }
             SwapAction::CreatedFile { target } => {
-                let _ = remove_file_with_retry(&target);
+                if fs::symlink_metadata(&target).is_ok() {
+                    if let Err(e) = remove_file_with_retry(&target) {
+                        tracing::warn!(target = %target.display(), error = %e, "update rollback failed removing created file");
+                        all_ok = false;
+                    }
+                }
             }
             SwapAction::ReplacedDir { target, backup } => {
-                let _ = remove_dir_all_with_retry(&target);
-                let _ = rename_with_retry(&backup, &target);
+                if fs::symlink_metadata(&target).is_ok() {
+                    if let Err(e) = remove_dir_all_with_retry(&target) {
+                        tracing::warn!(target = %target.display(), error = %e, "update rollback failed clearing replaced dir");
+                        all_ok = false;
+                        continue;
+                    }
+                }
+                if let Err(e) = rename_dir_with_lock_wait(&backup, &target) {
+                    tracing::warn!(target = %target.display(), error = %e, "update rollback failed restoring dir");
+                    all_ok = false;
+                }
             }
             SwapAction::CreatedDir { target } => {
-                let _ = remove_dir_all_with_retry(&target);
+                if fs::symlink_metadata(&target).is_ok() {
+                    if let Err(e) = remove_dir_all_with_retry(&target) {
+                        tracing::warn!(target = %target.display(), error = %e, "update rollback failed removing created dir");
+                        all_ok = false;
+                    }
+                }
             }
         }
     }
+    all_ok
 }
 
 fn copy_synced(src: &Path, dst: &Path) -> io::Result<()> {
@@ -805,7 +846,7 @@ pub fn apply_update_transaction(
                     backup: wv2_backup,
                 });
             }
-            rename_with_retry(&staged_wv2, &target_wv2)
+            rename_dir_with_lock_wait(&staged_wv2, &target_wv2)
                 .map_err(|e| format!("moving staged WebView2 runtime: {e}"))?;
             if !existed {
                 actions.push(SwapAction::CreatedDir { target: target_wv2 });
@@ -815,8 +856,11 @@ pub fn apply_update_transaction(
     })();
 
     if let Err(err) = result {
-        rollback_actions(actions);
-        let _ = remove_dir_all_with_retry(&backup_dir);
+        if rollback_actions(actions) {
+            let _ = remove_dir_all_with_retry(&backup_dir);
+        } else {
+            tracing::warn!(backup = %backup_dir.display(), "preserving update backup after incomplete rollback");
+        }
         return Err(err);
     }
     let _ = remove_dir_all_with_retry(&backup_dir);
@@ -879,6 +923,24 @@ fn append_helper_log(root: &PortableRoot, msg: &str) {
     }
 }
 
+fn comparable_path_key(path: &Path) -> String {
+    let resolved = fs::canonicalize(path)
+        .unwrap_or_else(|_| crate::portable::root::normalize_verbatim_path(path.to_path_buf()));
+    let raw = resolved.to_string_lossy();
+    let stripped = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        raw.into_owned()
+    };
+    stripped.to_lowercase()
+}
+
+fn paths_equal_identity(a: &Path, b: &Path) -> bool {
+    comparable_path_key(a) == comparable_path_key(b)
+}
+
 fn parse_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let mut i = 2usize;
     while i + 1 < args.len() {
@@ -931,15 +993,19 @@ pub fn maybe_run_helper_mode() -> Option<i32> {
         .join(PACKAGE_ROOT_DIR)
         .join("Clade.exe");
     let Ok(cur_exe) = std::env::current_exe() else {
+        startup::show_message(
+            StartupMessage::UpdateFailed,
+            None,
+            Some("could not locate update helper executable"),
+        );
         return Some(1);
     };
-    let cur_norm = crate::portable::root::normalize_verbatim_path(cur_exe)
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let exp_norm = crate::portable::root::normalize_verbatim_path(expected_self)
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    if cur_norm != exp_norm {
+    if !paths_equal_identity(&cur_exe, &expected_self) {
+        startup::show_message(
+            StartupMessage::UpdateFailed,
+            None,
+            Some("update helper executable path mismatch"),
+        );
         return Some(1);
     }
 
@@ -1053,7 +1119,7 @@ pub async fn install_update(
     tag: String,
 ) -> Result<UpdateProgressDto, CodedError> {
     let _ = portable_exe_name(&state.root)?;
-    if launch.has_live_game() {
+    if launch.is_busy() {
         return Err(CodedError::new(
             "update_game_running",
             "close Minecraft before installing a launcher update",
@@ -1076,41 +1142,70 @@ pub async fn install_update(
         ));
     }
 
-    {
-        let g = state.apply.inner.lock().unwrap_or_else(|e| e.into_inner());
-        match g.stage {
-            UpdateStage::Downloading
-            | UpdateStage::Verifying
-            | UpdateStage::Extracting
-            | UpdateStage::Applying => {
-                return Err(CodedError::new(
-                    "update_in_progress",
-                    "an update operation is already running",
-                ));
+    struct StartingGuard<'a> {
+        runtime: &'a ApplyRuntime,
+        active: bool,
+    }
+    impl Drop for StartingGuard<'_> {
+        fn drop(&mut self) {
+            if self.active {
+                let mut g = self.runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.starting = false;
             }
-            UpdateStage::Ready => {
-                if let Some(staged) = &g.staged {
-                    if staged.version == canonical_tag {
-                        let exe = state
-                            .root
-                            .updates_dir()
-                            .join(&staged.stage_dir_name)
-                            .join(PACKAGE_ROOT_DIR)
-                            .join("Clade.exe");
-                        if sha256_hex(&exe)
-                            .is_ok_and(|h| h.eq_ignore_ascii_case(&staged.exe_sha256))
-                        {
-                            return Ok(UpdateProgressDto {
-                                stage: UpdateStage::Ready,
-                                version: Some(staged.version.clone()),
-                                bytes_done: 0,
-                                bytes_total: 0,
-                            });
-                        }
-                    }
-                }
-            }
-            UpdateStage::Idle => {}
+        }
+    }
+
+    let ready_candidate = {
+        let mut g = state.apply.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.starting
+            || matches!(
+                g.stage,
+                UpdateStage::Downloading
+                    | UpdateStage::Verifying
+                    | UpdateStage::Extracting
+                    | UpdateStage::Applying
+            )
+        {
+            return Err(CodedError::new(
+                "update_in_progress",
+                "an update operation is already running",
+            ));
+        }
+        g.starting = true;
+        if g.stage == UpdateStage::Ready {
+            g.staged
+                .as_ref()
+                .filter(|s| s.version == canonical_tag)
+                .cloned()
+        } else {
+            None
+        }
+    };
+    let mut starting_guard = StartingGuard {
+        runtime: &state.apply,
+        active: true,
+    };
+
+    if let Some(staged) = ready_candidate {
+        let exe = state
+            .root
+            .updates_dir()
+            .join(&staged.stage_dir_name)
+            .join(PACKAGE_ROOT_DIR)
+            .join("Clade.exe");
+        let expected = staged.exe_sha256.clone();
+        let verified = tokio::task::spawn_blocking(move || {
+            sha256_hex(&exe).is_ok_and(|h| h.eq_ignore_ascii_case(&expected))
+        })
+        .await
+        .unwrap_or(false);
+        if verified {
+            return Ok(UpdateProgressDto {
+                stage: UpdateStage::Ready,
+                version: Some(staged.version),
+                bytes_done: 0,
+                bytes_total: 0,
+            });
         }
     }
 
@@ -1136,6 +1231,18 @@ pub async fn install_update(
             "release does not ship verified portable zip and sha256 assets",
         ));
     }
+    if launch.is_busy() {
+        return Err(CodedError::new(
+            "update_game_running",
+            "close Minecraft before installing a launcher update",
+        ));
+    }
+    if prepare.is_busy() {
+        return Err(CodedError::new(
+            "update_prepare_running",
+            "wait for profile setup to finish before updating",
+        ));
+    }
 
     let sha_fetcher = state
         .sha_http
@@ -1147,17 +1254,27 @@ pub async fn install_update(
         .map_err(|m| CodedError::new("network_unavailable", m.clone()))?;
 
     let cancel = Cancel::new();
-    {
+    let stale_stage = {
         let mut g = state.apply.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = g.staged.take() {
-            let _ = remove_dir_all_with_retry(&state.root.updates_dir().join(&old.stage_dir_name));
+        if !matches!(g.stage, UpdateStage::Idle | UpdateStage::Ready) {
+            return Err(CodedError::new(
+                "update_in_progress",
+                "an update operation is already running",
+            ));
         }
+        let stale = g
+            .staged
+            .take()
+            .map(|old| state.root.updates_dir().join(&old.stage_dir_name));
+        g.starting = false;
+        starting_guard.active = false;
         g.stage = UpdateStage::Downloading;
         g.version = Some(canonical_tag.clone());
         g.bytes_done = 0;
         g.bytes_total = checked.zip_size.unwrap_or(0);
         g.cancel = Some(cancel.clone());
-    }
+        stale
+    };
 
     struct ResetGuard<'a> {
         runtime: &'a ApplyRuntime,
@@ -1176,6 +1293,13 @@ pub async fn install_update(
         runtime: &state.apply,
         done: completed.clone(),
     };
+
+    if let Some(old_dir) = stale_stage {
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = remove_dir_all_with_retry(&old_dir);
+        })
+        .await;
+    }
 
     let res = download_and_stage_with(
         &state.root,
@@ -1227,7 +1351,7 @@ pub fn apply_staged_update(
     launch: State<'_, LaunchState>,
     prepare: State<'_, PrepareState>,
 ) -> Result<(), CodedError> {
-    if launch.has_live_game() {
+    if launch.is_busy() {
         return Err(CodedError::new(
             "update_game_running",
             "close Minecraft before applying a launcher update",
@@ -1242,6 +1366,12 @@ pub fn apply_staged_update(
     let target_exe = portable_exe_name(&state.root)?;
     let staged = {
         let mut g = state.apply.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.starting {
+            return Err(CodedError::new(
+                "update_in_progress",
+                "an update operation is already running",
+            ));
+        }
         if g.stage != UpdateStage::Ready {
             return Err(CodedError::new(
                 "update_install_failed",
@@ -1647,5 +1777,82 @@ mod tests {
 
         let truncated = args[..args.len() - 1].to_vec();
         assert_eq!(parse_flag_value(&truncated, "--exe-sha256"), None);
+    }
+
+    #[test]
+    fn check_allowed_relpath_rejects_forbidden_directory_names() {
+        assert!(check_allowed_relpath("runtimes/webview2/.env", true).is_err());
+        assert!(check_allowed_relpath("runtimes/webview2/bad.zip/foo.dll", false).is_err());
+        assert!(check_allowed_relpath("runtimes/webview2/143.0/foo.dll", false).is_ok());
+    }
+
+    #[test]
+    fn paths_equal_identity_normalizes_verbatim_prefix_and_unicode_case() {
+        let a = Path::new(r"\\?\C:\Пользователи\Иван\Clade-Launcher\Clade.exe");
+        let b = Path::new(r"c:\пользователи\иван\Clade-Launcher\clade.exe");
+        assert!(paths_equal_identity(a, b));
+    }
+
+    #[test]
+    fn rollback_returns_false_when_backup_cannot_be_restored() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("Clade.exe");
+        let missing_backup = d.path().join("backup").join("Clade.exe");
+        assert!(!rollback_actions(vec![SwapAction::ReplacedFile {
+            target,
+            backup: missing_backup,
+        }]));
+    }
+
+    #[tokio::test]
+    async fn download_and_stage_honors_cancellation_during_extraction() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+
+        let exe = fake_exe(b"v2");
+        let zip_bytes = build_zip(&valid_package_entries(&exe, Some(b"wv2-v2")));
+        let zip_hex = sha256_bytes_hex(&zip_bytes);
+
+        let tag = "v0.2.0";
+        let sha_url = update_check::release_asset_url(tag, PORTABLE_SHA256_ASSET)
+            .unwrap()
+            .to_string();
+        let zip_url = update_check::release_asset_url(tag, PORTABLE_ZIP_ASSET)
+            .unwrap()
+            .to_string();
+
+        let sha_fetcher = FakeFetcher::new();
+        sha_fetcher.ok(
+            &sha_url,
+            format!("{zip_hex}  Clade-Launcher-Portable.zip\n"),
+        );
+        let zip_streamer = FakeStreamer::new();
+        zip_streamer.add(&zip_url, &zip_bytes);
+
+        let checked = CheckedRelease {
+            tag: tag.into(),
+            zip_size: Some(zip_bytes.len() as u64),
+            api_sha256: Some(zip_hex),
+            can_install: true,
+        };
+        let cancel = Cancel::new();
+        let cancel_on_extract = cancel.clone();
+
+        let err = download_and_stage_with(
+            &root,
+            &checked,
+            &sha_fetcher,
+            &zip_streamer,
+            cancel,
+            |dto| {
+                if dto.stage == UpdateStage::Extracting {
+                    cancel_on_extract.cancel();
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "update_cancelled");
     }
 }

@@ -211,6 +211,14 @@ impl LaunchState {
         self.lock().sessions.values().any(|e| e.pid.is_some())
     }
 
+    /// Is a game either live or currently starting (`Phase::Launching`)?
+    pub fn is_busy(&self) -> bool {
+        let g = self.lock();
+        g.sessions
+            .values()
+            .any(|e| e.pid.is_some() || e.phase == Phase::Launching)
+    }
+
     /// Is some game still *starting* (its credentials are being fetched or its process is coming up)?
     /// A game that is already running is not: that is `Phase::Playing`. "Start fresh" waits only for
     /// the first kind (see `vault_recovery`).

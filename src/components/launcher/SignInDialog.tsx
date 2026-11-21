@@ -56,24 +56,48 @@ export function SignInDialog({
 }: Props) {
   // While a sign-in runs, closing the modal (Escape, backdrop) cancels it.
   const cancelRef = useRef<(() => void) | null>(null);
-  // "Start fresh?" is showing: Escape and the backdrop leave it alone.
+  const dismissedRef = useRef(false);
+  // "Start fresh?" is showing, or vault KDF is running: Escape and backdrop leave it alone.
   const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  const [session, setSession] = useState(0);
+
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setSession((n) => n + 1);
+      setAsking(false);
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (open) dismissedRef.current = false;
+  }, [open]);
 
   return (
     <Modal
       open={open}
       onOpenChange={(o) => {
-        if (!o) cancelRef.current?.();
+        if (!o) {
+          dismissedRef.current = true;
+          cancelRef.current?.();
+        }
         onOpenChange(o);
       }}
       size="sm"
       closeOnBackdrop={false}
-      locked={asking}
+      locked={asking || busy}
     >
       <Flow
+        key={session}
         account={account}
         api={api}
+        busy={busy}
+        setBusy={setBusy}
         cancelRef={cancelRef}
+        dismissedRef={dismissedRef}
         onAsking={setAsking}
         onClose={() => onOpenChange(false)}
         onSignedIn={onSignedIn}
@@ -86,13 +110,19 @@ export function SignInDialog({
 function Flow({
   account,
   api,
+  busy,
+  setBusy,
   cancelRef,
+  dismissedRef,
   onAsking,
   onClose,
   onSignedIn,
   onVaultReset,
 }: Pick<Props, "account" | "api" | "onSignedIn" | "onVaultReset"> & {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   cancelRef: RefObject<(() => void) | null>;
+  dismissedRef: RefObject<boolean>;
   onAsking: (asking: boolean) => void;
   onClose: () => void;
 }) {
@@ -101,35 +131,55 @@ function Flow({
   const [pass, setPass] = useState("");
   const [confirm, setConfirm] = useState("");
   const [fieldError, setFieldError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  const stopProgressRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopProgressRef.current?.();
+      stopProgressRef.current = null;
+    };
+  }, []);
 
   const start = () => {
     setPhase({ kind: "working", stage: "opening" });
-    let stop: (() => void) | null = null;
     let finished = false;
+    stopProgressRef.current?.();
+    stopProgressRef.current = null;
     void api
-      .onSignInProgress((stage) =>
-        setPhase((p) => (p.kind === "working" ? { kind: "working", stage } : p)),
-      )
+      .onSignInProgress((stage) => {
+        if (!mountedRef.current || finished) return;
+        setPhase((p) => (p.kind === "working" ? { kind: "working", stage } : p));
+      })
       .then((u) => {
-        if (finished) u();
-        else stop = u;
+        if (finished || !mountedRef.current) u();
+        else stopProgressRef.current = u;
       });
-    cancelRef.current = () => void api.cancelSignIn().catch(() => undefined);
+    const myCancel = () => void api.cancelSignIn().catch(() => undefined);
+    cancelRef.current = myCancel;
     api.signIn(account?.id ?? null).then(
       (snapshot) => {
         finished = true;
-        stop?.();
-        cancelRef.current = null;
+        stopProgressRef.current?.();
+        stopProgressRef.current = null;
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        if (!mountedRef.current || dismissedRef.current) return;
         playSound("primary");
         onSignedIn(snapshot);
       },
       (e: unknown) => {
         finished = true;
-        stop?.();
-        cancelRef.current = null;
+        stopProgressRef.current?.();
+        stopProgressRef.current = null;
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        if (!mountedRef.current) return;
         const code = e instanceof BackendError ? e.code : null;
-        if (code === "cancelled") return onClose(); // the person chose to stop: nothing to explain
+        if (code === "cancelled") {
+          if (!dismissedRef.current) onClose();
+          return;
+        }
         setPhase({
           kind: "error",
           code,
@@ -144,13 +194,14 @@ function Flow({
     let stale = false;
     api.vaultStatus().then(
       (s) => {
-        if (stale) return;
+        if (stale || !mountedRef.current) return;
         if (!s.exists) setPhase({ kind: "create" });
         else if (!s.unlocked) setPhase({ kind: "unlock" });
         else start();
       },
       (e: unknown) =>
         !stale &&
+        mountedRef.current &&
         setPhase({
           kind: "error",
           code: null,
@@ -172,12 +223,14 @@ function Flow({
     setFieldError(null);
     (creating ? api.createVault(pass) : api.unlockVault(pass)).then(
       () => {
+        if (!mountedRef.current) return;
         setPass("");
         setConfirm("");
         setBusy(false);
         start();
       },
       (err: unknown) => {
+        if (!mountedRef.current) return;
         setBusy(false);
         setPass("");
         setConfirm("");
@@ -253,6 +306,7 @@ function Flow({
         <ModalFooter>
           <button
             type="button"
+            disabled={busy}
             className={BUTTON_QUIET}
             onClick={() => {
               playSound("click");

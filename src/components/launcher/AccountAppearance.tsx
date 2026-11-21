@@ -99,12 +99,14 @@ export function AccountAppearance({
   }, [confirmingReset]);
 
   const show = useCallback((look: Appearance) => {
+    setError(null);
     setLoad({ kind: "ready", look });
     // The model of the account's skin, when it says; otherwise whatever was last chosen.
     if (look.skinModel) setModel(look.skinModel);
   }, []);
 
   const reload = useCallback(() => {
+    setError(null);
     setLoad({ kind: "loading" });
     api.appearance(account.id).then(
       (look) => alive.current && show(look),

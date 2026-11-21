@@ -14,23 +14,35 @@ const soundOf = (s: UiSettings) => ({ enabled: s.soundEnabled, volume: s.soundVo
 async function main() {
   installInputModality();
 
-  // Launcher preferences live in the portable settings file (data/settings.json), owned by the Rust
-  // backend, and the window backdrop status comes from the same native layer. Fetch both in parallel
-  // before the first render so startup only pays one IPC round-trip.
-  const [ui, glassStatus] = await Promise.all([loadUiSettings(), loadGlassStatus()]);
-  sound.hydrate(soundOf(ui));
-  setMotionMode(ui.reducedMotion);
-  // The window material is cosmetic: the page starts opaque and only switches once the backend says
-  // the material is really on.
-  applyGlass(glassStatus);
-  void onGlassStatusChanged(applyGlass);
-  // An explicit language choice wins; before one is ever made the Windows language decides.
-  setLocale(localeOf(ui));
-  void onUiSettingsChanged((s) => {
-    sound.hydrate(soundOf(s));
-    setMotionMode(s.reducedMotion);
-    setLocale(localeOf(s));
-  });
+  // Subscribe to settings and window-material events before reading the initial snapshots so a
+  // backend change racing startup is never dropped.
+  let sawGlassEvent = false;
+  let sawUiEvent = false;
+  let initialUi: UiSettings | null = null;
+  await Promise.all([
+    onGlassStatusChanged((s) => {
+      sawGlassEvent = true;
+      applyGlass(s);
+    }),
+    onUiSettingsChanged((s) => {
+      sawUiEvent = true;
+      initialUi = s;
+      sound.hydrate(soundOf(s));
+      setMotionMode(s.reducedMotion);
+      setLocale(localeOf(s));
+    }),
+  ]);
+
+  const [fetchedUi, glassStatus] = await Promise.all([loadUiSettings(), loadGlassStatus()]);
+  if (!sawUiEvent) {
+    sound.hydrate(soundOf(fetchedUi));
+    setMotionMode(fetchedUi.reducedMotion);
+    setLocale(localeOf(fetchedUi));
+  }
+  if (!sawGlassEvent) {
+    applyGlass(glassStatus);
+  }
+  const ui = initialUi ?? fetchedUi;
 
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
