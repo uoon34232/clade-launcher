@@ -111,8 +111,8 @@ pub struct CapturedStage {
     pub pixels: Vec<u32>,
 }
 
-const REVEAL_HOLD_MS: u64 = 180;
-const REVEAL_DURATION_MS: u64 = 600;
+const REVEAL_HOLD_MS: u64 = 260;
+const REVEAL_DURATION_MS: u64 = 660;
 const CLOSE_HOLD_MS: u64 = 130;
 const CLOSE_DURATION_MS: u64 = 490;
 
@@ -193,11 +193,11 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
 
     let eased = 1.0 - (1.0 - u).powi(3);
 
-    let max_pad_x = ((w as f32) * 0.045)
-        .clamp(12.0, 64.0)
+    let max_pad_x = ((w as f32) * 0.035)
+        .clamp(10.0, 48.0)
         .min((w / 4).max(0) as f32);
-    let max_pad_y = ((h as f32) * 0.045)
-        .clamp(10.0, 46.0)
+    let max_pad_y = ((h as f32) * 0.035)
+        .clamp(8.0, 36.0)
         .min((h / 4).max(0) as f32);
     let pad_x = ((1.0 - eased) * max_pad_x).round() as i32;
     let pad_y = ((1.0 - eased) * max_pad_y).round() as i32;
@@ -207,41 +207,41 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
     let inner_left = ((w - inner_w) / 2).clamp(0, w - inner_w);
     let inner_right = inner_left + inner_w;
 
-    let lift_y = ((1.0 - eased) * 14.0).round() as i32;
+    let lift_y = ((1.0 - eased) * 10.0).round() as i32;
     let inner_top = ((h - inner_h) / 2 + lift_y).clamp(0, h - inner_h);
     let inner_bottom = inner_top + inner_h;
 
-    let radius = (((1.0 - eased) * 18.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
+    let radius = (((1.0 - eased) * 16.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
 
-    let inner_t = (u / 0.34).clamp(0.0, 1.0);
+    let inner_t = (u / 0.48).clamp(0.0, 1.0);
     let inner_e = 1.0 - (1.0 - inner_t).powi(3);
     let inner_alpha = ((1.0 - inner_e) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
     let visibility = 1.0 - (f32::from(inner_alpha) / 255.0);
 
-    let outer_alpha = if u <= 0.72 {
+    let outer_alpha = if u <= 0.45 {
         255
     } else {
-        let ot = ((u - 0.72) / 0.28).clamp(0.0, 1.0);
+        let ot = ((u - 0.45) / 0.55).clamp(0.0, 1.0);
         let oe = 1.0 - (1.0 - ot).powi(3);
         ((1.0 - oe) * 255.0 + 0.5).clamp(0.0, 255.0) as u8
     };
 
-    let edge_weight = visibility * (1.0 - eased);
+    let edge_weight = visibility * (1.0 - eased) * (f32::from(outer_alpha) / 255.0);
     let shadow_alpha = if u >= 0.96 || edge_weight <= 0.005 {
         0
     } else {
-        (edge_weight * 48.0).round().clamp(0.0, 255.0) as u8
+        (edge_weight * 32.0).round().clamp(0.0, 255.0) as u8
     };
     let shadow_spread = if shadow_alpha == 0 {
         0
     } else {
-        ((1.0 - eased) * 12.0 + 3.0).round().clamp(0.0, 16.0) as i32
+        ((1.0 - eased) * 10.0 + 2.0).round().clamp(0.0, 14.0) as i32
     };
 
     let border_alpha = if u >= 0.96 || edge_weight <= 0.005 {
         0
     } else {
-        (edge_weight * 56.0).round().clamp(0.0, 255.0) as u8
+        (edge_weight * 36.0).round().clamp(0.0, 255.0) as u8
     };
 
     RevealFrame {
@@ -517,6 +517,7 @@ fn compute_paint_bounds(
     inner_right: i32,
     inner_bottom: i32,
     radius: i32,
+    border_alpha: u8,
     shadow_alpha: u8,
     shadow_spread: i32,
 ) -> PaintBounds {
@@ -531,6 +532,8 @@ fn compute_paint_bounds(
     let in_r = flat_r.min(r.saturating_sub(1)).max(in_l);
     let spread = if shadow_alpha > 0 && shadow_spread > 0 {
         shadow_spread as usize
+    } else if border_alpha > 0 {
+        2
     } else {
         0
     };
@@ -587,6 +590,7 @@ pub fn paint_reveal_bgra(buf: &mut [u32], width: i32, height: i32, frame: Reveal
         frame.inner_right,
         frame.inner_bottom,
         frame.radius,
+        frame.border_alpha,
         frame.shadow_alpha,
         frame.shadow_spread,
     );
@@ -672,6 +676,7 @@ pub fn paint_close_bgra(
         frame.inner_right,
         frame.inner_bottom,
         frame.radius,
+        frame.border_alpha,
         frame.shadow_alpha,
         frame.shadow_spread,
     );
@@ -1050,6 +1055,31 @@ pub fn is_active(app: &AppHandle) -> bool {
     app.try_state::<EmbedState>().is_some_and(|s| s.is_active())
 }
 
+/// Returns Clade's current framed stage dimensions clamped to valid Minecraft resolution bounds,
+/// so embedded launches open their initial OpenGL swapchain at the exact stage size without an
+/// `854x480 -> stage` startup resize artifact.
+pub fn stage_resolution(app: &AppHandle) -> Option<crate::instances::Resolution> {
+    let stage = app
+        .get_webview_window("main")
+        .and_then(|w| host_window_id(&w))
+        .and_then(|id| win32::layout_for_host(id as usize as win32::HWND))
+        .map(|l| l.stage)
+        .or_else(|| {
+            app.try_state::<EmbedState>()
+                .and_then(|s| s.current_bounds().0)
+        })?;
+    Some(crate::instances::Resolution {
+        width: stage.width.clamp(
+            crate::instances::MIN_RESOLUTION_WIDTH,
+            crate::instances::MAX_RESOLUTION_WIDTH,
+        ),
+        height: stage.height.clamp(
+            crate::instances::MIN_RESOLUTION_HEIGHT,
+            crate::instances::MAX_RESOLUTION_HEIGHT,
+        ),
+    })
+}
+
 #[tauri::command]
 pub fn get_game_embed_status(state: State<'_, EmbedState>) -> GameEmbedStatus {
     state.status()
@@ -1342,7 +1372,7 @@ fn try_attach_game_window(
             win32::dismiss_veil_slot(slot);
         }
         let veil_handle = if animate {
-            win32::create_open_veil(host_hwnd, session_clone.clone(), stage_rect)
+            win32::create_open_veil(host_hwnd, mc_hwnd, session_clone.clone(), stage_rect)
         } else {
             None
         };
@@ -1649,9 +1679,9 @@ mod win32 {
 
     use super::{
         compute_close_frame, compute_framed_layout, compute_reveal_frame, paint_close_bgra,
-        paint_reveal_bgra, stage_to_screen_rect, ActiveSession, CapturedStage, FramedLayout,
-        StageBounds, VeilSlot, CLOSE_DURATION_MS, CLOSE_HOLD_MS, REVEAL_DURATION_MS,
-        REVEAL_HOLD_MS,
+        paint_reveal_bgra, stage_to_screen_rect, ActiveSession, CapturedStage, CloseFrame,
+        FramedLayout, RevealFrame, StageBounds, VeilSlot, CLOSE_DURATION_MS, CLOSE_HOLD_MS,
+        REVEAL_DURATION_MS, REVEAL_HOLD_MS,
     };
 
     const HWND_TOP: HWND = std::ptr::null_mut();
@@ -1825,7 +1855,7 @@ mod win32 {
         };
         let veil_id = session.veil_slot.hwnd();
         let below_veil = (veil_id != 0).then_some(veil_id as usize as HWND);
-        if !only_if_needed || needs_bounds_sync(mc_hwnd, host, below_veil, target) {
+        if !only_if_needed || needs_bounds_sync(mc_hwnd, host, target) {
             apply_screen_bounds(
                 mc_hwnd,
                 target.0,
@@ -2580,12 +2610,7 @@ mod win32 {
         }
     }
 
-    pub fn needs_bounds_sync(
-        mc: HWND,
-        host: HWND,
-        below_veil: Option<HWND>,
-        target: (i32, i32, i32, i32),
-    ) -> bool {
+    pub fn needs_bounds_sync(mc: HWND, host: HWND, target: (i32, i32, i32, i32)) -> bool {
         let mut wr = RECT {
             left: 0,
             top: 0,
@@ -2602,11 +2627,6 @@ mod win32 {
             }
             if !is_window_above(mc, host) {
                 return true;
-            }
-            if let Some(veil) = below_veil.filter(|&v| v != mc && is_valid(v)) {
-                if !is_window_above(veil, mc) {
-                    return true;
-                }
             }
             wr.left != target.0
                 || wr.top != target.1
@@ -2925,6 +2945,7 @@ mod win32 {
 
     unsafe fn init_veil_window(
         host: HWND,
+        above_target: Option<HWND>,
         rect: (i32, i32, i32, i32),
         initial_open: bool,
         snapshot: Option<&CapturedStage>,
@@ -3032,7 +3053,11 @@ mod win32 {
             let _ = DestroyWindow(hwnd);
             return None;
         }
-        let insert_after = insert_after_above_host(hwnd, host);
+        let top_target = match above_target {
+            Some(t) if !t.is_null() && IsWindow(t) != 0 && is_window_above(t, host) => t,
+            _ => host,
+        };
+        let insert_after = insert_after_above_host(hwnd, top_target);
         SetWindowPos(
             hwnd,
             insert_after,
@@ -3054,6 +3079,7 @@ mod win32 {
 
     pub fn create_open_veil(
         host: HWND,
+        mc_hint: HWND,
         session: Arc<ActiveSession>,
         rect: (i32, i32, i32, i32),
     ) -> Option<OpenVeilHandle> {
@@ -3062,7 +3088,8 @@ mod win32 {
             return None;
         }
         let host_id = host as usize as u64;
-        let mc_slot = Arc::new(AtomicU64::new(0));
+        let mc_hint_id = mc_hint as usize as u64;
+        let mc_slot = Arc::new(AtomicU64::new(mc_hint_id));
         let activated = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<u64>(1);
@@ -3076,7 +3103,14 @@ mod win32 {
                 // SAFETY: `hwnd` and `surface` belong exclusively to this dedicated VSync thread.
                 unsafe {
                     let host = host_id as usize as HWND;
-                    let Some((hwnd, surface)) = init_veil_window(host, rect, true, None) else {
+                    let mc_hint = mc_hint_id as usize as HWND;
+                    let Some((hwnd, surface)) = init_veil_window(
+                        host,
+                        (!mc_hint.is_null()).then_some(mc_hint),
+                        rect,
+                        true,
+                        None,
+                    ) else {
                         let _ = ready_tx.send(0);
                         return;
                     };
@@ -3086,11 +3120,15 @@ mod win32 {
 
                     let len = (surface.width as usize).saturating_mul(surface.height as usize);
                     let created_at = std::time::Instant::now();
+                    let mut activated_at: Option<std::time::Instant> = None;
                     let mut anim_start: Option<std::time::Instant> = None;
                     let mut completed = false;
                     let mut last_mc: HWND = std::ptr::null_mut();
                     let mut x = rect.0;
                     let mut y = rect.1;
+                    let initial_frame = compute_reveal_frame(surface.width, surface.height, 0.0);
+                    let mut last_pushed: Option<(RevealFrame, i32, i32)> =
+                        Some((initial_frame, x, y));
 
                     loop {
                         pump_thread_messages();
@@ -3109,6 +3147,12 @@ mod win32 {
                         if !mc.is_null() {
                             last_mc = mc;
                         }
+                        let z_target =
+                            if !mc.is_null() && IsWindow(mc) != 0 && is_window_above(mc, host) {
+                                mc
+                            } else {
+                                host
+                            };
                         if !activated_t.load(Ordering::Acquire) {
                             if session.stop.load(Ordering::Acquire)
                                 || !is_host_alive(host)
@@ -3118,26 +3162,14 @@ mod win32 {
                             {
                                 break;
                             }
-                            let z_target = if !mc.is_null() && IsWindow(mc) != 0 {
-                                mc
-                            } else {
-                                host
-                            };
                             raise_above(hwnd, z_target);
                             continue;
                         }
 
-                        let start = *anim_start.get_or_insert_with(|| {
-                            tracing::info!(
-                                width = surface.width,
-                                height = surface.height,
-                                "started native game reveal animation"
-                            );
-                            std::time::Instant::now()
-                        });
-                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        let act = *activated_at.get_or_insert_with(std::time::Instant::now);
                         let fg = GetForegroundWindow();
-                        let user_left = elapsed_ms > REVEAL_HOLD_MS + 100
+                        let early_left = anim_start
+                            .is_some_and(|s| s.elapsed().as_millis() as u64 > REVEAL_HOLD_MS + 100)
                             && !fg.is_null()
                             && fg != host
                             && fg != mc;
@@ -3147,7 +3179,7 @@ mod win32 {
                             || IsIconic(host) != 0
                             || IsWindowVisible(host) == 0
                             || (!mc.is_null() && !is_attached_window_alive(mc, host))
-                            || user_left
+                            || early_left
                         {
                             break;
                         }
@@ -3163,24 +3195,63 @@ mod win32 {
                             }
                         }
 
-                        let t = (elapsed_ms as f32) / (REVEAL_DURATION_MS as f32);
-                        let buf = std::slice::from_raw_parts_mut(surface.bits, len);
-                        let frame = compute_reveal_frame(surface.width, surface.height, t);
-                        paint_reveal_bgra(buf, surface.width, surface.height, frame);
-                        let _ = push_layered_bitmap(
-                            hwnd,
-                            x,
-                            y,
-                            surface.width,
-                            surface.height,
-                            surface.mem_dc,
-                        );
-                        let z_target = if !mc.is_null() && IsWindow(mc) != 0 {
-                            mc
-                        } else {
-                            host
-                        };
                         raise_above(hwnd, z_target);
+
+                        if anim_start.is_none() {
+                            let rect_locked = mc.is_null()
+                                || window_rect(mc).is_some_and(|(mx, my, mw, mh)| {
+                                    (mx - x).abs() <= 2
+                                        && (my - y).abs() <= 2
+                                        && (mw - surface.width).abs() <= 2
+                                        && (mh - surface.height).abs() <= 2
+                                });
+                            let z_locked = mc.is_null() || is_window_above(hwnd, mc);
+                            if !(rect_locked && z_locked)
+                                && act.elapsed() < Duration::from_millis(700)
+                            {
+                                if last_pushed != Some((initial_frame, x, y)) {
+                                    let _ = push_layered_bitmap(
+                                        hwnd,
+                                        x,
+                                        y,
+                                        surface.width,
+                                        surface.height,
+                                        surface.mem_dc,
+                                    );
+                                    last_pushed = Some((initial_frame, x, y));
+                                }
+                                continue;
+                            }
+                        }
+
+                        let start = *anim_start.get_or_insert_with(|| {
+                            tracing::info!(
+                                width = surface.width,
+                                height = surface.height,
+                                wait_ms = act.elapsed().as_millis() as u64,
+                                "started native game reveal animation"
+                            );
+                            std::time::Instant::now()
+                        });
+                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        let t = (elapsed_ms as f32) / (REVEAL_DURATION_MS as f32);
+                        let frame = compute_reveal_frame(surface.width, surface.height, t);
+                        let frame_changed = last_pushed.is_none_or(|(pf, _, _)| pf != frame);
+                        if frame_changed || last_pushed != Some((frame, x, y)) {
+                            if frame_changed {
+                                let buf = std::slice::from_raw_parts_mut(surface.bits, len);
+                                paint_reveal_bgra(buf, surface.width, surface.height, frame);
+                            }
+                            let _ = push_layered_bitmap(
+                                hwnd,
+                                x,
+                                y,
+                                surface.width,
+                                surface.height,
+                                surface.mem_dc,
+                            );
+                            last_pushed = Some((frame, x, y));
+                        }
 
                         if t >= 1.0 {
                             completed = true;
@@ -3259,7 +3330,7 @@ mod win32 {
                 unsafe {
                     let host = host_id as usize as HWND;
                     let Some((hwnd, surface)) =
-                        init_veil_window(host, rect, false, snapshot.as_ref())
+                        init_veil_window(host, None, rect, false, snapshot.as_ref())
                     else {
                         let _ = ready_tx.send(false);
                         return;
@@ -3278,6 +3349,11 @@ mod win32 {
                     let start = std::time::Instant::now();
                     let mut x = rect.0;
                     let mut y = rect.1;
+                    let mut last_pushed: Option<(CloseFrame, i32, i32)> = Some((
+                        compute_close_frame(surface.width, surface.height, 0.0),
+                        x,
+                        y,
+                    ));
 
                     loop {
                         pump_thread_messages();
@@ -3318,23 +3394,29 @@ mod win32 {
                         }
 
                         let t = (elapsed_ms as f32) / (CLOSE_DURATION_MS as f32);
-                        let buf = std::slice::from_raw_parts_mut(surface.bits, len);
                         let frame = compute_close_frame(surface.width, surface.height, t);
-                        paint_close_bgra(
-                            buf,
-                            surface.width,
-                            surface.height,
-                            frame,
-                            snapshot.as_ref(),
-                        );
-                        let _ = push_layered_bitmap(
-                            hwnd,
-                            x,
-                            y,
-                            surface.width,
-                            surface.height,
-                            surface.mem_dc,
-                        );
+                        let frame_changed = last_pushed.is_none_or(|(pf, _, _)| pf != frame);
+                        if frame_changed || last_pushed != Some((frame, x, y)) {
+                            if frame_changed {
+                                let buf = std::slice::from_raw_parts_mut(surface.bits, len);
+                                paint_close_bgra(
+                                    buf,
+                                    surface.width,
+                                    surface.height,
+                                    frame,
+                                    snapshot.as_ref(),
+                                );
+                            }
+                            let _ = push_layered_bitmap(
+                                hwnd,
+                                x,
+                                y,
+                                surface.width,
+                                surface.height,
+                                surface.mem_dc,
+                            );
+                            last_pushed = Some((frame, x, y));
+                        }
                         raise_above(hwnd, host);
 
                         if t >= 1.0 {
@@ -3538,7 +3620,7 @@ mod tests {
 
     #[test]
     fn compute_reveal_frame_clamps_endpoints_and_expands_smoothly() {
-        for p in [0.05, 0.25] {
+        for p in [0.05, 0.35] {
             let hold = compute_reveal_frame(1280, 676, p);
             assert_eq!(hold.inner_alpha, 255);
             assert_eq!(hold.outer_alpha, 255);
@@ -3554,22 +3636,23 @@ mod tests {
                 .all(|&px| px == premul_bgra(243, 237, 227, 255)));
         }
 
-        let early = compute_reveal_frame(1280, 676, 0.40);
-        assert!(early.inner_alpha < 255);
+        let early = compute_reveal_frame(1280, 676, 0.50);
+        assert!(early.inner_alpha < 255 && early.inner_alpha > 0);
         assert!(early.inner_left > 0 && early.inner_right < 1280);
         assert!(early.radius > 0);
         assert!(early.shadow_alpha > 0);
         assert!(early.border_alpha > 0);
 
-        let mid = compute_reveal_frame(1280, 676, 0.60);
+        let mid = compute_reveal_frame(1280, 676, 0.72);
         assert_eq!(mid.inner_alpha, 0);
         assert!(mid.inner_left < early.inner_left);
         assert!(mid.inner_right > early.inner_right);
         assert!(mid.radius < early.radius);
+        assert!(mid.outer_alpha < 255 && mid.outer_alpha > 0);
 
-        let late = compute_reveal_frame(1280, 676, 0.90);
+        let late = compute_reveal_frame(1280, 676, 0.92);
         assert_eq!(late.inner_alpha, 0);
-        assert!(late.outer_alpha < 255 && late.outer_alpha > 0);
+        assert!(late.outer_alpha < mid.outer_alpha && late.outer_alpha > 0);
 
         let end = compute_reveal_frame(1280, 676, 1.5);
         assert_eq!(

@@ -403,11 +403,9 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 @keyframes stage-veil-in {
   from {
     opacity: 0;
-    transform: translate3d(0, 6px, 0) scale(0.985);
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
   }
 }
 @keyframes launch-portal-in {
@@ -903,9 +901,7 @@ html[data-glass="on"] body {
   box-shadow: var(--glass-modal-edge), var(--glass-modal-shadow);
 }
 .glass-launch-card {
-  background: var(--glass-modal-bg);
-  -webkit-backdrop-filter: var(--glass-modal-filter);
-  backdrop-filter: var(--glass-modal-filter);
+  background: #f6f0e6;
   box-shadow:
     var(--glass-modal-edge),
     0 24px 60px -22px rgb(43 38 34 / 0.35);
@@ -956,7 +952,6 @@ html[data-glass="on"] .dock-item:hover:not(:disabled) {
 @media (forced-colors: active) {
   .glass-dock,
   .glass-modal,
-  .glass-launch-card,
   .glass-overlay {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;

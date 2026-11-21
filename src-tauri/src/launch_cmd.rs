@@ -299,6 +299,8 @@ pub struct LaunchEnv<'a> {
     pub default_memory_mb: Option<u32>,
     /// Live physical + commit memory availability (`None` in purely static planning tests).
     pub memory_snapshot: Option<crate::system::MemorySnapshot>,
+    /// Framed stage resolution override when launching inside Clade (`None` in standalone mode).
+    pub embed_resolution: Option<crate::instances::Resolution>,
 }
 
 /// Everything that must be true before the game may start, ending in the ready-to-run command.
@@ -414,7 +416,7 @@ pub async fn plan_launch<T: Transport>(
             access_token: token,
         },
         memory_mb,
-        resolution: inst.resolution,
+        resolution: env.embed_resolution.or(inst.resolution),
         extra_jvm_args: &inst.extra_jvm_args,
         sys,
         temp_dir: &temp,
@@ -550,6 +552,9 @@ async fn start(
             total_memory_mb: crate::system::total_memory_mb(),
             default_memory_mb: app.state::<SettingsState>().default_memory_mb(),
             memory_snapshot: crate::system::memory_snapshot(),
+            embed_resolution: wants_embed
+                .then(|| crate::game_embed::stage_resolution(app))
+                .flatten(),
         },
     )
     .await?;

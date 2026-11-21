@@ -114,6 +114,7 @@ async fn plan(
             total_memory_mb: Some(16_384),
             default_memory_mb: None,
             memory_snapshot: None,
+            embed_resolution: None,
         },
     )
     .await
@@ -802,6 +803,7 @@ async fn memory_snapshot_clamps_heap_down_when_commit_or_physical_ram_is_tight()
                 avail_phys_mb: 10_240,
                 avail_commit_mb: 12_288,
             }),
+            embed_resolution: None,
         },
     )
     .await
@@ -825,9 +827,47 @@ async fn memory_snapshot_clamps_heap_down_when_commit_or_physical_ram_is_tight()
                 avail_phys_mb: 2_048,
                 avail_commit_mb: 1_920,
             }),
+            embed_resolution: None,
         },
     )
     .await
     .unwrap();
     assert_eq!(tight.command.args[0], "-Xmx1408M");
+}
+
+#[tokio::test]
+async fn embed_resolution_overrides_profile_resolution_for_launch_command() {
+    let sys = SystemEnv::from_process();
+    let (w, id) = prepared("1.21.4", Era::Modern).await;
+    let a = accounts(&w);
+    let planned = plan_launch(
+        &w.root,
+        &FakeTransport::new(),
+        &a.vault,
+        &a.state,
+        &id,
+        &LaunchEnv {
+            now: NOW,
+            sys: &sys,
+            total_memory_mb: Some(16_384),
+            default_memory_mb: None,
+            memory_snapshot: None,
+            embed_resolution: Some(crate::instances::Resolution {
+                width: 1280,
+                height: 676,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    let pos = planned
+        .command
+        .args
+        .windows(4)
+        .position(|pair| pair == ["--width", "1280", "--height", "676"]);
+    assert!(
+        pos.is_some(),
+        "expected --width 1280 --height 676 in args: {:?}",
+        planned.command.args
+    );
 }
