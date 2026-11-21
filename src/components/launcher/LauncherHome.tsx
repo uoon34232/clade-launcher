@@ -173,7 +173,7 @@ export function LauncherHome({
     returnTimerRef.current = window.setTimeout(() => {
       returnTimerRef.current = null;
       setEmbedReturning(false);
-    }, 680);
+    }, 560);
     return () => {
       if (returnTimerRef.current !== null) {
         window.clearTimeout(returnTimerRef.current);
@@ -509,7 +509,12 @@ export function LauncherHome({
       : null;
   const isLaunching = Object.values(runs).includes("launching");
   const embedLaunching =
-    ui.onLaunch === "embed" && !embed.active && (isLaunching || embed.watching === true);
+    ui.onLaunch === "embed" &&
+    !embed.active &&
+    surface.kind === "none" &&
+    !introduction &&
+    problem === null &&
+    (isLaunching || embed.watching === true);
   const launchingProfile =
     snapshot.profiles.find((p) => runs[p.id] === "launching" || p.id === embed.instanceId) ??
     selectedProfile;
@@ -526,7 +531,6 @@ export function LauncherHome({
         <AnimatedBackground paused={bgPaused} />
         <WindowChrome
           framed={embed.active}
-          launching={embedLaunching}
           closing={embed.closing}
           maximized={embed.maximized}
           onToggleMaximize={toggleMaximize}
@@ -546,32 +550,39 @@ export function LauncherHome({
             className="h-full w-full"
           />
         </div>
+        {!embed.active && (
+          <section
+            data-launching={embedLaunching ? "true" : undefined}
+            className="hero-stage absolute inset-0 z-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]"
+          >
+            <Hero
+              lastPhraseId={initialUi?.lastPhrase}
+              playtimeSeconds={snapshot.totalPlaytimeSeconds}
+              returning={embedReturning}
+            />
+          </section>
+        )}
         {embedLaunching && (
           <div
             aria-hidden="true"
             data-testid="game-stage-launching"
-            className="launch-stage-veil pointer-events-none absolute inset-x-0 top-[44px] bottom-0 flex flex-col overflow-hidden"
+            className="launch-stage-veil pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 flex items-center justify-center overflow-hidden px-6 pb-[clamp(6.5rem,20vh,12.5rem)]"
           >
-            <div className="bg-graphite/[0.06] h-[2px] w-full shrink-0 overflow-hidden">
-              <div className="stage-seam-shimmer bg-clay/70 h-full w-1/3 rounded-full" />
-            </div>
-            <div className="flex flex-1 items-center justify-center px-6 pb-[clamp(6.5rem,20vh,12.5rem)]">
-              <div className="launch-portal-card bg-cream/95 ring-graphite/10 flex min-w-[min(20rem,100%)] flex-col items-center gap-3 rounded-[1.5rem] px-8 py-6 text-center shadow-[0_24px_60px_-22px_rgb(43_38_34/0.35),inset_0_1px_0_rgb(255_255_255/0.6)] ring-1">
-                <div className="relative flex size-8 items-center justify-center">
-                  <span className="launch-orb-pulse bg-clay/25 absolute inset-0 rounded-full" />
-                  <span className="bg-clay relative size-2.5 rounded-full" />
-                </div>
-                {launchingProfile && (
-                  <p className="text-graphite font-serif text-[1.25rem] leading-tight tracking-[-0.015em]">
-                    {launchingProfile.name}
-                  </p>
-                )}
-                <p className="text-ink-muted text-[0.875rem] font-medium tracking-[0.01em]">
-                  {t("play.launching")}
+            <div className="launch-portal-card glass-launch-card flex min-w-[min(20rem,100%)] flex-col items-center gap-3 rounded-[1.5rem] px-8 py-6 text-center">
+              <div className="relative flex size-8 items-center justify-center">
+                <span className="launch-orb-pulse bg-clay/25 absolute inset-0 rounded-full" />
+                <span className="bg-clay relative size-2.5 rounded-full" />
+              </div>
+              {launchingProfile && (
+                <p className="text-graphite font-serif text-[1.25rem] leading-tight tracking-[-0.015em]">
+                  {launchingProfile.name}
                 </p>
-                <div className="bg-graphite/[0.08] mt-1 h-1 w-40 overflow-hidden rounded-full">
-                  <div className="indeterminate-bar bg-clay h-full w-1/3 rounded-full" />
-                </div>
+              )}
+              <p className="text-ink-muted text-[0.875rem] font-medium tracking-[0.01em]">
+                {t("play.launching")}
+              </p>
+              <div className="bg-graphite/[0.08] mt-1 h-1 w-40 overflow-hidden rounded-full">
+                <div className="indeterminate-bar bg-clay h-full w-1/3 rounded-full" />
               </div>
             </div>
           </div>
@@ -583,22 +594,10 @@ export function LauncherHome({
             className="game-stage-exit bg-ivory/25 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden"
           />
         )}
-        {!embed.active && (
-          <section
-            data-launching={embedLaunching ? "true" : undefined}
-            className="hero-stage absolute inset-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]"
-          >
-            <Hero
-              lastPhraseId={initialUi?.lastPhrase}
-              playtimeSeconds={snapshot.totalPlaytimeSeconds}
-              returning={embedReturning}
-            />
-          </section>
-        )}
         {!embed.active && unreadable.length > 0 && (
           <div
             role="status"
-            className="dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
+            className="launcher-notice dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
           >
             <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
               <span className="text-ink-muted">
@@ -634,7 +633,7 @@ export function LauncherHome({
           removed.length > 0 && (
             <div
               role="status"
-              className="dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
+              className="launcher-notice dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
             >
               <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
                 <span className="text-ink-muted">

@@ -413,7 +413,7 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 @keyframes launch-portal-in {
   from {
     opacity: 0;
-    transform: translate3d(0, 22px, 0) scale(0.92);
+    transform: translate3d(0, 14px, 0) scale(0.96);
   }
   to {
     opacity: 1;
@@ -429,14 +429,6 @@ html[data-input="keyboard"] .wordmark:focus-visible {
   100% {
     opacity: 0;
     transform: scale(1.85);
-  }
-}
-@keyframes stage-seam-slide {
-  0% {
-    transform: translateX(-110%);
-  }
-  100% {
-    transform: translateX(310%);
   }
 }
 @keyframes game-stage-fold-out {
@@ -497,26 +489,23 @@ html[data-input="keyboard"] .wordmark:focus-visible {
   animation: play-launch-breathe 1.5s var(--ease-out-soft) infinite;
 }
 .launch-stage-veil {
-  animation: stage-veil-in 340ms var(--ease-out-soft) both;
+  animation: stage-veil-in 240ms var(--ease-out-soft) both;
 }
 .launch-portal-card {
-  animation: launch-portal-in 420ms var(--ease-out-soft) both;
+  animation: launch-portal-in 360ms var(--ease-out-soft) 90ms both;
 }
 .launch-orb-pulse {
   animation: launch-orb-ring 1.7s var(--ease-out-soft) infinite;
 }
-.stage-seam-shimmer {
-  animation: stage-seam-slide 1.6s var(--ease-out-soft) infinite;
-}
 .game-stage-exit {
   transform-origin: 50% 42%;
-  animation: game-stage-fold-out 440ms var(--ease-out-soft) 150ms forwards;
+  animation: game-stage-fold-out 380ms var(--ease-out-soft) 130ms forwards;
 }
 .hero-return {
-  animation: hero-return-in 460ms var(--ease-out-soft) 150ms both;
+  animation: hero-return-in 400ms var(--ease-out-soft) 130ms both;
 }
 .dock-return {
-  animation: dock-return-in 440ms var(--ease-out-soft) 170ms both;
+  animation: dock-return-in 380ms var(--ease-out-soft) 150ms both;
 }
 .chrome-btn-enter {
   animation: chrome-btn-pop 220ms var(--ease-out-soft) both;
@@ -526,12 +515,26 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 }
 .hero-stage {
   transition:
-    transform 420ms var(--ease-out-soft),
-    opacity 380ms var(--ease-out-soft);
+    transform 300ms var(--ease-out-soft),
+    opacity 220ms var(--ease-out-soft);
 }
 .hero-stage[data-launching="true"] {
-  opacity: 0.14;
-  transform: translate3d(0, -18px, 0) scale(0.95);
+  opacity: 0;
+  transform: translate3d(0, -14px, 0) scale(0.96);
+  pointer-events: none;
+}
+
+/* When WebView2 shrinks to the 44px framed header strip, hide full-window home layers on the very
+   first Chromium layout pass before React receives the async embed-state event, preventing Hero
+   or LauncherDock from appearing clipped inside the titlebar strip. */
+@media (max-height: 120px) {
+  .hero-stage,
+  .launcher-dock-wrap,
+  .launch-stage-veil,
+  .game-stage-exit,
+  .launcher-notice {
+    display: none !important;
+  }
 }
 
 /* Reduced motion: the person's choice in Settings (`data-motion` on the root element) wins; with
@@ -548,7 +551,6 @@ html[data-input="keyboard"] .wordmark:focus-visible {
   html:not([data-motion="full"]) .launch-stage-veil,
   html:not([data-motion="full"]) .launch-portal-card,
   html:not([data-motion="full"]) .launch-orb-pulse,
-  html:not([data-motion="full"]) .stage-seam-shimmer,
   html:not([data-motion="full"]) .game-stage-exit,
   html:not([data-motion="full"]) .chrome-btn-enter,
   html:not([data-motion="full"]) .chrome-closing-pulse,
@@ -590,7 +592,6 @@ html[data-motion="reduce"] .play-launching-glow,
 html[data-motion="reduce"] .launch-stage-veil,
 html[data-motion="reduce"] .launch-portal-card,
 html[data-motion="reduce"] .launch-orb-pulse,
-html[data-motion="reduce"] .stage-seam-shimmer,
 html[data-motion="reduce"] .game-stage-exit,
 html[data-motion="reduce"] .chrome-btn-enter,
 html[data-motion="reduce"] .chrome-closing-pulse,
@@ -858,9 +859,9 @@ html[data-glass="on"] {
   --glass-dock-filter: none;
   --glass-dock-edge: inset 0 1px 0 rgb(255 255 255 / 0.2), inset 0 0 0 1px rgb(255 255 255 / 0.09);
   --glass-dock-shadow: 0 26px 60px -26px rgb(43 38 34 / 0.55), 0 2px 8px -2px rgb(43 38 34 / 0.2);
-  --glass-modal-bg: rgb(246 240 230 / 0.92);
-  --glass-modal-filter: blur(20px);
-  --glass-overlay-filter: blur(10px);
+  --glass-modal-bg: rgb(246 240 230 / 0.95);
+  --glass-modal-filter: blur(24px);
+  --glass-overlay-filter: blur(14px);
   --glass-modal-edge:
     inset 0 1px 0 rgb(255 255 255 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.5),
     0 0 0 2px rgb(43 38 34 / 0.06);
@@ -900,6 +901,14 @@ html[data-glass="on"] body {
   -webkit-backdrop-filter: var(--glass-modal-filter);
   backdrop-filter: var(--glass-modal-filter);
   box-shadow: var(--glass-modal-edge), var(--glass-modal-shadow);
+}
+.glass-launch-card {
+  background: var(--glass-modal-bg);
+  -webkit-backdrop-filter: var(--glass-modal-filter);
+  backdrop-filter: var(--glass-modal-filter);
+  box-shadow:
+    var(--glass-modal-edge),
+    0 24px 60px -22px rgb(43 38 34 / 0.35);
 }
 .glass-overlay {
   -webkit-backdrop-filter: var(--glass-overlay-filter);
@@ -947,6 +956,7 @@ html[data-glass="on"] .dock-item:hover:not(:disabled) {
 @media (forced-colors: active) {
   .glass-dock,
   .glass-modal,
+  .glass-launch-card,
   .glass-overlay {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;

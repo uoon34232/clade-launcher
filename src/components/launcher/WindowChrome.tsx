@@ -7,7 +7,6 @@ import { TitleWordmark } from "./TitleWordmark";
 
 interface Props {
   framed?: boolean;
-  launching?: boolean;
   closing?: boolean;
   maximized?: boolean;
   onToggleMaximize?: () => void;
@@ -18,7 +17,6 @@ interface Props {
 // inside Clade (`framed = true`).
 export function WindowChrome({
   framed = false,
-  launching = false,
   closing = false,
   maximized = false,
   onToggleMaximize,
@@ -82,7 +80,7 @@ export function WindowChrome({
       ref={strip}
       {...(!maximized ? { "data-tauri-drag-region": true } : {})}
       className={`absolute inset-x-0 top-0 z-20 flex justify-end border-b px-2 transition-[border-color] duration-300 ${
-        framed || launching ? "border-graphite/10" : "border-transparent"
+        framed ? "border-graphite/10" : "border-transparent"
       } ${framed ? "h-[44px] items-center" : "h-11 pt-1.5"}`}
     >
       {/* The wordmark is a button (not a drag region); the empty strip around it still drags the window. */}

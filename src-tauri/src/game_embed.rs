@@ -111,10 +111,10 @@ pub struct CapturedStage {
     pub pixels: Vec<u32>,
 }
 
-const REVEAL_HOLD_MS: u64 = 240;
-const REVEAL_DURATION_MS: u64 = 680;
-const CLOSE_HOLD_MS: u64 = 150;
-const CLOSE_DURATION_MS: u64 = 570;
+const REVEAL_HOLD_MS: u64 = 180;
+const REVEAL_DURATION_MS: u64 = 600;
+const CLOSE_HOLD_MS: u64 = 130;
+const CLOSE_DURATION_MS: u64 = 490;
 
 /// Smooth rounded-viewport reveal geometry and premultiplied-alpha veil opacities for one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,13 +176,28 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
 
     let hold = (REVEAL_HOLD_MS as f32) / (REVEAL_DURATION_MS as f32);
     let u = ((t - hold) / (1.0 - hold)).clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - u).powi(5);
+    if u <= 0.0 {
+        return RevealFrame {
+            inner_left: 0,
+            inner_top: 0,
+            inner_right: w,
+            inner_bottom: h,
+            radius: 0,
+            inner_alpha: 255,
+            outer_alpha: 255,
+            border_alpha: 0,
+            shadow_alpha: 0,
+            shadow_spread: 0,
+        };
+    }
 
-    let max_pad_x = ((w as f32) * 0.09)
-        .clamp(20.0, 116.0)
+    let eased = 1.0 - (1.0 - u).powi(3);
+
+    let max_pad_x = ((w as f32) * 0.045)
+        .clamp(12.0, 64.0)
         .min((w / 4).max(0) as f32);
-    let max_pad_y = ((h as f32) * 0.09)
-        .clamp(16.0, 82.0)
+    let max_pad_y = ((h as f32) * 0.045)
+        .clamp(10.0, 46.0)
         .min((h / 4).max(0) as f32);
     let pad_x = ((1.0 - eased) * max_pad_x).round() as i32;
     let pad_y = ((1.0 - eased) * max_pad_y).round() as i32;
@@ -192,47 +207,41 @@ pub fn compute_reveal_frame(width: i32, height: i32, progress: f32) -> RevealFra
     let inner_left = ((w - inner_w) / 2).clamp(0, w - inner_w);
     let inner_right = inner_left + inner_w;
 
-    let lift_y = ((1.0 - eased) * 24.0).round() as i32;
+    let lift_y = ((1.0 - eased) * 14.0).round() as i32;
     let inner_top = ((h - inner_h) / 2 + lift_y).clamp(0, h - inner_h);
     let inner_bottom = inner_top + inner_h;
 
-    let radius = (((1.0 - eased) * 24.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
+    let radius = (((1.0 - eased) * 18.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
 
-    let inner_alpha = if u <= 0.0 {
+    let inner_t = (u / 0.34).clamp(0.0, 1.0);
+    let inner_e = 1.0 - (1.0 - inner_t).powi(3);
+    let inner_alpha = ((1.0 - inner_e) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    let visibility = 1.0 - (f32::from(inner_alpha) / 255.0);
+
+    let outer_alpha = if u <= 0.72 {
         255
     } else {
-        let inner_t = (u / 0.52).clamp(0.0, 1.0);
-        let inner_e = 1.0 - (1.0 - inner_t).powi(3);
-        ((1.0 - inner_e) * 255.0 + 0.5).clamp(0.0, 255.0) as u8
-    };
-
-    let outer_alpha = if u <= 0.78 {
-        255
-    } else {
-        let ot = ((u - 0.78) / 0.22).clamp(0.0, 1.0);
+        let ot = ((u - 0.72) / 0.28).clamp(0.0, 1.0);
         let oe = 1.0 - (1.0 - ot).powi(3);
         ((1.0 - oe) * 255.0 + 0.5).clamp(0.0, 255.0) as u8
     };
 
-    let shadow_spread = if u >= 0.98 {
+    let edge_weight = visibility * (1.0 - eased);
+    let shadow_alpha = if u >= 0.96 || edge_weight <= 0.005 {
         0
     } else {
-        ((1.0 - eased) * 16.0 + 4.0).round().clamp(0.0, 20.0) as i32
+        (edge_weight * 48.0).round().clamp(0.0, 255.0) as u8
     };
-    let shadow_alpha = if u >= 0.98 {
+    let shadow_spread = if shadow_alpha == 0 {
         0
     } else {
-        (((1.0 - eased) * 0.8 + 0.2) * (1.0 - u).powf(0.6) * 76.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
+        ((1.0 - eased) * 12.0 + 3.0).round().clamp(0.0, 16.0) as i32
     };
 
-    let border_alpha = if u <= 0.0 || u >= 0.99 {
+    let border_alpha = if u >= 0.96 || edge_weight <= 0.005 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 72.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
+        (edge_weight * 56.0).round().clamp(0.0, 255.0) as u8
     };
 
     RevealFrame {
@@ -284,12 +293,12 @@ pub fn compute_close_frame(width: i32, height: i32, progress: f32) -> CloseFrame
         };
     }
 
-    let eased = 1.0 - (1.0 - u).powi(4);
-    let max_pad_x = ((w as f32) * 0.10)
-        .clamp(22.0, 128.0)
+    let eased = 1.0 - (1.0 - u).powi(3);
+    let max_pad_x = ((w as f32) * 0.075)
+        .clamp(18.0, 96.0)
         .min((w / 4).max(0) as f32);
-    let max_pad_y = ((h as f32) * 0.10)
-        .clamp(18.0, 88.0)
+    let max_pad_y = ((h as f32) * 0.075)
+        .clamp(14.0, 70.0)
         .min((h / 4).max(0) as f32);
     let pad_x = (eased * max_pad_x).round() as i32;
     let pad_y = (eased * max_pad_y).round() as i32;
@@ -299,35 +308,35 @@ pub fn compute_close_frame(width: i32, height: i32, progress: f32) -> CloseFrame
     let inner_left = ((w - inner_w) / 2).clamp(0, w - inner_w);
     let inner_right = inner_left + inner_w;
 
-    let drop_y = (eased * 26.0).round() as i32;
+    let drop_y = (eased * 18.0).round() as i32;
     let inner_top = ((h - inner_h) / 2 + drop_y).clamp(0, h - inner_h);
     let inner_bottom = inner_top + inner_h;
 
-    let radius = ((eased * 24.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
+    let radius = ((eased * 20.0).round() as i32).clamp(0, inner_w.min(inner_h) / 2);
 
-    let card_alpha = if u <= 0.08 {
+    let card_alpha = if u <= 0.06 {
         255
     } else {
-        let fade = ((u - 0.08) / 0.92).clamp(0.0, 1.0).powf(1.3);
+        let fade = ((u - 0.06) / 0.94).clamp(0.0, 1.0).powf(1.25);
         ((1.0 - fade) * 255.0).round().clamp(0.0, 255.0) as u8
     };
 
     let shadow_spread = if u <= 0.01 {
         0
     } else {
-        (eased * 16.0 + 4.0).round().clamp(0.0, 20.0) as i32
+        (eased * 14.0 + 3.0).round().clamp(0.0, 18.0) as i32
     };
     let shadow_alpha = if u <= 0.01 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 84.0)
+        ((u * std::f32::consts::PI).sin() * 54.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
     let border_alpha = if u <= 0.01 {
         0
     } else {
-        ((u * std::f32::consts::PI).sin() * 70.0)
+        ((u * std::f32::consts::PI).sin() * 48.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };
@@ -563,7 +572,7 @@ pub fn paint_reveal_bgra(buf: &mut [u32], width: i32, height: i32, frame: Reveal
         return;
     }
     let outer_px = premul_bgra(243, 237, 227, frame.outer_alpha);
-    let inner_px = premul_bgra(246, 240, 230, frame.inner_alpha);
+    let inner_px = premul_bgra(243, 237, 227, frame.inner_alpha);
     if frame.inner_alpha == frame.outer_alpha && frame.border_alpha == 0 && frame.shadow_alpha == 0
     {
         buf.fill(outer_px);
@@ -3529,24 +3538,36 @@ mod tests {
 
     #[test]
     fn compute_reveal_frame_clamps_endpoints_and_expands_smoothly() {
-        let hold = compute_reveal_frame(1280, 676, 0.05);
-        assert_eq!(hold.inner_alpha, 255);
-        assert_eq!(hold.outer_alpha, 255);
-        assert_eq!(hold.border_alpha, 0);
-        assert!(hold.shadow_alpha > 0);
-        assert!(hold.shadow_spread > 0);
-        assert!(hold.inner_left >= 80 && hold.inner_right <= 1200);
-        assert!(hold.inner_top > 0 && hold.inner_bottom <= 676);
-        assert_eq!(hold.radius, 24);
+        for p in [0.05, 0.25] {
+            let hold = compute_reveal_frame(1280, 676, p);
+            assert_eq!(hold.inner_alpha, 255);
+            assert_eq!(hold.outer_alpha, 255);
+            assert_eq!(hold.border_alpha, 0);
+            assert_eq!(hold.shadow_alpha, 0);
+            assert_eq!(hold.shadow_spread, 0);
+            assert_eq!(hold.radius, 0);
+            let mut hold_buf = vec![0u32; 32 * 24];
+            let small_hold = compute_reveal_frame(32, 24, p);
+            paint_reveal_bgra(&mut hold_buf, 32, 24, small_hold);
+            assert!(hold_buf
+                .iter()
+                .all(|&px| px == premul_bgra(243, 237, 227, 255)));
+        }
 
-        let mid = compute_reveal_frame(1280, 676, 0.65);
-        assert!(mid.inner_alpha < hold.inner_alpha);
-        assert!(mid.border_alpha > 0);
-        assert!(mid.inner_left < hold.inner_left);
-        assert!(mid.inner_right > hold.inner_right);
-        assert!(mid.radius < hold.radius);
+        let early = compute_reveal_frame(1280, 676, 0.40);
+        assert!(early.inner_alpha < 255);
+        assert!(early.inner_left > 0 && early.inner_right < 1280);
+        assert!(early.radius > 0);
+        assert!(early.shadow_alpha > 0);
+        assert!(early.border_alpha > 0);
 
-        let late = compute_reveal_frame(1280, 676, 0.94);
+        let mid = compute_reveal_frame(1280, 676, 0.60);
+        assert_eq!(mid.inner_alpha, 0);
+        assert!(mid.inner_left < early.inner_left);
+        assert!(mid.inner_right > early.inner_right);
+        assert!(mid.radius < early.radius);
+
+        let late = compute_reveal_frame(1280, 676, 0.90);
         assert_eq!(late.inner_alpha, 0);
         assert!(late.outer_alpha < 255 && late.outer_alpha > 0);
 

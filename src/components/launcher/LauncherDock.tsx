@@ -36,7 +36,7 @@ interface Props {
 export function LauncherDock(p: Props) {
   return (
     <div
-      className={`${p.returning ? "dock-return" : "dock-rise"} absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] flex justify-center px-6`}
+      className={`launcher-dock-wrap ${p.returning ? "dock-return" : "dock-rise"} absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] z-[15] flex justify-center px-6`}
     >
       <nav aria-label="Clade" className="glass-dock flex items-center gap-2 rounded-[1.75rem] p-2">
         <AccountMenu
