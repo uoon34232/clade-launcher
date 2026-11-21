@@ -1,16 +1,17 @@
 //! Native framed game embedding ("Inside Clade").
 //!
 //! When `"When Minecraft starts"` is `"embed"`, Clade keeps its own frameless window open as a host
-//! frame and splits the host client area into two **disjoint** rectangles:
+//! frame and splits the host client area into two **disjoint** regions:
 //!
 //! - Top strip `(0, 0, client_w, header_px)`: WebView2 (`WRY_WEBVIEW` + `ICoreWebView2Controller`)
 //!   renders `WindowChrome` (`Clade` wordmark, drag strip, Minimize / Maximize / Close buttons).
-//! - Stage `(0, header_px, client_w, client_h - header_px)`: the running Minecraft window is
-//!   reparented via Win32 `SetParent` and kept flush below the strip.
+//! - Stage `(0, header_px, client_w, client_h - header_px)` in host client coordinates, mapped to
+//!   screen coordinates: the running Minecraft window is styled as a borderless top-level window
+//!   **owned** by Clade's host (`GWLP_HWNDPARENT`, `WS_EX_APPWINDOW` stripped, flush below the strip).
 //!
-//! Using `ICoreWebView2Controller::SetBounds` with a host subclass (instead of GDI `SetWindowRgn` on
-//! `WRY_WEBVIEW`) keeps Chromium/DirectComposition presentation intact so the top bar renders
-//! cleanly over Mica and full WebView2 bounds recover immediately when Minecraft exits.
+//! Keeping Minecraft an owned top-level `WS_POPUP` instead of a `WS_CHILD` preserves Chromium
+//! DirectComposition/Mica in WebView2 AND allows Windows to return the game HWND from
+//! `GetActiveWindow()` / `SetForegroundWindow()` so GLFW's `"Back to Game"` pointer grab works.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,17 @@ impl StageBounds {
             radius: r,
         }
     }
+}
+
+/// Converts host-client [`StageBounds`] at client origin `(origin_x, origin_y)` into screen `(x, y, width, height)`.
+pub fn stage_to_screen_rect(
+    origin_x: i32,
+    origin_y: i32,
+    stage: StageBounds,
+) -> (i32, i32, i32, i32) {
+    let w = i32::try_from(stage.width).unwrap_or(1280).max(64);
+    let h = i32::try_from(stage.height).unwrap_or(720).max(64);
+    (origin_x + stage.x, origin_y + stage.y, w, h)
 }
 
 /// Disjoint native rectangles for WebView2's top strip and Minecraft's stage in physical pixels.
@@ -343,9 +355,15 @@ pub fn toggle_game_maximize(app: AppHandle, state: State<'_, EmbedState>) -> Gam
                             layout.webview_width,
                             layout.webview_height,
                         );
+                        win32::sync_stage_bounds_for_layout(
+                            host_hwnd,
+                            &session_clone,
+                            layout.stage,
+                            false,
+                        );
                         let mc_id = session_clone.game_win.load(Ordering::Acquire);
-                        if mc_id != 0 {
-                            win32::apply_bounds(mc_id as usize as win32::HWND, layout.stage);
+                        if mc_id != 0 && win32::is_host_foreground(host_hwnd) {
+                            win32::focus_window(mc_id as usize as win32::HWND);
                         }
                     }
                 }
@@ -399,20 +417,15 @@ pub fn on_host_resized(app: &AppHandle) {
                 layout.webview_width,
                 layout.webview_height,
             );
-            let mc_id = session.game_win.load(Ordering::Acquire);
-            if mc_id != 0 {
-                let mc_hwnd = mc_id as usize as win32::HWND;
-                if win32::needs_bounds_sync(mc_hwnd, host_hwnd, layout.stage) {
-                    win32::apply_bounds(mc_hwnd, layout.stage);
-                }
-            }
+            win32::sync_stage_bounds_for_layout(host_hwnd, &session, layout.stage, true);
         }
     });
 }
 
 /// Sends a graceful close signal to the embedded game window on the first close click.
 /// Returns `true` if `CloseRequested` should be prevented so the game can save & close cleanly
-/// inside the frame; a second close click falls through to Clade's background-exit handling.
+/// inside the frame; a second close click detaches the game to a standalone window and falls
+/// through to Clade's background-exit handling.
 pub fn request_close_or_detach(app: &AppHandle) -> bool {
     let Some(session) = app
         .try_state::<EmbedState>()
@@ -420,12 +433,17 @@ pub fn request_close_or_detach(app: &AppHandle) -> bool {
     else {
         return false;
     };
-    if !session.attached.load(Ordering::Acquire) || session.game_win.load(Ordering::Acquire) == 0 {
+    let mc_id = session.game_win.load(Ordering::Acquire);
+    if !session.attached.load(Ordering::Acquire) || mc_id == 0 {
         return false;
     }
     if session.close_attempts.fetch_add(1, Ordering::AcqRel) == 0 {
         session.close_requested.store(true, Ordering::Release);
         return true;
+    }
+    win32::detach_to_standalone(mc_id as usize as win32::HWND);
+    if session.mark_window_detached() {
+        finalize_window_detach(app.clone(), session);
     }
     false
 }
@@ -530,7 +548,6 @@ fn try_attach_game_window(
             win32::install_host_subclass(
                 host_hwnd,
                 win32::HostSubclassState {
-                    app: app_clone.clone(),
                     controller: controller.clone(),
                     wry_hwnd,
                     session: session_clone.clone(),
@@ -662,7 +679,8 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 
     while !session.stop.load(Ordering::Acquire) {
         let mut mc_id = session.game_win.load(Ordering::Acquire);
-        if mc_id != 0 && !win32::is_valid(mc_id as usize as win32::HWND) {
+        if mc_id != 0 && !win32::is_attached_window_alive(mc_id as usize as win32::HWND, host_hwnd)
+        {
             mc_id = 0;
             delayed_focus_at = None;
             if session.mark_window_detached() {
@@ -683,16 +701,18 @@ fn run_watcher_win32(app: AppHandle, session: Arc<ActiveSession>, host_id: u64) 
 
         let mc_hwnd = mc_id as usize as win32::HWND;
         if let Some(layout) = win32::layout_for_host(host_hwnd) {
-            if win32::needs_bounds_sync(mc_hwnd, host_hwnd, layout.stage) {
-                win32::apply_bounds(mc_hwnd, layout.stage);
-            }
+            win32::sync_stage_bounds_for_layout(host_hwnd, &session, layout.stage, true);
         }
         if session.focus_requested.swap(false, Ordering::AcqRel) {
             delayed_focus_at = Some(std::time::Instant::now() + Duration::from_millis(60));
-            win32::focus_window(mc_hwnd);
+            if win32::should_hand_focus_to_game(host_hwnd) {
+                win32::focus_window(mc_hwnd);
+            }
         } else if delayed_focus_at.is_some_and(|t| std::time::Instant::now() >= t) {
             delayed_focus_at = None;
-            win32::focus_window(mc_hwnd);
+            if win32::should_hand_focus_to_game(host_hwnd) {
+                win32::focus_window(mc_hwnd);
+            }
         }
         if session.close_requested.swap(false, Ordering::AcqRel) {
             win32::request_close(mc_hwnd);
@@ -707,7 +727,6 @@ mod win32 {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use tauri::AppHandle;
     pub use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
     use windows_sys::core::BOOL;
@@ -725,27 +744,28 @@ mod win32 {
         DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClientRect, GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW,
-        GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
-        SetParent, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
+        EnumWindows, GetClientRect, GetCursorPos, GetForegroundWindow, GetParent, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+        IsWindowVisible, PostMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER,
         SIZE_MINIMIZED, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_APP, WM_CLOSE, WM_DESTROY,
-        WM_DPICHANGED, WM_NCDESTROY, WM_PARENTNOTIFY, WM_SIZE, WM_WINDOWPOSCHANGED,
-        WM_WINDOWPOSCHANGING, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-        WS_EX_APPWINDOW, WS_EX_NOPARENTNOTIFY, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-        WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
+        WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZE, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING,
+        WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+        WS_EX_DLGMODALFRAME, WS_EX_STATICEDGE, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
     };
 
-    use super::{compute_framed_layout, ActiveSession, FramedLayout, StageBounds};
+    use super::{
+        compute_framed_layout, stage_to_screen_rect, ActiveSession, FramedLayout, StageBounds,
+    };
 
     const HWND_TOP: HWND = std::ptr::null_mut();
     const EMBED_SUBCLASS_ID: usize = 0x434C_4144_4501;
     const WRY_SUBCLASS_ID: usize = 0x434C_4144_4502;
     const WM_CLADE_SYNC_STRIP: u32 = WM_APP + 0x41;
-    const WM_CLADE_FINALIZE_DETACH: u32 = WM_APP + 0x42;
 
     pub(super) struct HostSubclassState {
-        pub(super) app: AppHandle,
         pub(super) controller: ICoreWebView2Controller,
         pub(super) wry_hwnd: HWND,
         pub(super) session: Arc<ActiveSession>,
@@ -821,26 +841,31 @@ mod win32 {
                 }
                 return res;
             }
-            WM_PARENTNOTIFY if (wparam & 0xFFFF) as u32 == WM_DESTROY && dw_ref_data != 0 => {
-                let should_detach = {
+            WM_WINDOWPOSCHANGED => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if dw_ref_data != 0
+                    && IsWindow(hwnd) != 0
+                    && IsIconic(hwnd) == 0
+                    && IsWindowVisible(hwnd) != 0
+                {
                     let state = &*(dw_ref_data as *const HostSubclassState);
-                    let mc_id = state.session.game_win.load(Ordering::Acquire);
-                    let destroyed_id = lparam as usize as u64;
-                    mc_id != 0 && destroyed_id == mc_id && state.session.mark_window_detached()
-                };
-                if should_detach {
-                    // Defer cleanup off cross-process synchronous WM_PARENTNOTIFY so the game's
-                    // DestroyWindow finishes without deadlocking or unsubclassing mid-callback.
-                    let _ = PostMessageW(hwnd, WM_CLADE_FINALIZE_DETACH, 0, 0);
+                    sync_stage_position_on_host(hwnd, state);
                 }
+                return res;
             }
-            WM_CLADE_FINALIZE_DETACH if dw_ref_data != 0 => {
-                let (app, session) = {
+            WM_EXITSIZEMOVE => {
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                if dw_ref_data != 0 && IsWindow(hwnd) != 0 {
                     let state = &*(dw_ref_data as *const HostSubclassState);
-                    (state.app.clone(), state.session.clone())
-                };
-                super::finalize_window_detach(app, session);
-                return 0;
+                    sync_stage_position_on_host(hwnd, state);
+                    if GetForegroundWindow() == hwnd && should_hand_focus_to_game(hwnd) {
+                        let mc_id = state.session.game_win.load(Ordering::Acquire);
+                        if mc_id != 0 {
+                            focus_window(mc_id as usize as HWND);
+                        }
+                    }
+                }
+                return res;
             }
             _ => {}
         }
@@ -860,12 +885,43 @@ mod win32 {
             layout.webview_width,
             layout.webview_height,
         );
-        let mc_id = state.session.game_win.load(Ordering::Acquire);
-        if mc_id != 0 {
-            let mc_hwnd = mc_id as usize as HWND;
-            if IsWindow(mc_hwnd) != 0 && GetParent(mc_hwnd) == hwnd {
-                apply_bounds(mc_hwnd, layout.stage);
-            }
+        sync_stage_bounds_for_layout(hwnd, &state.session, layout.stage, false);
+    }
+
+    unsafe fn sync_stage_position_on_host(hwnd: HWND, state: &HostSubclassState) {
+        if !state.session.strip_active.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(layout) = layout_for_host(hwnd) else {
+            return;
+        };
+        sync_stage_bounds_for_layout(hwnd, &state.session, layout.stage, true);
+    }
+
+    pub(super) fn sync_stage_bounds_for_layout(
+        host: HWND,
+        session: &ActiveSession,
+        stage: StageBounds,
+        only_if_needed: bool,
+    ) {
+        let mc_id = session.game_win.load(Ordering::Acquire);
+        if mc_id == 0 {
+            return;
+        }
+        let mc_hwnd = mc_id as usize as HWND;
+        let Some(target) = stage_screen_rect(host, stage) else {
+            return;
+        };
+        if !only_if_needed || needs_bounds_sync(mc_hwnd, host, target) {
+            apply_screen_bounds(
+                mc_hwnd,
+                target.0,
+                target.1,
+                target.2,
+                target.3,
+                false,
+                Some(host),
+            );
         }
     }
 
@@ -1016,7 +1072,7 @@ mod win32 {
         }
         let owner = GetWindow(hwnd, GW_OWNER);
         let parent = GetParent(hwnd);
-        if !owner.is_null() && parent != search.host {
+        if !owner.is_null() && owner != search.host && parent != search.host {
             return 1;
         }
         let mut rect = RECT {
@@ -1271,53 +1327,164 @@ mod win32 {
         }
     }
 
+    pub fn stage_screen_rect(host: HWND, stage: StageBounds) -> Option<(i32, i32, i32, i32)> {
+        // SAFETY: reads host visibility/iconic state and client origin on screen.
+        unsafe {
+            if !is_host_alive(host) || IsIconic(host) != 0 || IsWindowVisible(host) == 0 {
+                return None;
+            }
+            let mut origin = POINT { x: 0, y: 0 };
+            if ClientToScreen(host, &mut origin) == 0 {
+                return None;
+            }
+            Some(stage_to_screen_rect(origin.x, origin.y, stage))
+        }
+    }
+
     pub fn attach_and_place(mc: HWND, host: HWND, b: StageBounds) -> bool {
-        // SAFETY: valid live HWNDs belonging to the game child and launcher host.
+        let Some((sx, sy, sw, sh)) = stage_screen_rect(host, b) else {
+            return false;
+        };
+        // SAFETY: valid live HWNDs belonging to the game window and launcher host.
         unsafe {
             let style = GetWindowLongPtrW(mc, GWL_STYLE) as u32;
-            let strip = WS_POPUP
-                | WS_CAPTION
+            let strip = WS_CAPTION
                 | WS_THICKFRAME
                 | WS_MINIMIZEBOX
                 | WS_MAXIMIZEBOX
-                | WS_SYSMENU;
-            let add = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+                | WS_SYSMENU
+                | WS_CHILD;
+            let add = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
             SetWindowLongPtrW(mc, GWL_STYLE, ((style & !strip) | add) as i32 as isize);
 
             let ex = GetWindowLongPtrW(mc, GWL_EXSTYLE) as u32;
-            SetWindowLongPtrW(
-                mc,
-                GWL_EXSTYLE,
-                (ex & !(WS_EX_APPWINDOW | WS_EX_NOPARENTNOTIFY)) as i32 as isize,
-            );
+            let strip_ex = WS_EX_APPWINDOW
+                | WS_EX_DLGMODALFRAME
+                | WS_EX_WINDOWEDGE
+                | WS_EX_CLIENTEDGE
+                | WS_EX_STATICEDGE;
+            SetWindowLongPtrW(mc, GWL_EXSTYLE, (ex & !strip_ex) as i32 as isize);
 
             // Clear any stale region once without re-applying per resize so WGL flip swapchains stay intact.
             windows_sys::Win32::Graphics::Gdi::SetWindowRgn(mc, std::ptr::null_mut(), 0);
-            let prev = SetParent(mc, host);
-            if prev.is_null() && GetParent(mc) != host {
+            set_corner_preference(mc, true);
+            SetWindowLongPtrW(mc, GWLP_HWNDPARENT, host as isize);
+            if GetWindow(mc, GW_OWNER) != host {
                 return false;
             }
-            apply_bounds(mc, b);
-            lift_window_async(mc);
+            apply_screen_bounds(mc, sx, sy, sw, sh, true, Some(host));
+            if GetForegroundWindow() == host {
+                let _ = SetForegroundWindow(mc);
+            }
             true
         }
     }
 
-    pub fn apply_bounds(mc: HWND, b: StageBounds) {
-        let w = i32::try_from(b.width).unwrap_or(1280);
-        let h = i32::try_from(b.height).unwrap_or(720);
-        // SAFETY: `mc` is a child window inside the launcher; async flags avoid blocking Clade's
+    pub fn is_window_above(upper: HWND, lower: HWND) -> bool {
+        if upper.is_null() || lower.is_null() || upper == lower {
+            return false;
+        }
+        // SAFETY: walks global Z-order chain starting at `upper` with a bounded iteration cap.
+        unsafe {
+            let mut cur = upper;
+            for _ in 0..512 {
+                cur = GetWindow(cur, GW_HWNDNEXT);
+                if cur.is_null() {
+                    return false;
+                }
+                if cur == lower {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn insert_after_above_host(mc: HWND, host: HWND) -> HWND {
+        // SAFETY: finds the non-topmost sibling immediately above `host` in Z-order.
+        unsafe {
+            let mut prev = GetWindow(host, GW_HWNDPREV);
+            for _ in 0..16 {
+                if prev.is_null()
+                    || ((GetWindowLongPtrW(prev, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST) != 0
+                {
+                    return HWND_TOP;
+                }
+                if prev != mc {
+                    return prev;
+                }
+                prev = GetWindow(prev, GW_HWNDPREV);
+            }
+        }
+        HWND_TOP
+    }
+
+    pub fn apply_screen_bounds(
+        mc: HWND,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        frame_changed: bool,
+        above_host: Option<HWND>,
+    ) {
+        let needs_z_order = above_host.is_some_and(|host| !is_window_above(mc, host));
+        let insert_after = match above_host {
+            Some(host) if needs_z_order => insert_after_above_host(mc, host),
+            _ => HWND_TOP,
+        };
+        let mut flags = SWP_NOACTIVATE
+            | SWP_ASYNCWINDOWPOS
+            | if frame_changed {
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW
+            } else {
+                0
+            };
+        if !needs_z_order {
+            flags |= SWP_NOZORDER;
+        }
+        // SAFETY: `mc` is an owned borderless top-level window; async flags avoid blocking Clade's
         // UI thread on cross-process OpenGL frame swaps.
         unsafe {
+            SetWindowPos(mc, insert_after, x, y, w.max(64), h.max(64), flags);
+        }
+    }
+
+    pub fn detach_to_standalone(mc: HWND) {
+        // SAFETY: restores independent top-level window styles and removes `host` ownership.
+        unsafe {
+            if mc.is_null() || IsWindow(mc) == 0 {
+                return;
+            }
+            SetWindowLongPtrW(mc, GWLP_HWNDPARENT, 0);
+            let style = GetWindowLongPtrW(mc, GWL_STYLE) as u32;
+            let next_style = (style & !(WS_POPUP | WS_CHILD)) | WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+            SetWindowLongPtrW(mc, GWL_STYLE, next_style as i32 as isize);
+            let ex = GetWindowLongPtrW(mc, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(mc, GWL_EXSTYLE, (ex | WS_EX_APPWINDOW) as i32 as isize);
+            set_corner_preference(mc, false);
             SetWindowPos(
                 mc,
                 HWND_TOP,
-                b.x,
-                b.y,
-                w,
-                h,
-                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
             );
+        }
+    }
+
+    pub fn is_attached_window_alive(mc: HWND, host: HWND) -> bool {
+        // SAFETY: checks owned game HWND liveness while tolerating OS-automatic hide on host minimize.
+        unsafe {
+            if mc.is_null() || IsWindow(mc) == 0 {
+                return false;
+            }
+            if !is_host_alive(host) || IsIconic(host) != 0 || IsWindowVisible(host) == 0 {
+                return true;
+            }
+            IsWindowVisible(mc) != 0
         }
     }
 
@@ -1458,51 +1625,66 @@ mod win32 {
         }
     }
 
-    pub fn needs_bounds_sync(mc: HWND, host: HWND, b: StageBounds) -> bool {
-        let w = i32::try_from(b.width).unwrap_or(1280);
-        let h = i32::try_from(b.height).unwrap_or(720);
+    pub fn needs_bounds_sync(mc: HWND, host: HWND, target: (i32, i32, i32, i32)) -> bool {
         let mut wr = RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
         };
-        // SAFETY: checks live child window visibility, parent, and bounds relative to `host`.
+        // SAFETY: checks live owned game window visibility, owner, Z-order, and screen coordinates.
         unsafe {
-            if IsWindowVisible(mc) == 0 || GetParent(mc) != host || GetWindowRect(mc, &mut wr) == 0
+            if IsWindowVisible(mc) == 0
+                || GetWindow(mc, GW_OWNER) != host
+                || GetWindowRect(mc, &mut wr) == 0
             {
                 return false;
             }
-            let mut tl = POINT {
-                x: wr.left,
-                y: wr.top,
-            };
-            if ScreenToClient(host, &mut tl) == 0 {
-                return false;
+            if !is_window_above(mc, host) {
+                return true;
             }
-            tl.x != b.x || tl.y != b.y || (wr.right - wr.left) != w || (wr.bottom - wr.top) != h
+            wr.left != target.0
+                || wr.top != target.1
+                || (wr.right - wr.left) != target.2
+                || (wr.bottom - wr.top) != target.3
         }
     }
 
-    fn lift_window_async(mc: HWND) {
-        // SAFETY: asynchronous z-order lift avoids blocking on cross-process UI/GL threads.
+    pub fn is_host_foreground(host: HWND) -> bool {
+        // SAFETY: queries live window handle validity and current foreground HWND.
+        unsafe { is_host_alive(host) && GetForegroundWindow() == host }
+    }
+
+    pub fn should_hand_focus_to_game(host: HWND) -> bool {
+        // SAFETY: checks live host focus state and avoids interrupting pointer interactions on the
+        // 44px Clade top header strip.
         unsafe {
-            if IsWindow(mc) != 0 {
-                SetWindowPos(
-                    mc,
-                    HWND_TOP,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                );
+            if !is_host_foreground(host) || IsIconic(host) != 0 {
+                return false;
             }
+            let mut pt = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) != 0 && ScreenToClient(host, &mut pt) != 0 {
+                if let Some(layout) = layout_for_host(host) {
+                    if pt.x >= 0
+                        && pt.x < layout.webview_width
+                        && pt.y >= 0
+                        && pt.y < layout.webview_height
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
         }
     }
 
     pub fn focus_window(mc: HWND) {
-        lift_window_async(mc);
+        // SAFETY: activates the owned top-level game window so GLFW's `GetActiveWindow()` matches.
+        unsafe {
+            if !mc.is_null() && IsWindow(mc) != 0 && IsWindowVisible(mc) != 0 {
+                let _ = SetForegroundWindow(mc);
+            }
+        }
     }
 
     pub fn request_close(mc: HWND) {
@@ -1615,7 +1797,7 @@ mod tests {
             }
         );
 
-        // Simulated WM_PARENTNOTIFY / early window destruction before JVM exits:
+        // Simulated early window destruction before JVM exits:
         assert!(s1.mark_window_detached());
         assert!(!s1.mark_window_detached(), "second detach call is a no-op");
         assert!(!state.is_active());
@@ -1636,5 +1818,15 @@ mod tests {
         assert_eq!(ended.attach_win_rect, Some((100, 100, 1280, 720)));
         assert!(s1.stop.load(Ordering::Acquire));
         assert!(!state.is_active());
+    }
+
+    #[test]
+    fn stage_to_screen_rect_maps_positive_and_negative_monitor_origins() {
+        let stage = StageBounds::clamped(0, 44, 1280, 676, 0);
+        assert_eq!(stage_to_screen_rect(100, 200, stage), (100, 244, 1280, 676));
+        assert_eq!(
+            stage_to_screen_rect(-1920, 0, stage),
+            (-1920, 44, 1280, 676)
+        );
     }
 }
