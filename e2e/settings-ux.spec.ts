@@ -1050,5 +1050,106 @@ test.describe("manual update check", () => {
         .poll(async () => (await backend.calls("open_release_page")).map((c) => c.args))
         .toEqual([{ tag: "v0.2.0" }]);
     });
+
+    test("installs portable update in-app with progress, cancel, persistence, and restart handoff in EN and RU at 960x600", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      const assertNoOverflow = async (d: typeof dialog) => {
+        expect(
+          await d.evaluate((el) => ({
+            vertical: el.scrollHeight <= el.clientHeight + 1,
+            horizontal: el.scrollWidth <= el.clientWidth + 1,
+          })),
+        ).toEqual({ vertical: true, horizontal: true });
+      };
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await expect(dialog.getByRole("status")).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: text("settings.openRelease") }),
+      ).toBeVisible();
+      await assertNoOverflow(dialog);
+
+      // Start in-app update: shows download progress, locks dialog against Escape, allows Cancel.
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.updateProgress({
+        stage: "downloading",
+        version: "v0.2.0",
+        bytesDone: 45,
+        bytesTotal: 100,
+      });
+      await expect(dialog.getByRole("status")).toHaveText(
+        text("settings.updatingDownloading", { percent: 45 }),
+      );
+      await expect(dialog.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "45");
+      await assertNoOverflow(dialog);
+
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+
+      await dialog.getByRole("button", { name: text("settings.cancelUpdate") }).click();
+      await expect(dialog.getByRole("status")).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+
+      // Re-run to verify -> unpack -> ready, then verify RU layout + persistence across reopen.
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.updateProgress({
+        stage: "verifying",
+        version: "v0.2.0",
+        bytesDone: 100,
+        bytesTotal: 100,
+      });
+      await expect(dialog.getByRole("status")).toHaveText(text("settings.updatingVerifying"));
+
+      await backend.updateProgress({
+        stage: "extracting",
+        version: "v0.2.0",
+        bytesDone: 0,
+        bytesTotal: 0,
+      });
+      await expect(dialog.getByRole("status")).toHaveText(text("settings.updatingExtracting"));
+      await expect(
+        dialog.getByRole("button", { name: text("settings.cancelUpdate") }),
+      ).toBeDisabled();
+
+      await backend.finishUpdate();
+      await expect(dialog.getByRole("status")).toHaveText(text("settings.updateReady"));
+      await expect(
+        dialog.getByRole("button", { name: text("settings.restartToUpdate") }),
+      ).toBeVisible();
+      await assertNoOverflow(dialog);
+
+      await dialog.getByRole("radio", { name: "Русский" }).click();
+      const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+      await expect(ruDialog.getByRole("status")).toHaveText(textRu("settings.updateReady"));
+      await expect(
+        ruDialog.getByRole("button", { name: textRu("settings.restartToUpdate") }),
+      ).toBeVisible();
+      await assertNoOverflow(ruDialog);
+
+      await ruDialog.getByRole("button", { name: textRu("common.done") }).click();
+      await expect(ruDialog).toBeHidden();
+
+      await page.getByRole("button", { name: textRu("dock.settings") }).click();
+      await expect(ruDialog).toBeVisible();
+      await expect(ruDialog.getByRole("status")).toHaveText(textRu("settings.updateReady"));
+      expect(await backend.calls("check_for_updates")).toHaveLength(1);
+
+      await ruDialog.getByRole("button", { name: textRu("settings.restartToUpdate") }).click();
+      await expect(ruDialog.getByRole("status")).toHaveText(textRu("settings.updatingRestarting"));
+      expect(await backend.calls("apply_staged_update")).toHaveLength(1);
+    });
   });
 });

@@ -29,6 +29,14 @@ interface Control {
     vault: BackendConfig["vault"];
     retiredVaults: number;
     latestRelease: string | null;
+    latestReleaseInstallable: boolean;
+    latestReleaseSize: number | null;
+    updateStatus: {
+      stage: "idle" | "downloading" | "verifying" | "extracting" | "ready" | "applying";
+      version: string | null;
+      bytesDone: number;
+      bytesTotal: number;
+    };
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
     embed: { active: boolean; instanceId: string | null; maximized: boolean };
@@ -37,6 +45,8 @@ interface Control {
   setEmbedded: (instanceId: string | null, active: boolean, maximized?: boolean) => void;
   finishPrepare: () => boolean;
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
+  finishUpdate: () => boolean;
+  failUpdate: (code: string, params?: Record<string, unknown>) => boolean;
   refuseNextLaunch: (code: string, accountId?: string | null) => void;
   failNext: (cmd: string, code: string, params?: Record<string, unknown>) => void;
   holdNext: (cmd: string) => void;
@@ -66,6 +76,9 @@ function install(cfg: BackendConfig): void {
     vault: clone(cfg.vault),
     retiredVaults: cfg.retiredVaults ?? 0,
     latestRelease: cfg.latestRelease ?? null,
+    latestReleaseInstallable: cfg.latestReleaseInstallable ?? true,
+    latestReleaseSize: cfg.latestReleaseSize ?? 305 * 1024 * 1024,
+    updateStatus: { stage: "idle", version: null, bytesDone: 0, bytesTotal: 0 },
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
     embed: clone(cfg.embed ?? { active: false, instanceId: null, maximized: false }),
@@ -92,12 +105,21 @@ function install(cfg: BackendConfig): void {
         state.runs[ev.instanceId] = ev.state;
       }
     }
+    if (event === "update-progress") {
+      const p = payload as Control["state"]["updateStatus"];
+      state.updateStatus = clone(p);
+    }
     for (const id of [...(listeners.get(event) ?? [])]) callbacks.get(id)?.({ event, id, payload });
   };
 
   // ---- held-open operations
   let pendingPrepare: {
     id: string;
+    resolve: (v: unknown) => void;
+    reject: (e: unknown) => void;
+  } | null = null;
+  let pendingUpdate: {
+    version: string;
     resolve: (v: unknown) => void;
     reject: (e: unknown) => void;
   } | null = null;
@@ -362,20 +384,78 @@ function install(cfg: BackendConfig): void {
       case "check_for_updates": {
         const currentVersion = `v${state.ui.version}`;
         if (state.latestRelease && state.latestRelease !== currentVersion) {
+          const canInstall = state.latestReleaseInstallable;
           return {
             status: "update_available",
             currentVersion,
             latestVersion: state.latestRelease,
+            canInstall,
+            assetSize: canInstall ? state.latestReleaseSize : null,
           };
         }
         return {
           status: "up_to_date",
           currentVersion,
           latestVersion: currentVersion,
+          canInstall: false,
+          assetSize: null,
         };
       }
       case "open_release_page":
         return null;
+      case "get_update_status":
+        return clone(state.updateStatus);
+      case "install_update": {
+        if (Object.keys(state.runs).length > 0) {
+          return fail("update_game_running", "Close Minecraft before updating Clade.");
+        }
+        if (pendingPrepare) {
+          return fail("update_prepare_running", "Wait for preparation to finish.");
+        }
+        if (!state.latestReleaseInstallable) {
+          return fail("update_unavailable", "Portable update assets are not available.");
+        }
+        const tag = typeof args.tag === "string" ? args.tag : (state.latestRelease ?? "");
+        const total = state.latestReleaseSize ?? 0;
+        if (state.updateStatus.stage === "ready" && state.updateStatus.version === tag) {
+          return clone(state.updateStatus);
+        }
+        if (pendingUpdate) {
+          return fail("update_in_progress", "An update is already running.");
+        }
+        emit("update-progress", {
+          stage: "downloading",
+          version: tag,
+          bytesDone: 0,
+          bytesTotal: total,
+        });
+        return new Promise((resolve, reject) => {
+          pendingUpdate = { version: tag, resolve, reject };
+        });
+      }
+      case "cancel_update": {
+        if (!pendingUpdate) return null;
+        const reject = pendingUpdate.reject;
+        pendingUpdate = null;
+        emit("update-progress", { stage: "idle", version: null, bytesDone: 0, bytesTotal: 0 });
+        reject({ code: "update_cancelled", params: {}, message: "Update cancelled." });
+        return null;
+      }
+      case "apply_staged_update": {
+        if (Object.keys(state.runs).length > 0) {
+          return fail("update_game_running", "Close Minecraft before updating Clade.");
+        }
+        if (state.updateStatus.stage !== "ready") {
+          return fail("update_install_failed", "No staged update is ready.");
+        }
+        emit("update-progress", {
+          stage: "applying",
+          version: state.updateStatus.version,
+          bytesDone: 0,
+          bytesTotal: 0,
+        });
+        return null;
+      }
 
       // ---- profiles and the version catalog
       case "list_profiles":
@@ -841,6 +921,26 @@ function install(cfg: BackendConfig): void {
       pendingPrepare = null;
       return true;
     },
+    finishUpdate: () => {
+      if (!pendingUpdate) return false;
+      const ready = {
+        stage: "ready" as const,
+        version: pendingUpdate.version,
+        bytesDone: 0,
+        bytesTotal: 0,
+      };
+      emit("update-progress", ready);
+      pendingUpdate.resolve(clone(ready));
+      pendingUpdate = null;
+      return true;
+    },
+    failUpdate: (code, params = {}) => {
+      if (!pendingUpdate) return false;
+      emit("update-progress", { stage: "idle", version: null, bytesDone: 0, bytesTotal: 0 });
+      pendingUpdate.reject({ code, params, message: "Update failed." });
+      pendingUpdate = null;
+      return true;
+    },
     refuseNextLaunch: (code, accountId = null) => {
       launchRefusal = { code, accountId };
     },
@@ -918,6 +1018,32 @@ export class Backend {
   async failPrepare(code: string, params: Record<string, unknown> = {}): Promise<void> {
     await this.page.evaluate(
       ([c, p]) => (window as unknown as { __e2e: Control }).__e2e.failPrepare(c, p),
+      [code, params] as const,
+    );
+  }
+
+  /** Progress of an in-app launcher update (`update-progress`). */
+  updateProgress(p: {
+    stage: "idle" | "downloading" | "verifying" | "extracting" | "ready" | "applying";
+    version?: string | null;
+    bytesDone?: number;
+    bytesTotal?: number;
+  }): Promise<void> {
+    return this.emit("update-progress", {
+      version: null,
+      bytesDone: 0,
+      bytesTotal: 0,
+      ...p,
+    });
+  }
+
+  async finishUpdate(): Promise<void> {
+    await this.page.evaluate(() => (window as unknown as { __e2e: Control }).__e2e.finishUpdate());
+  }
+
+  async failUpdate(code: string, params: Record<string, unknown> = {}): Promise<void> {
+    await this.page.evaluate(
+      ([c, p]) => (window as unknown as { __e2e: Control }).__e2e.failUpdate(c, p),
       [code, params] as const,
     );
   }

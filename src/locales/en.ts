@@ -370,6 +370,16 @@ export const en = {
   "settings.updatesUpToDate": "Up to date",
   "settings.updateAvailable": "{version} available",
   "settings.openRelease": "Open release",
+  "settings.installUpdate": "Update",
+  "settings.updatingDownloading": "Downloading… {percent}%",
+  "settings.updatingDownloadingUnknown": "Downloading…",
+  "settings.updatingVerifying": "Verifying…",
+  "settings.updatingExtracting": "Unpacking…",
+  "settings.updateReady": "Ready to update",
+  "settings.restartToUpdate": "Restart to update",
+  "settings.updatingRestarting": "Restarting…",
+  "settings.cancelUpdate": "Cancel",
+  "settings.updateProgress": "Update progress",
   "settings.cat": "Cat",
   "onboarding.step": "Step {current} of {total}",
   "onboarding.skip": "Skip",
@@ -394,6 +404,21 @@ export const en = {
   "error.settings.offline": "No connection. Try again.",
   "error.settings.update_rate_limited": "Too many checks. Try later.",
   "error.settings.update_check_failed": "Couldn't check for updates.",
+  "error.settings.update_not_portable": "In-app updates only work from the portable Clade folder.",
+  "error.settings.update_game_running": "Close Minecraft before updating Clade.",
+  "error.settings.update_prepare_running": "Wait for profile setup to finish before updating.",
+  "error.settings.update_in_progress": "An update is already in progress.",
+  "error.settings.update_unavailable":
+    "This release package isn't ready yet. Open it in your browser instead.",
+  "error.settings.update_verify_failed":
+    "The update failed verification and was discarded. Try again.",
+  "error.settings.update_invalid_package":
+    "The downloaded archive doesn't match the Clade package layout.",
+  "error.settings.update_install_failed":
+    "Couldn't prepare the update. Check that the Clade folder isn't read-only.",
+  "error.settings.not_enough_space":
+    "Not enough free space for the update: about {required} is needed and {available} is available.",
+  "error.settings.update_cancelled": "Update cancelled.",
   "error.settings.browser_unavailable": "Couldn't open the release page.",
   "error.settings.invalid_memory":
     "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",

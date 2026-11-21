@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatGigabytes } from "@/features/launcher/profileUi";
 import { COPYRIGHT_LINE, versionLabel } from "@/lib/appInfo";
 import { LANGUAGE_NAMES, LOCALES, useLocale, useT } from "@/lib/i18n";
-import { describeError } from "@/lib/i18n/errors";
+import { describeError, errorCode } from "@/lib/i18n/errors";
 import { chooseLanguage } from "@/lib/i18n/language";
 import {
   resetUiSettings,
@@ -20,7 +20,7 @@ import {
 } from "@/lib/settings/uiSettings";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound, sound } from "@/lib/sound/soundService";
-import { supportApi, type SupportApi } from "@/lib/support/api";
+import { supportApi, type SupportApi, type UpdateProgress } from "@/lib/support/api";
 import { CatEgg } from "./CatEgg";
 import { Modal, ModalHeader, ModalSection } from "./Modal";
 import {
@@ -46,8 +46,42 @@ type UpdateUiState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "up_to_date" }
-  | { kind: "available"; latestVersion: string }
+  | { kind: "available"; latestVersion: string; canInstall: boolean; assetSize: number | null }
+  | {
+      kind: "working";
+      stage: "downloading" | "verifying" | "extracting";
+      version: string;
+      bytesDone: number;
+      bytesTotal: number;
+    }
+  | { kind: "ready"; version: string }
+  | { kind: "applying"; version: string }
   | { kind: "error"; error: unknown };
+
+function applyUpdateProgress(prev: UpdateUiState, p: UpdateProgress): UpdateUiState {
+  if (p.stage === "downloading" || p.stage === "verifying" || p.stage === "extracting") {
+    return {
+      kind: "working",
+      stage: p.stage,
+      version: p.version ?? (prev.kind === "working" ? prev.version : ""),
+      bytesDone: p.bytesDone,
+      bytesTotal: p.bytesTotal,
+    };
+  }
+  if (p.stage === "ready") {
+    return {
+      kind: "ready",
+      version: p.version ?? (prev.kind === "working" || prev.kind === "ready" ? prev.version : ""),
+    };
+  }
+  if (p.stage === "applying") {
+    return {
+      kind: "applying",
+      version: p.version ?? (prev.kind === "ready" || prev.kind === "applying" ? prev.version : ""),
+    };
+  }
+  return prev;
+}
 
 /**
  * Launcher settings: global launcher behaviour only, and intentionally short. Anything that belongs
@@ -57,16 +91,20 @@ type UpdateUiState =
 export function SettingsDialog({ open, onOpenChange, support = supportApi }: Props) {
   const t = useT();
   const ui = useUiSettings();
-  // A pending confirmation ("Reset settings?" or "Clear archived vaults?") must not be dismissed
-  // by a stray click or Escape.
+  // A pending confirmation ("Reset settings?" or "Clear archived vaults?") or an active update
+  // download/apply must not be dismissed by a stray click or Escape.
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   // Only checked on an explicit click; never triggers a network call automatically.
   const [updateState, setUpdateState] = useState<UpdateUiState>({ kind: "idle" });
-  const locked = confirmAction !== null;
+  const updateBusy = updateState.kind === "working" || updateState.kind === "applying";
+  const locked = confirmAction !== null || updateBusy;
   const close = (next: boolean) => {
     if (!next) {
+      if (locked) return;
       setConfirmAction(null);
-      setUpdateState({ kind: "idle" });
+      if (updateState.kind !== "ready") {
+        setUpdateState({ kind: "idle" });
+      }
     }
     onOpenChange(next);
   };
@@ -119,15 +157,51 @@ function SettingsBody({
   confirmAction: ConfirmAction;
   setConfirmAction: (v: ConfirmAction) => void;
   updateState: UpdateUiState;
-  setUpdateState: (v: UpdateUiState) => void;
+  setUpdateState: React.Dispatch<React.SetStateAction<UpdateUiState>>;
   onDone: () => void;
 }) {
   const t = useT();
   const s = useUiSettings();
   const isAdvanced = s.uiMode === "advanced";
+  const [cancellingUpdate, setCancellingUpdate] = useState(false);
+  const updateBusy = updateState.kind === "working" || updateState.kind === "applying";
+  const controlsLocked = confirmAction !== null || updateBusy;
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    if (support.getUpdateStatus) {
+      support
+        .getUpdateStatus()
+        .then((p) => {
+          if (!cancelled && p.stage !== "idle") {
+            setUpdateState((prev) => applyUpdateProgress(prev, p));
+          }
+        })
+        .catch(() => undefined);
+    }
+    let unlisten: (() => void) | null = null;
+    if (support.onUpdateProgress) {
+      void support
+        .onUpdateProgress((p) => {
+          if (!cancelled && p.stage !== "idle") {
+            setUpdateState((prev) => applyUpdateProgress(prev, p));
+          }
+        })
+        .then((stop) => {
+          if (cancelled) stop();
+          else unlisten = stop;
+        })
+        .catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [open, support, setUpdateState]);
 
   const checkUpdates = () => {
-    if (!support.checkForUpdates || updateState.kind === "checking" || confirmAction !== null) {
+    if (!support.checkForUpdates || updateState.kind === "checking" || controlsLocked) {
       return;
     }
     playSound("click");
@@ -135,7 +209,12 @@ function SettingsBody({
     support.checkForUpdates().then(
       (res) => {
         if (res.status === "update_available" && res.latestVersion) {
-          setUpdateState({ kind: "available", latestVersion: res.latestVersion });
+          setUpdateState({
+            kind: "available",
+            latestVersion: res.latestVersion,
+            canInstall: Boolean(res.canInstall),
+            assetSize: res.assetSize ?? null,
+          });
         } else {
           setUpdateState({ kind: "up_to_date" });
         }
@@ -147,12 +226,75 @@ function SettingsBody({
   };
 
   const openRelease = (tag: string) => {
-    if (!support.openReleasePage || confirmAction !== null) return;
+    if (!support.openReleasePage || controlsLocked) return;
     playSound("click");
     support.openReleasePage(tag).catch((e: unknown) => {
       setUpdateState({ kind: "error", error: e });
     });
   };
+
+  const installUpdate = () => {
+    if (updateState.kind !== "available" || !support.installUpdate || controlsLocked) return;
+    const { latestVersion, canInstall, assetSize } = updateState;
+    playSound("click");
+    setCancellingUpdate(false);
+    setUpdateState({
+      kind: "working",
+      stage: "downloading",
+      version: latestVersion,
+      bytesDone: 0,
+      bytesTotal: assetSize ?? 0,
+    });
+    support.installUpdate(latestVersion).then(
+      (res) => {
+        setCancellingUpdate(false);
+        if (res.stage === "ready") {
+          setUpdateState({ kind: "ready", version: res.version ?? latestVersion });
+        } else {
+          setUpdateState({ kind: "available", latestVersion, canInstall, assetSize });
+        }
+      },
+      (e: unknown) => {
+        setCancellingUpdate(false);
+        if (errorCode(e) === "update_cancelled") {
+          setUpdateState({ kind: "available", latestVersion, canInstall, assetSize });
+        } else {
+          setUpdateState({ kind: "error", error: e });
+        }
+      },
+    );
+  };
+
+  const cancelUpdate = () => {
+    if (updateState.kind !== "working" || !support.cancelUpdate || cancellingUpdate) return;
+    playSound("click");
+    setCancellingUpdate(true);
+    void support.cancelUpdate().catch(() => {
+      setCancellingUpdate(false);
+    });
+  };
+
+  const restartToUpdate = () => {
+    if (updateState.kind !== "ready" || !support.applyStagedUpdate || confirmAction !== null) {
+      return;
+    }
+    const { version } = updateState;
+    playSound("click");
+    setUpdateState({ kind: "applying", version });
+    support.applyStagedUpdate().catch((e: unknown) => {
+      setUpdateState({ kind: "error", error: e });
+    });
+  };
+
+  const downloadPercent =
+    updateState.kind === "working" &&
+    updateState.stage === "downloading" &&
+    updateState.bytesTotal > 0
+      ? Math.min(100, Math.round((updateState.bytesDone / updateState.bytesTotal) * 100))
+      : null;
+
+  const errorText =
+    updateState.kind === "error" ? describeError("settings", updateState.error) : null;
 
   return (
     <>
@@ -181,9 +323,9 @@ function SettingsBody({
           </p>
           <CatEgg />
         </div>
-        <div className="flex min-w-0 items-center justify-end gap-2">
-          {support.checkForUpdates && (
-            <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+          {(support.checkForUpdates || updateState.kind !== "idle") && (
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
               {updateState.kind === "up_to_date" && (
                 <span role="status" className="text-ink-muted truncate text-[0.8125rem]">
                   {t("settings.updatesUpToDate")}
@@ -197,40 +339,129 @@ function SettingsBody({
                   {t("settings.updateAvailable", { version: updateState.latestVersion })}
                 </span>
               )}
-              {updateState.kind === "error" && (
-                <span role="alert" className="text-clay-deep truncate text-[0.8125rem]">
-                  {describeError("settings", updateState.error)}
+              {updateState.kind === "working" && (
+                <>
+                  <span role="status" className="text-ink-muted text-[0.8125rem] tabular-nums">
+                    {updateState.stage === "downloading"
+                      ? downloadPercent !== null
+                        ? t("settings.updatingDownloading", { percent: downloadPercent })
+                        : t("settings.updatingDownloadingUnknown")
+                      : updateState.stage === "verifying"
+                        ? t("settings.updatingVerifying")
+                        : t("settings.updatingExtracting")}
+                  </span>
+                  {updateState.stage === "downloading" && (
+                    <div
+                      role="progressbar"
+                      aria-label={t("settings.updateProgress")}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={downloadPercent ?? undefined}
+                      className="bg-graphite/12 h-1.5 w-14 shrink-0 overflow-hidden rounded-full"
+                    >
+                      {downloadPercent !== null && (
+                        <div
+                          className="bg-clay h-full rounded-full transition-[width] duration-150"
+                          style={{ width: `${downloadPercent}%` }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              {updateState.kind === "ready" && (
+                <span
+                  role="status"
+                  className="text-clay-deep truncate text-[0.8125rem] font-medium"
+                >
+                  {t("settings.updateReady")}
                 </span>
               )}
-              {updateState.kind === "available" && support.openReleasePage ? (
-                <button
-                  type="button"
-                  disabled={confirmAction !== null}
-                  onClick={() => openRelease(updateState.latestVersion)}
-                  className={`${BUTTON_SMALL_SOFT} shrink-0 whitespace-nowrap`}
+              {updateState.kind === "applying" && (
+                <span role="status" className="text-ink-muted truncate text-[0.8125rem]">
+                  {t("settings.updatingRestarting")}
+                </span>
+              )}
+              {errorText && (
+                <span
+                  role="alert"
+                  title={errorText}
+                  className="text-clay-deep max-w-[18rem] truncate text-[0.8125rem]"
                 >
-                  {t("settings.openRelease")}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={updateState.kind === "checking" || confirmAction !== null}
-                  onClick={checkUpdates}
-                  className={`${BUTTON_SMALL_QUIET} shrink-0 whitespace-nowrap`}
-                >
-                  {updateState.kind === "checking"
-                    ? t("settings.checkingUpdates")
-                    : updateState.kind === "up_to_date" || updateState.kind === "error"
-                      ? t("settings.checkUpdatesAgain")
-                      : t("settings.checkUpdates")}
-                </button>
+                  {errorText}
+                </span>
+              )}
+              {updateState.kind === "available" ? (
+                <>
+                  {updateState.canInstall && support.installUpdate && (
+                    <button
+                      type="button"
+                      disabled={controlsLocked}
+                      onClick={installUpdate}
+                      className={`${BUTTON_SMALL_PRIMARY} shrink-0 whitespace-nowrap`}
+                    >
+                      {t("settings.installUpdate")}
+                    </button>
+                  )}
+                  {support.openReleasePage && (
+                    <button
+                      type="button"
+                      disabled={controlsLocked}
+                      onClick={() => openRelease(updateState.latestVersion)}
+                      className={`${
+                        updateState.canInstall && support.installUpdate
+                          ? BUTTON_SMALL_QUIET
+                          : BUTTON_SMALL_SOFT
+                      } shrink-0 whitespace-nowrap`}
+                    >
+                      {t("settings.openRelease")}
+                    </button>
+                  )}
+                </>
+              ) : updateState.kind === "working" ? (
+                support.cancelUpdate && (
+                  <button
+                    type="button"
+                    disabled={cancellingUpdate || updateState.stage === "extracting"}
+                    onClick={cancelUpdate}
+                    className={`${BUTTON_SMALL_QUIET} shrink-0 whitespace-nowrap`}
+                  >
+                    {t("settings.cancelUpdate")}
+                  </button>
+                )
+              ) : updateState.kind === "ready" ? (
+                support.applyStagedUpdate && (
+                  <button
+                    type="button"
+                    disabled={confirmAction !== null}
+                    onClick={restartToUpdate}
+                    className={`${BUTTON_SMALL_PRIMARY} shrink-0 whitespace-nowrap`}
+                  >
+                    {t("settings.restartToUpdate")}
+                  </button>
+                )
+              ) : updateState.kind === "applying" ? null : (
+                support.checkForUpdates && (
+                  <button
+                    type="button"
+                    disabled={updateState.kind === "checking" || controlsLocked}
+                    onClick={checkUpdates}
+                    className={`${BUTTON_SMALL_QUIET} shrink-0 whitespace-nowrap`}
+                  >
+                    {updateState.kind === "checking"
+                      ? t("settings.checkingUpdates")
+                      : updateState.kind === "up_to_date" || updateState.kind === "error"
+                        ? t("settings.checkUpdatesAgain")
+                        : t("settings.checkUpdates")}
+                  </button>
+                )
               )}
             </div>
           )}
           <button
             type="button"
             className={`${BUTTON_SOFT} shrink-0`}
-            disabled={confirmAction !== null}
+            disabled={controlsLocked}
             onClick={() => {
               playSound("click");
               onDone();

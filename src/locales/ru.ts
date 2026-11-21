@@ -381,6 +381,16 @@ export const ru: Record<MessageKey, Message> = {
   "settings.updatesUpToDate": "Обновлений нет",
   "settings.updateAvailable": "Доступна {version}",
   "settings.openRelease": "Открыть релиз",
+  "settings.installUpdate": "Обновить",
+  "settings.updatingDownloading": "Загрузка… {percent}%",
+  "settings.updatingDownloadingUnknown": "Загрузка…",
+  "settings.updatingVerifying": "Проверка…",
+  "settings.updatingExtracting": "Распаковка…",
+  "settings.updateReady": "Обновление готово",
+  "settings.restartToUpdate": "Перезапустить",
+  "settings.updatingRestarting": "Перезапуск…",
+  "settings.cancelUpdate": "Отмена",
+  "settings.updateProgress": "Ход обновления",
   "settings.cat": "Кот",
   "onboarding.step": "Шаг {current} из {total}",
   "onboarding.skip": "Пропустить",
@@ -405,6 +415,22 @@ export const ru: Record<MessageKey, Message> = {
   "error.settings.offline": "Нет сети. Повтори попытку.",
   "error.settings.update_rate_limited": "Слишком часто. Попробуй позже.",
   "error.settings.update_check_failed": "Не удалось проверить обновления.",
+  "error.settings.update_not_portable":
+    "Обновление в лаунчере работает только из портативной папки Clade.",
+  "error.settings.update_game_running": "Закрой Minecraft перед обновлением Clade.",
+  "error.settings.update_prepare_running":
+    "Дождись завершения подготовки профиля перед обновлением.",
+  "error.settings.update_in_progress": "Обновление уже выполняется.",
+  "error.settings.update_unavailable":
+    "Архив этого релиза недоступен. Открой страницу релиза в браузере.",
+  "error.settings.update_verify_failed":
+    "Обновление не прошло проверку и было удалено. Попробуй снова.",
+  "error.settings.update_invalid_package": "Скачанный архив не соответствует формату Clade.",
+  "error.settings.update_install_failed":
+    "Не удалось подготовить обновление. Проверь, что папка Clade доступна для записи.",
+  "error.settings.not_enough_space":
+    "Недостаточно места для обновления: нужно около {required}, доступно {available}.",
+  "error.settings.update_cancelled": "Обновление отменено.",
   "error.settings.browser_unavailable": "Не удалось открыть страницу релиза.",
   "error.settings.invalid_memory":
     "Такой объём памяти небезопасен для этого компьютера. Выбери от {min} до {max}.",

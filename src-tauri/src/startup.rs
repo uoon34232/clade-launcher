@@ -10,16 +10,21 @@ use std::sync::Mutex;
 use crate::portable::PortableRoot;
 use crate::startup_text::{self, StartupMessage};
 
-/// The one native error dialog, shown in the selected language (see `startup_text`), then exit.
-/// `root` is the launcher folder when it is already known (for its saved language); `detail` is
-/// an English technical line for troubleshooting and is redacted so user or share paths never leak.
-pub fn fail(id: StartupMessage, root: Option<&Path>, detail: Option<&str>) -> ! {
+/// Displays the localized native dialog without exiting the process.
+pub fn show_message(id: StartupMessage, root: Option<&Path>, detail: Option<&str>) {
     let lang = startup_text::current_language(root);
     let safe_detail = detail.map(|d| redact_detail(d, root));
     show_error(
         startup_text::TITLE,
         &startup_text::render(id, lang, safe_detail.as_deref()),
     );
+}
+
+/// The one native error dialog, shown in the selected language (see `startup_text`), then exit.
+/// `root` is the launcher folder when it is already known (for its saved language); `detail` is
+/// an English technical line for troubleshooting and is redacted so user or share paths never leak.
+pub fn fail(id: StartupMessage, root: Option<&Path>, detail: Option<&str>) -> ! {
+    show_message(id, root, detail);
     std::process::exit(1)
 }
 

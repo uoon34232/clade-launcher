@@ -91,6 +91,10 @@ export interface BackendConfig {
   retiredVaults?: number;
   /** Optional synthetic latest GitHub release tag reported by `check_for_updates`. */
   latestRelease?: string | null;
+  /** Whether the synthetic release ships portable update assets (`canInstall`). */
+  latestReleaseInstallable?: boolean;
+  /** Byte size reported for the synthetic portable release ZIP. */
+  latestReleaseSize?: number | null;
   /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
   appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;

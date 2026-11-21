@@ -41,6 +41,7 @@ pub mod startup_text;
 pub mod support_cmd;
 pub mod system;
 pub mod ui_settings;
+pub mod update_apply;
 pub mod update_check;
 pub mod vault;
 pub mod vault_recovery;
@@ -86,6 +87,9 @@ fn portable_status(state: tauri::State<'_, AppState>) -> PortableStatus {
 }
 
 pub fn run() {
+    if let Some(code) = update_apply::maybe_run_helper_mode() {
+        std::process::exit(code);
+    }
     let root = PortableRoot::discover().unwrap_or_else(|e| {
         startup::fail(
             StartupMessage::CannotLocateFolder,
@@ -170,6 +174,8 @@ pub fn run() {
     if let Err(e) = loader_install::sweep_stale(&root) {
         tracing::warn!(error = %e, "could not clean stale loader staging");
     }
+    // Remove finished update staging/backups while preserving resumable .part downloads.
+    update_apply::sweep_updates(&root);
     // Reclaim disposable Chromium component-updater bloat (Widevine DRM, Speech, Subresource
     // Filter, metrics) before WebView2 opens its user-data directory.
     webview::sweep_profile_bloat(&root);
@@ -240,6 +246,7 @@ pub fn run() {
     .with_locks(profile_locks.clone());
     let launch_state = launch_cmd::LaunchState::new(root.clone()).with_locks(profile_locks);
     let settings_state = ui_settings::SettingsState::new(root.settings_file(), launcher_settings);
+    let update_state = update_check::UpdateState::new(root.clone());
     let webview_dir = root.webview_data_dir();
     let state = AppState {
         root,
@@ -299,6 +306,9 @@ pub fn run() {
                     prepare_cmd::cancel_prepare(
                         window.app_handle().state::<prepare_cmd::PrepareState>(),
                     );
+                    update_apply::cancel_active(
+                        window.app_handle().state::<update_check::UpdateState>(),
+                    );
                 }
             }
             _ => {}
@@ -306,7 +316,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(settings_state)
-        .manage(update_check::UpdateState::new())
+        .manage(update_state)
         .manage(glass::GlassState::new())
         .manage(profiles_state)
         .manage(accounts_state)
@@ -335,6 +345,10 @@ pub fn run() {
             support_cmd::clear_retired_vaults,
             update_check::check_for_updates,
             update_check::open_release_page,
+            update_apply::get_update_status,
+            update_apply::install_update,
+            update_apply::cancel_update,
+            update_apply::apply_staged_update,
             profiles::list_profiles,
             profiles::select_profile,
             profiles::get_version_catalog,

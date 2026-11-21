@@ -35,7 +35,7 @@ function templateParams(domain: ErrorDomain, raw: Record<string, unknown>): Para
   for (const [k, v] of Object.entries(raw)) {
     if (typeof v === "string" || typeof v === "number") out[k] = v;
   }
-  if (domain === "prepare") {
+  if (domain === "prepare" || domain === "settings") {
     if (typeof raw.requiredBytes === "number") out.required = formatBytes(raw.requiredBytes);
     if (typeof raw.availableBytes === "number") out.available = formatBytes(raw.availableBytes);
   }
