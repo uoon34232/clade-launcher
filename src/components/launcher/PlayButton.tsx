@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DownloadIcon, LoaderCircleIcon, LogInIcon, PlayIcon } from "lucide-react";
 import { emitBurst } from "@/lib/fx/burst";
 import { useT, type MessageKey } from "@/lib/i18n";
@@ -31,6 +31,15 @@ const LABEL: Record<PlayState, MessageKey> = {
 export function PlayButton({ onClick, state = "play" }: Props) {
   const t = useT();
   const btnRef = useRef<HTMLButtonElement>(null);
+  const [pulseSeq, setPulseSeq] = useState(0);
+  const pulseTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (pulseTimerRef.current !== null) window.clearTimeout(pulseTimerRef.current);
+    },
+    [],
+  );
+
   const busy = state === "launching" || state === "repairing";
   const disabled = busy || state === "playing";
   return (
@@ -49,13 +58,29 @@ export function PlayButton({ onClick, state = "play" }: Props) {
             x = r.left + r.width / 2;
             y = r.top + r.height / 2;
           }
-          emitBurst(x, y, { count: 8, reducedMotion: prefersReducedMotion() });
+          const reduced = prefersReducedMotion();
+          emitBurst(x, y, { count: 10, reducedMotion: reduced });
+          if (!reduced) {
+            setPulseSeq((n) => n + 1);
+            if (pulseTimerRef.current !== null) window.clearTimeout(pulseTimerRef.current);
+            pulseTimerRef.current = window.setTimeout(() => {
+              pulseTimerRef.current = null;
+              setPulseSeq(0);
+            }, 560);
+          }
         }
         playSound("primary");
         onClick?.();
       }}
-      className={`dock-item dock-item--primary group bg-clay focus-visible:ring-clay-soft focus-visible:ring-offset-graphite active:bg-clay-deep disabled:hover:bg-clay data-[state=playing]:bg-clay/55 flex h-12 min-w-[7.75rem] shrink-0 cursor-default items-center justify-center gap-2 rounded-[1.25rem] px-6 text-[0.9375rem] leading-none font-semibold tracking-[0.01em] whitespace-nowrap text-[#fbf6ee] shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_6px_18px_-6px_rgb(163_82_61/0.7)] outline-none hover:bg-[#944834] hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_10px_26px_-8px_rgb(163_82_61/0.85)] focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-80 disabled:shadow-none disabled:hover:scale-100 ${state === "launching" ? "play-launching-glow" : ""}`}
+      className={`dock-item dock-item--primary group bg-clay focus-visible:ring-clay-soft focus-visible:ring-offset-graphite active:bg-clay-deep disabled:hover:bg-clay data-[state=playing]:bg-clay/55 relative flex h-12 min-w-[7.75rem] shrink-0 cursor-default items-center justify-center gap-2 overflow-visible rounded-[1.25rem] px-6 text-[0.9375rem] leading-none font-semibold tracking-[0.01em] whitespace-nowrap text-[#fbf6ee] shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_6px_18px_-6px_rgb(163_82_61/0.7)] outline-none hover:bg-[#944834] hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_10px_26px_-8px_rgb(163_82_61/0.85)] focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-80 disabled:hover:scale-100 ${state === "launching" ? "play-launching-glow" : "disabled:shadow-none"}`}
     >
+      {pulseSeq > 0 && (
+        <span
+          key={pulseSeq}
+          aria-hidden="true"
+          className="play-click-ring pointer-events-none absolute inset-0 rounded-[1.25rem]"
+        />
+      )}
       {state === "signin" ? (
         <LogInIcon aria-hidden strokeWidth={2.25} className="size-3.5 shrink-0" />
       ) : state === "setup" ? (

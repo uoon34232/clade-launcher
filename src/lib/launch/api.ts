@@ -56,6 +56,7 @@ export function parseLaunchEvent(raw: unknown): LaunchEvent | null {
 
 export interface GameEmbedStatus {
   active: boolean;
+  watching?: boolean;
   instanceId: string | null;
   maximized: boolean;
   closing?: boolean;
@@ -63,19 +64,33 @@ export interface GameEmbedStatus {
 
 export const NO_EMBED: GameEmbedStatus = {
   active: false,
+  watching: false,
   instanceId: null,
   maximized: false,
   closing: false,
 };
 
 export function parseGameEmbedStatus(raw: unknown): GameEmbedStatus {
-  if (!isObj(raw) || raw.active !== true) return NO_EMBED;
-  return {
-    active: true,
-    instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
-    maximized: raw.maximized === true,
-    closing: raw.closing === true,
-  };
+  if (!isObj(raw)) return NO_EMBED;
+  if (raw.active === true) {
+    return {
+      active: true,
+      watching: false,
+      instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
+      maximized: raw.maximized === true,
+      closing: raw.closing === true,
+    };
+  }
+  if (raw.watching === true) {
+    return {
+      active: false,
+      watching: true,
+      instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
+      maximized: false,
+      closing: false,
+    };
+  }
+  return NO_EMBED;
 }
 
 export const launchApi = {

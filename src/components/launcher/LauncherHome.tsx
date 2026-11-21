@@ -173,7 +173,7 @@ export function LauncherHome({
     returnTimerRef.current = window.setTimeout(() => {
       returnTimerRef.current = null;
       setEmbedReturning(false);
-    }, 420);
+    }, 620);
     return () => {
       if (returnTimerRef.current !== null) {
         window.clearTimeout(returnTimerRef.current);
@@ -508,7 +508,11 @@ export function LauncherHome({
       ? (accounts.accounts.find((a) => a.id === surface.id) ?? null)
       : null;
   const isLaunching = Object.values(runs).includes("launching");
-  const embedLaunching = isLaunching && ui.onLaunch === "embed" && !embed.active;
+  const embedLaunching =
+    ui.onLaunch === "embed" && !embed.active && (isLaunching || embed.watching === true);
+  const launchingProfile =
+    snapshot.profiles.find((p) => runs[p.id] === "launching" || p.id === embed.instanceId) ??
+    selectedProfile;
   const bgPaused =
     embed.active ||
     surface.kind !== "none" ||
@@ -546,21 +550,39 @@ export function LauncherHome({
           <div
             aria-hidden="true"
             data-testid="game-stage-launching"
-            className="launch-stage-veil pointer-events-none absolute inset-x-0 top-[44px] bottom-0 overflow-hidden"
+            className="launch-stage-veil pointer-events-none absolute inset-x-0 top-[44px] bottom-0 flex flex-col overflow-hidden"
           >
-            <div className="bg-graphite/[0.04] h-[2px] w-full overflow-hidden">
-              <div className="stage-seam-shimmer bg-clay/55 h-full w-1/3 rounded-full" />
+            <div className="bg-graphite/[0.06] h-[2px] w-full shrink-0 overflow-hidden">
+              <div className="stage-seam-shimmer bg-clay/70 h-full w-1/3 rounded-full" />
             </div>
-            <div className="bg-sand/20 ring-graphite/[0.06] h-full w-full ring-1 ring-inset" />
+            <div className="flex flex-1 items-center justify-center px-6 pb-[clamp(6.5rem,20vh,12.5rem)]">
+              <div className="launch-portal-card bg-cream/95 ring-graphite/10 flex min-w-[min(20rem,100%)] flex-col items-center gap-3 rounded-[1.5rem] px-8 py-6 text-center shadow-[0_24px_60px_-22px_rgb(43_38_34/0.35),inset_0_1px_0_rgb(255_255_255/0.6)] ring-1">
+                <div className="relative flex size-8 items-center justify-center">
+                  <span className="launch-orb-pulse bg-clay/25 absolute inset-0 rounded-full" />
+                  <span className="bg-clay relative size-2.5 rounded-full" />
+                </div>
+                {launchingProfile && (
+                  <p className="text-graphite font-serif text-[1.25rem] leading-tight tracking-[-0.015em]">
+                    {launchingProfile.name}
+                  </p>
+                )}
+                <p className="text-ink-muted text-[0.875rem] font-medium tracking-[0.01em]">
+                  {t("play.launching")}
+                </p>
+                <div className="bg-graphite/[0.08] mt-1 h-1 w-40 overflow-hidden rounded-full">
+                  <div className="indeterminate-bar bg-clay h-full w-1/3 rounded-full" />
+                </div>
+              </div>
+            </div>
           </div>
         )}
         {!embed.active && embedReturning && (
           <div
             aria-hidden="true"
             data-testid="game-stage-exit"
-            className="game-stage-exit bg-graphite/[0.86] ring-cream/10 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden ring-1 ring-inset"
+            className="game-stage-exit bg-graphite/[0.22] ring-graphite/10 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden ring-1 ring-inset"
           >
-            <div className="h-full w-full bg-[radial-gradient(ellipse_at_50%_40%,rgb(246_240_230/0.09),transparent_70%)]" />
+            <div className="h-full w-full bg-[radial-gradient(ellipse_at_50%_40%,rgb(246_240_230/0.14),transparent_70%)]" />
           </div>
         )}
         {!embed.active && (

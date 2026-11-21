@@ -265,6 +265,8 @@ test.describe("framed game mode (inside Clade)", () => {
     await playButton(page).click();
     await expect(page.getByTestId("game-stage-launching")).toBeVisible();
     await backend.playing("survival");
+    // Launch transition stays active after the 2.5s "playing" milestone until the game window embeds.
+    await expect(page.getByTestId("game-stage-launching")).toBeVisible();
     await backend.embedded("survival", true);
 
     await expect(playButton(page)).toHaveCount(0);

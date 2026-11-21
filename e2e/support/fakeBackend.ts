@@ -39,7 +39,13 @@ interface Control {
     };
     ui: BackendConfig["ui"];
     runs: Record<string, "launching" | "playing">;
-    embed: { active: boolean; instanceId: string | null; maximized: boolean; closing?: boolean };
+    embed: {
+      active: boolean;
+      watching?: boolean;
+      instanceId: string | null;
+      maximized: boolean;
+      closing?: boolean;
+    };
   };
   emit: (event: string, payload: unknown) => void;
   setEmbedded: (
@@ -87,7 +93,13 @@ function install(cfg: BackendConfig): void {
     ui: clone(cfg.ui),
     runs: clone(cfg.runs),
     embed: clone(
-      cfg.embed ?? { active: false, instanceId: null, maximized: false, closing: false },
+      cfg.embed ?? {
+        active: false,
+        watching: false,
+        instanceId: null,
+        maximized: false,
+        closing: false,
+      },
     ),
   };
   const calls: Control["calls"] = [];
@@ -102,8 +114,17 @@ function install(cfg: BackendConfig): void {
       const ev = payload as { instanceId: string; state: "launching" | "playing" | "stopped" };
       if (ev.state === "stopped") {
         delete state.runs[ev.instanceId];
-        if (state.embed.active && state.embed.instanceId === ev.instanceId) {
-          state.embed = { active: false, instanceId: null, maximized: false, closing: false };
+        if (
+          (state.embed.active || state.embed.watching) &&
+          state.embed.instanceId === ev.instanceId
+        ) {
+          state.embed = {
+            active: false,
+            watching: false,
+            instanceId: null,
+            maximized: false,
+            closing: false,
+          };
           for (const id of [...(listeners.get("game-embed-state") ?? [])]) {
             callbacks.get(id)?.({ event: "game-embed-state", id, payload: clone(state.embed) });
           }
@@ -810,6 +831,16 @@ function install(cfg: BackendConfig): void {
         }
         if (state.runs[id]) return fail("already_running", "This profile is already running.");
         state.runs[id] = "launching";
+        if (state.ui.onLaunch === "embed") {
+          state.embed = {
+            active: false,
+            watching: true,
+            instanceId: id,
+            maximized: false,
+            closing: false,
+          };
+          emit("game-embed-state", clone(state.embed));
+        }
         return null;
       }
       case "launch_status":
@@ -942,8 +973,8 @@ function install(cfg: BackendConfig): void {
     emit,
     setEmbedded: (instanceId, active, maximized = false, closing = false) => {
       state.embed = active
-        ? { active: true, instanceId, maximized, closing }
-        : { active: false, instanceId: null, maximized: false, closing: false };
+        ? { active: true, watching: false, instanceId, maximized, closing }
+        : { active: false, watching: false, instanceId: null, maximized: false, closing: false };
       emit("game-embed-state", clone(state.embed));
     },
     hasPendingPrepare: () => pendingPrepare !== null,
