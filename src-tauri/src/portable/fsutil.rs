@@ -122,15 +122,23 @@ pub fn remove_file_with_retry(path: &Path) -> io::Result<()> {
 
 /// Removes a directory tree (refusing top-level reparse points), retrying transient Windows locks.
 pub fn remove_dir_all_with_retry(path: &Path) -> io::Result<()> {
-    match is_link(path) {
-        Ok(true) => {
-            return Err(io::Error::other(format!(
-                "refusing to remove link directory {}",
-                path.display()
-            )))
+    let mut attempt = 0usize;
+    loop {
+        match is_link(path) {
+            Ok(true) => {
+                return Err(io::Error::other(format!(
+                    "refusing to remove link directory {}",
+                    path.display()
+                )));
+            }
+            Ok(false) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if is_transient_win_lock(&e) && attempt < RETRY_DELAYS_MS.len() => {
+                std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        _ => {}
     }
     let mut attempt = 0usize;
     loop {
@@ -206,16 +214,41 @@ pub fn cluster_size_bytes(path: &Path) -> u64 {
     4096
 }
 
+fn check_not_link_if_exists(p: &Path) -> io::Result<bool> {
+    match is_link(p) {
+        Ok(true) => Err(io::Error::other(format!(
+            "refusing to atomic_write through a link at {}",
+            p.display()
+        ))),
+        Ok(false) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn reject_existing_ancestor_links(dir: &Path) -> io::Result<()> {
+    let mut ancestors: Vec<&Path> = dir.ancestors().filter(|p| p.parent().is_some()).collect();
+    ancestors.reverse();
+    for anc in ancestors {
+        if !check_not_link_if_exists(anc)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Writes `bytes` to `path` so readers only ever see the old or the new content, never a
 /// torn file. Matters on USB sticks that can be pulled mid-write.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    if is_link(parent).unwrap_or(false) || is_link(path).unwrap_or(false) {
-        return Err(io::Error::other("refusing to atomic_write through a link"));
+    reject_existing_ancestor_links(parent)?;
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
+        reject_existing_ancestor_links(parent)?;
     }
+    check_not_link_if_exists(path)?;
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     let mut nonce = [0u8; 6];
     getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
@@ -490,5 +523,54 @@ mod tests {
         fs::write(&tmp, b"hello").unwrap();
         install_verified(&tmp, &dest, &Expected::Sha256(HELLO_SHA256.into()), Some(5)).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[cfg(windows)]
+    fn create_junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_refuses_ancestor_junction_before_creating_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = d.path().join("link");
+        create_junction(&link, &outside);
+
+        let target = link.join("nested").join("deeper").join("f.json");
+        assert!(atomic_write(&target, b"nope").is_err());
+        assert!(
+            !outside.join("nested").exists(),
+            "atomic_write must not create directories through an ancestor link"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_dir_all_with_retry_refuses_junction_and_allows_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        let link = d.path().join("link");
+        create_junction(&link, &outside);
+
+        assert!(remove_dir_all_with_retry(&link).is_err());
+        assert!(outside.join("keep.txt").is_file());
+        assert!(remove_dir_all_with_retry(&d.path().join("missing")).is_ok());
     }
 }

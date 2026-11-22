@@ -4,6 +4,7 @@ import type { AccountsApi, AccountsSnapshot, SignInStage, VaultStatus } from "@/
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { ProfilesApi } from "@/lib/profiles/api";
+import { sound } from "@/lib/sound/soundService";
 import { appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 import { LauncherHome } from "./LauncherHome";
 
@@ -66,7 +67,8 @@ function makeAccounts(
   });
   const remove = vi.fn<AccountsApi["remove"]>((id) => {
     const accounts = snap.accounts.filter((a) => a.id !== id);
-    snap = { ...snap, accounts, active: accounts[0]?.id ?? null };
+    const active = snap.active === id ? (accounts[0]?.id ?? null) : snap.active;
+    snap = { ...snap, accounts, active };
     return Promise.resolve(snap);
   });
   const vaultStatus = vi.fn<AccountsApi["vaultStatus"]>(() => Promise.resolve(vault));
@@ -87,7 +89,9 @@ function makeAccounts(
       }),
   );
   const cancelSignIn = vi.fn<AccountsApi["cancelSignIn"]>(() => {
-    pending?.reject(new BackendError("Sign-in was cancelled.", "cancelled"));
+    const current = pending;
+    pending = null;
+    current?.reject(new BackendError("Sign-in was cancelled.", "cancelled"));
     return Promise.resolve();
   });
   const onSignInProgress = vi.fn<AccountsApi["onSignInProgress"]>((cb) => {
@@ -113,12 +117,16 @@ function makeAccounts(
     finish: (next: AccountsSnapshot) =>
       act(async () => {
         snap = next;
-        pending?.resolve(next);
+        const current = pending;
+        pending = null;
+        current?.resolve(next);
         await Promise.resolve();
       }),
     fail: (e: unknown) =>
       act(async () => {
-        pending?.reject(e);
+        const current = pending;
+        pending = null;
+        current?.reject(e);
         await Promise.resolve();
       }),
   };
@@ -164,6 +172,8 @@ function makeProfiles() {
 const flush = async () => act(async () => void (await Promise.resolve()));
 
 beforeEach(() => {
+  sound.setSettings({ enabled: true, volume: 0.5 });
+  setLocale("en");
   globalThis.ResizeObserver ??= class {
     observe() {}
     unobserve() {}
@@ -183,7 +193,11 @@ beforeEach(() => {
     });
   }
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  sound.setSettings({ enabled: true, volume: 0.5 });
+  setLocale("en");
+});
 
 async function setup(snapshot: AccountsSnapshot, vault?: VaultStatus) {
   const accounts = makeAccounts(snapshot, vault);
@@ -195,7 +209,9 @@ async function setup(snapshot: AccountsSnapshot, vault?: VaultStatus) {
 
 const openMenu = async () => {
   fireEvent.click(
-    screen.getByRole("button", { name: /Account: Alex|Account: Blake|Add an account/ }),
+    screen.getByRole("button", {
+      name: /Account: Alex|Account: Blake|Account: Casey_9|Add an account/,
+    }),
   );
   await waitFor(() => expect(screen.getByRole("menu")).toBeTruthy());
 };
@@ -232,6 +248,29 @@ describe("account menu in the dock", () => {
     await openMenu();
     expect(screen.queryAllByRole("menuitemradio")).toHaveLength(0);
     expect(screen.getByRole("menuitem", { name: "+ Add account" })).toBeTruthy();
+  });
+
+  it("rolls back the active account via refreshAccounts when selecting fails", async () => {
+    const { accounts } = await setup(two);
+    let rejectSelect!: (err: unknown) => void;
+    accounts.select.mockImplementationOnce(
+      () =>
+        new Promise<AccountsSnapshot>((_resolve, reject) => {
+          rejectSelect = reject;
+        }),
+    );
+
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Blake/ }));
+    expect(screen.getByRole("button", { name: /Account: Blake/ })).toBeTruthy();
+
+    await act(async () => {
+      rejectSelect(new BackendError("Account missing", "unknown_account"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(accounts.list).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Account: Alex/ })).toBeTruthy());
   });
 });
 
@@ -368,11 +407,47 @@ describe("signing in", () => {
     expect(screen.getByLabelText("Passphrase").getAttribute("aria-describedby")).toBeNull();
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "wrong wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
-    await waitFor(() => expect(dialog.textContent).toContain("doesn't match"));
+    await waitFor(() => expect(dialog.textContent).toContain("doesn’t match"));
     expect(accounts.signIn).not.toHaveBeenCalled();
     expect(screen.getByLabelText<HTMLInputElement>("Passphrase").value).toBe("");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "correct horse" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith(null));
+  });
+
+  it("cancelling during the checking phase closes immediately without starting or cancelling sign-in", async () => {
+    const { accounts } = await setup(two);
+    let resolveVault!: (v: VaultStatus) => void;
+    accounts.vaultStatus.mockImplementationOnce(
+      () =>
+        new Promise<VaultStatus>((resolve) => {
+          resolveVault = resolve;
+        }),
+    );
+
+    await clickAdd();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(accounts.cancelSignIn).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveVault({ exists: true, unlocked: true });
+      await Promise.resolve();
+    });
+    expect(accounts.signIn).not.toHaveBeenCalled();
+  });
+
+  it("shows an error when vaultStatus rejects and lets the person try again", async () => {
+    const { accounts } = await setup(two);
+    accounts.vaultStatus.mockRejectedValueOnce(new BackendError("Storage unreadable", "storage"));
+
+    await clickAdd();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Your accounts could not be saved.");
+    expect(accounts.signIn).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(accounts.vaultStatus).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith(null));
   });
 
@@ -391,6 +466,82 @@ describe("signing in", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
     await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith("b"));
     expect(screen.getByRole("dialog").textContent).toContain("Sign in as Blake");
+  });
+
+  it("handles createVault rejections, locks while busy, and clears passphrases", async () => {
+    const { accounts } = await setup(two, { exists: false, unlocked: false });
+    let rejectVault!: (err: unknown) => void;
+    accounts.createVault
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectVault = reject;
+          }),
+      )
+      .mockRejectedValueOnce(new BackendError("Too short", "passphrase_too_short"));
+
+    const dialog = await clickAdd();
+    await screen.findByText("Protect your accounts");
+    const pass = screen.getByLabelText<HTMLInputElement>("Passphrase");
+    const again = screen.getByLabelText<HTMLInputElement>("Repeat passphrase");
+    fireEvent.change(pass, { target: { value: "long enough words" } });
+    fireEvent.change(again, { target: { value: "long enough words" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Working…" }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(true);
+    expect(pass.disabled).toBe(true);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await act(async () => {
+      rejectVault(new BackendError("Vault exists", "vault_exists"));
+      await Promise.resolve();
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Accounts are already protected by a passphrase.");
+    expect(pass.getAttribute("aria-invalid")).toBe("true");
+    expect(pass.getAttribute("aria-describedby")).toBe("vault-pass-note vault-pass-error");
+    expect(pass.value).toBe("");
+    expect(again.value).toBe("");
+    expect(accounts.signIn).not.toHaveBeenCalled();
+
+    fireEvent.change(pass, { target: { value: "long enough words" } });
+    fireEvent.change(again, { target: { value: "long enough words" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("That passphrase is too short."),
+    );
+    expect(accounts.signIn).not.toHaveBeenCalled();
+  });
+
+  it("explains timed_out sign-in errors and allows retrying", async () => {
+    const { accounts } = await setup(two);
+    await clickAdd();
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledTimes(1));
+    await accounts.fail(new BackendError("Timed out", "timed_out"));
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Sign-in took too long and was stopped.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledTimes(2));
+  });
+
+  it("explains wrong_account when signing in again and retries for the same account", async () => {
+    const { accounts } = await setup(two);
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Manage Blake" }));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith("b"));
+
+    await accounts.fail(new BackendError("Different account", "wrong_account"));
+    expect(screen.getByRole("alert").textContent).toContain(
+      "That is a different Minecraft account from the one being signed in again.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(accounts.signIn).toHaveBeenNthCalledWith(2, "b"));
   });
 });
 
@@ -443,8 +594,69 @@ describe("account management modal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove account" }));
     await waitFor(() => expect(accounts.remove).toHaveBeenCalledWith("b"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: /Account: Alex/ })).toBeTruthy();
     expect(profiles.create).not.toHaveBeenCalled();
     expect(profiles.select).not.toHaveBeenCalled();
+  });
+
+  it("preserves the active account when removing a different account", async () => {
+    const { accounts } = await setup(casey);
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Manage Alex" }));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /Sign out and remove/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove account" }));
+    await waitFor(() => expect(accounts.remove).toHaveBeenCalledWith("a"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: /Account: Casey_9/ })).toBeTruthy();
+  });
+
+  it("locks Escape while confirming removal, disables buttons while removing, and shows errors", async () => {
+    const { accounts } = await openManage();
+    let rejectRemove!: (err: unknown) => void;
+    accounts.remove.mockImplementationOnce(
+      () =>
+        new Promise<AccountsSnapshot>((_resolve, reject) => {
+          rejectRemove = reject;
+        }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Sign out and remove/ }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(accounts.remove).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove account" }));
+    const removing = screen.getByRole<HTMLButtonElement>("button", { name: "Removing…" });
+    const keep = screen.getByRole<HTMLButtonElement>("button", { name: "Keep account" });
+    expect(removing.disabled).toBe(true);
+    expect(keep.disabled).toBe(true);
+    fireEvent.click(removing);
+    expect(accounts.remove).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await act(async () => {
+      rejectRemove(new BackendError("Account missing", "unknown_account"));
+      await Promise.resolve();
+    });
+
+    expect(
+      screen
+        .getAllByRole("alert")
+        .some((a) => a.textContent?.includes("That account no longer exists.")),
+    ).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Remove account" }).disabled).toBe(
+      false,
+    );
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Keep account" }).disabled).toBe(
+      false,
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep account" }));
+    expect(screen.queryByText(/That account no longer exists\./)).toBeNull();
   });
 
   it("Escape closes it", async () => {
@@ -452,19 +664,49 @@ describe("account management modal", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
+
+  it("restores focus to Done when unlocking a locked vault inline inside AccountDialog", async () => {
+    const accounts = makeAccounts(two, { exists: true, unlocked: false });
+    accounts.appearance
+      .mockRejectedValueOnce(new BackendError("locked", "vault_locked"))
+      .mockResolvedValueOnce({ skinModel: "classic", capes: [] });
+    const profiles = makeProfiles();
+    render(<LauncherHome api={profiles} accountsClient={accounts} />);
+    await flush();
+
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Manage Alex" }));
+    await screen.findByRole("dialog");
+
+    const passInput = await screen.findByLabelText("Passphrase");
+    fireEvent.change(passInput, { target: { value: "correct horse" } });
+    const unlockBtn = screen.getByRole("button", { name: "Unlock" });
+    unlockBtn.focus();
+    fireEvent.click(unlockBtn);
+
+    await waitFor(() => expect(accounts.unlockVault).toHaveBeenCalledWith("correct horse"));
+    await waitFor(() => expect(screen.queryByLabelText("Passphrase")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Done" }));
+  });
 });
 
 describe("launcher settings", () => {
   it("is tiny: sound effects and volume, and the switch works", async () => {
     await setup(two);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const dialog = await screen.findByRole("dialog");
+    await screen.findByRole("dialog");
     const sw = screen.getByRole("switch", { name: "Sound effects" });
+    const volume = screen.getByRole<HTMLInputElement>("slider", { name: "Volume" });
     expect(sw.getAttribute("aria-checked")).toBe("true");
-    expect(dialog.querySelectorAll("input,[role=switch],select")).toHaveLength(2);
+    expect(volume.disabled).toBe(false);
+    expect(screen.getByRole("radiogroup", { name: "Mode" })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "Language" })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "Theme" })).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "Reduced motion" })).toBeNull();
+    expect(screen.queryByRole("slider", { name: "Memory for Minecraft" })).toBeNull();
     fireEvent.click(sw);
     await waitFor(() => expect(sw.getAttribute("aria-checked")).toBe("false"));
-    expect(screen.getByLabelText<HTMLInputElement>("Volume").disabled).toBe(true);
+    expect(volume.disabled).toBe(true);
   });
 });
 
@@ -479,7 +721,7 @@ describe("accounts in Russian", () => {
     expect(dialog.textContent).toContain("Восстановить её нельзя");
     expect(dialog.textContent).toContain("Не менее 8 символов");
     const pass = screen.getByLabelText<HTMLInputElement>("Парольная фраза");
-    const again = screen.getByLabelText<HTMLInputElement>("Парольная фраза ещё раз");
+    const again = screen.getByLabelText<HTMLInputElement>("Повтори парольную фразу");
     fireEvent.change(pass, { target: { value: "long enough words" } });
     fireEvent.change(again, { target: { value: "different" } });
     expect(dialog.textContent).toContain("Парольные фразы не совпадают.");
@@ -510,7 +752,7 @@ describe("accounts in Russian", () => {
     expect(await screen.findByText("У этого аккаунта нет плащей.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Выйти и удалить…" }));
     expect(dialog.textContent).toContain(
-      "Удалить Alex? Профили, миры и время игры останутся как есть.",
+      "Удалить Alex? Профили, миры и время в игре останутся как есть.",
     );
     expect(screen.getByRole("button", { name: "Оставить аккаунт" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Удалить аккаунт" })).toBeTruthy();

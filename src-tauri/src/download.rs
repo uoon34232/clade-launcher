@@ -19,12 +19,12 @@
 //! Concurrency is bounded ([`Downloader::fetch_all`]); progress is counted in bytes and items
 //! so callers can report real numbers (and nothing is reported when a total is unknown).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
@@ -32,7 +32,8 @@ use url::Url;
 
 use crate::net::{FetchError, StreamHead, StreamSink, Streamer};
 use crate::portable::fsutil::{
-    is_link, reject_links_between, remove_file_with_retry, rename_with_retry, verify_file, Expected,
+    is_link, reject_links_between, remove_file_with_retry, rename_with_retry,
+    strip_prefix_portable, verify_file, Expected,
 };
 
 /// Failed attempts tolerated per file before giving up on the connection.
@@ -43,6 +44,8 @@ const MAX_CORRUPT: u32 = 2;
 const MAX_UNDECLARED_BYTES: u64 = 512 * 1024 * 1024;
 /// Write buffer size per active download stream to coalesce small network chunks on USB flash drives.
 const PART_BUF_CAPACITY: usize = 256 * 1024;
+/// Maximum queued 256 KiB buffers per active download stream before applying backpressure.
+const MAX_WRITER_QUEUE: usize = 8;
 
 // ------------------------------------------------------------------------------ cancel
 
@@ -240,9 +243,200 @@ impl InlineHasher {
     }
 }
 
-/// Writes the stream into the `.part` file, resuming or restarting as the server answered. When the
-/// file's size is known it is a hard ceiling for the whole part (bytes already kept from an earlier
-/// attempt count towards it); otherwise [`MAX_UNDECLARED_BYTES`] caps the stream.
+struct WriterState {
+    queue: VecDeque<Vec<u8>>,
+    finish: bool,
+    abort: bool,
+    error: Option<(io::ErrorKind, String)>,
+}
+
+struct WriterShared {
+    state: Mutex<WriterState>,
+    work_available: Condvar,
+    space_available: Condvar,
+}
+
+struct WriterHandle {
+    shared: Arc<WriterShared>,
+    done_rx: Option<tokio::sync::oneshot::Receiver<io::Result<()>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WriterHandle {
+    fn spawn(part: &Path, resuming: bool, from: u64) -> io::Result<Self> {
+        let shared = Arc::new(WriterShared {
+            state: Mutex::new(WriterState {
+                queue: VecDeque::new(),
+                finish: false,
+                abort: false,
+                error: None,
+            }),
+            work_available: Condvar::new(),
+            space_available: Condvar::new(),
+        });
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let part_owned = part.to_path_buf();
+        let shared_thread = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("clade-part-writer".into())
+            .spawn(move || {
+                let res = write_part_file(&part_owned, resuming, from, &shared_thread);
+                if let Err(ref e) = res {
+                    let mut g = shared_thread
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    g.error = Some((e.kind(), e.to_string()));
+                    shared_thread.space_available.notify_all();
+                }
+                drop(shared_thread);
+                let _ = done_tx.send(res);
+            })?;
+        Ok(Self {
+            shared,
+            done_rx: Some(done_rx),
+            thread: Some(thread),
+        })
+    }
+
+    fn check_error(&self) -> io::Result<()> {
+        let g = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((kind, ref msg)) = g.error {
+            return Err(io::Error::new(kind, msg.clone()));
+        }
+        Ok(())
+    }
+
+    fn push_buffer(&self, buf: Vec<u8>, cancel: &CancelScope<'_>) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some((kind, ref msg)) = g.error {
+                return Err(io::Error::new(kind, msg.clone()));
+            }
+            if g.abort || cancel.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if g.queue.len() < MAX_WRITER_QUEUE {
+                g.queue.push_back(buf);
+                self.shared.work_available.notify_one();
+                return Ok(());
+            }
+            let (next_g, _) = self
+                .shared
+                .space_available
+                .wait_timeout(g, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner());
+            g = next_g;
+        }
+    }
+
+    async fn finish(mut self, tail: Vec<u8>) -> io::Result<()> {
+        {
+            let mut g = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !tail.is_empty() {
+                g.queue.push_back(tail);
+            }
+            g.finish = true;
+            self.shared.work_available.notify_one();
+        }
+        let done_rx = self
+            .done_rx
+            .take()
+            .ok_or_else(|| io::Error::other("part writer completion channel missing"))?;
+        match done_rx.await {
+            Ok(res) => res,
+            Err(_) => Err(io::Error::other("part writer terminated unexpectedly")),
+        }
+    }
+
+    async fn abort(mut self, flush_pending: bool, tail: Vec<u8>) {
+        {
+            let mut g = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if flush_pending {
+                if !tail.is_empty() {
+                    g.queue.push_back(tail);
+                }
+                g.finish = true;
+            } else {
+                g.queue.clear();
+                g.abort = true;
+            }
+            self.shared.work_available.notify_one();
+        }
+        if let Some(done_rx) = self.done_rx.take() {
+            let _ = done_rx.await;
+        }
+    }
+}
+
+impl Drop for WriterHandle {
+    fn drop(&mut self) {
+        if self.done_rx.take().is_some() {
+            {
+                let mut g = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                g.queue.clear();
+                g.abort = true;
+                self.shared.work_available.notify_one();
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+fn write_part_file(
+    part: &Path,
+    resuming: bool,
+    from: u64,
+    shared: &WriterShared,
+) -> io::Result<()> {
+    let mut file = if resuming {
+        let mut f = OpenOptions::new().write(true).open(part)?;
+        f.seek(SeekFrom::Start(from))?;
+        f.set_len(from)?;
+        f
+    } else {
+        File::create(part)?
+    };
+
+    loop {
+        let next = {
+            let mut g = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if g.abort {
+                    return Ok(());
+                }
+                if let Some(buf) = g.queue.pop_front() {
+                    shared.space_available.notify_one();
+                    break Some(buf);
+                }
+                if g.finish {
+                    break None;
+                }
+                g = shared
+                    .work_available
+                    .wait(g)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let Some(buf) = next else {
+            break;
+        };
+        file.write_all(&buf)?;
+    }
+    file.flush()?;
+    drop(file);
+    Ok(())
+}
+
+/// Writes the stream into the `.part` file via a dedicated blocking writer thread, resuming or
+/// restarting as the server answered. When the file's size is known it is a hard ceiling for the
+/// whole part (bytes already kept from an earlier attempt count towards it); otherwise
+/// [`MAX_UNDECLARED_BYTES`] caps the stream.
 struct PartWriter<'a> {
     part: &'a Path,
     from: u64,
@@ -250,29 +444,103 @@ struct PartWriter<'a> {
     expected: &'a Expected,
     /// Bytes the part holds (kept from before plus written now).
     len: u64,
-    writer: Option<BufWriter<File>>,
+    pending: Vec<u8>,
+    worker: Option<WriterHandle>,
     hasher: Option<InlineHasher>,
     progress: &'a Progress,
     credited: &'a mut u64,
     cancel: &'a CancelScope<'a>,
 }
 
-impl PartWriter<'_> {
-    /// Flushes buffered bytes, closes the underlying file handle, and returns the inline
-    /// `(hex_digest, len)` when streamed from byte zero (`None` when resumed from `start > 0`).
-    fn finish(mut self) -> io::Result<Option<(String, u64)>> {
-        let Some(mut w) = self.writer.take() else {
+impl<'a> PartWriter<'a> {
+    fn new(
+        part: &'a Path,
+        from: u64,
+        limit: Option<u64>,
+        expected: &'a Expected,
+        progress: &'a Progress,
+        credited: &'a mut u64,
+        cancel: &'a CancelScope<'a>,
+    ) -> Self {
+        Self {
+            part,
+            from,
+            limit,
+            expected,
+            len: from,
+            pending: Vec::new(),
+            worker: None,
+            hasher: None,
+            progress,
+            credited,
+            cancel,
+        }
+    }
+
+    fn flush_pending(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(io::Error::other("data before headers"));
+        };
+        let buf = std::mem::replace(&mut self.pending, Vec::with_capacity(PART_BUF_CAPACITY));
+        worker.push_buffer(buf, self.cancel)
+    }
+
+    fn enqueue_bytes(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            let space = PART_BUF_CAPACITY.saturating_sub(self.pending.len());
+            if space == 0 {
+                self.flush_pending()?;
+                continue;
+            }
+            let take = rest.len().min(space);
+            self.pending.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            if self.pending.len() >= PART_BUF_CAPACITY {
+                self.flush_pending()?;
+            }
+        }
+        if let Some(worker) = self.worker.as_ref() {
+            worker.check_error()?;
+        }
+        Ok(())
+    }
+
+    /// Flushes buffered bytes on the background writer thread, closes the underlying file handle,
+    /// and returns the inline `(hex_digest, len)` when streamed from byte zero (`None` when resumed
+    /// from `start > 0`).
+    async fn finish(mut self) -> io::Result<Option<(String, u64)>> {
+        let Some(worker) = self.worker.take() else {
             return Err(io::Error::other("response completed without headers"));
         };
-        w.flush()?;
-        let file = w.into_inner().map_err(|e| e.into_error())?;
-        drop(file);
+        let tail = std::mem::take(&mut self.pending);
+        worker.finish(tail).await?;
         Ok(self.hasher.take().map(|h| (h.finalize_hex(), self.len)))
+    }
+
+    /// Signals the writer thread to stop and awaits handle closure without blocking Tokio workers.
+    async fn abort(mut self, flush_pending: bool) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let tail = if flush_pending {
+            std::mem::take(&mut self.pending)
+        } else {
+            self.pending.clear();
+            Vec::new()
+        };
+        worker.abort(flush_pending, tail).await;
     }
 }
 
 impl StreamSink for PartWriter<'_> {
     fn begin(&mut self, head: &StreamHead) -> io::Result<()> {
+        if self.worker.is_some() {
+            return Err(io::Error::other("response headers received twice"));
+        }
         // Refuse before touching the file when the server announces too much.
         let resuming = head.status == 206 && self.from > 0;
         let start = if resuming { self.from } else { 0 };
@@ -284,19 +552,14 @@ impl StreamSink for PartWriter<'_> {
         }
         self.len = start;
         if resuming {
-            let mut f = OpenOptions::new().write(true).open(self.part)?;
-            f.seek(SeekFrom::Start(self.from))?;
-            f.set_len(self.from)?;
-            self.writer = Some(BufWriter::with_capacity(PART_BUF_CAPACITY, f));
             self.hasher = None;
             self.progress.set_credit(self.credited, self.from);
         } else {
             // Fresh download or the server ignored the range and sent 200: start over and hash inline.
-            let f = File::create(self.part)?;
-            self.writer = Some(BufWriter::with_capacity(PART_BUF_CAPACITY, f));
             self.hasher = Some(InlineHasher::for_expected(self.expected));
             self.progress.set_credit(self.credited, 0);
         }
+        self.worker = Some(WriterHandle::spawn(self.part, resuming, self.from)?);
         Ok(())
     }
 
@@ -308,11 +571,10 @@ impl StreamSink for PartWriter<'_> {
         if self.len.saturating_add(data.len() as u64) > ceiling {
             return Err(io::Error::new(io::ErrorKind::InvalidData, OVERSIZE));
         }
-        let w = self
-            .writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("data before headers"))?;
-        w.write_all(data)?;
+        if self.worker.is_none() {
+            return Err(io::Error::other("data before headers"));
+        }
+        self.enqueue_bytes(data)?;
         if let Some(h) = self.hasher.as_mut() {
             h.update(data);
         }
@@ -323,11 +585,36 @@ impl StreamSink for PartWriter<'_> {
     }
 }
 
+fn leaf_label(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "path".to_owned())
+}
+
+fn sanitize_link_error(root: Option<&Path>, err: io::Error) -> io::Error {
+    let msg = err.to_string();
+    let Some(raw) = msg.strip_prefix("refusing to follow link at ") else {
+        return err;
+    };
+    let p = Path::new(raw);
+    let label = match root.and_then(|base| strip_prefix_portable(p, base)) {
+        Some(rel) if rel.as_os_str().is_empty() => "root".to_owned(),
+        Some(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        None => leaf_label(p),
+    };
+    io::Error::new(err.kind(), format!("refusing to follow link at {label}"))
+}
+
 fn reject_if_link(p: &Path) -> io::Result<()> {
     match is_link(p) {
         Ok(true) => Err(io::Error::other(format!(
             "refusing to follow link at {}",
-            p.display()
+            leaf_label(p)
         ))),
         Ok(false) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -335,11 +622,123 @@ fn reject_if_link(p: &Path) -> io::Result<()> {
     }
 }
 
+fn ends_with_dot_segment(p: &Path) -> bool {
+    let bytes = p.as_os_str().as_encoded_bytes();
+    bytes == b"." || bytes.ends_with(b"/.") || bytes.ends_with(b"\\.")
+}
+
+fn validate_job_dest_syntax(root: Option<&Path>, dest: &Path) -> io::Result<()> {
+    if dest.as_os_str().is_empty() || dest.file_name().is_none() || ends_with_dot_segment(dest) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path has no file name",
+        ));
+    }
+    if let Some(base) = root {
+        let rest = strip_prefix_portable(dest, base).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination is outside the base directory",
+            )
+        })?;
+        if rest.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination cannot be the base directory",
+            ));
+        }
+        for comp in rest.components() {
+            if !matches!(comp, Component::Normal(_)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "destination contains unexpected path components",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_collision_key(path: &Path) -> String {
+    let clean = crate::portable::root::normalize_verbatim_path(path.to_path_buf());
+    let mut parts: Vec<String> = Vec::new();
+    for comp in clean.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts
+                    .last()
+                    .is_some_and(|p| p != "/" && p != ".." && !p.starts_with("prefix:"))
+                {
+                    parts.pop();
+                } else {
+                    parts.push("..".to_owned());
+                }
+            }
+            Component::RootDir => parts.push("/".to_owned()),
+            Component::Prefix(p) => {
+                let s = p.as_os_str().to_string_lossy();
+                let folded = if cfg!(windows) {
+                    s.to_lowercase()
+                } else {
+                    s.into_owned()
+                };
+                parts.push(format!("prefix:{folded}"));
+            }
+            Component::Normal(c) => {
+                let s = c.to_string_lossy();
+                let folded = if cfg!(windows) {
+                    s.to_lowercase()
+                } else {
+                    s.into_owned()
+                };
+                parts.push(folded);
+            }
+        }
+    }
+    parts.join("\0")
+}
+
+/// Groups jobs into sequential per-destination lanes (case-insensitively on Windows) and rejects
+/// conflicting destinations or `dest`/`part_path` collisions before any concurrent stream runs.
+fn group_jobs_for_fetch(jobs: Vec<FileJob>) -> Result<Vec<Vec<FileJob>>, DownloadError> {
+    let mut lanes_by_dest: HashMap<String, usize> = HashMap::with_capacity(jobs.len());
+    let mut part_keys: HashSet<String> = HashSet::with_capacity(jobs.len());
+    let mut lanes: Vec<Vec<FileJob>> = Vec::with_capacity(jobs.len());
+
+    for job in jobs {
+        let dest_key = path_collision_key(&job.dest);
+        let part_key = path_collision_key(&part_path(&job.dest));
+        if let Some(&idx) = lanes_by_dest.get(&dest_key) {
+            let head = &lanes[idx][0];
+            if head.expected != job.expected || head.size != job.size {
+                return Err(DownloadError::Local(
+                    "conflicting download jobs target the same destination".into(),
+                ));
+            }
+            lanes[idx].push(job);
+        } else {
+            let idx = lanes.len();
+            lanes_by_dest.insert(dest_key, idx);
+            part_keys.insert(part_key);
+            lanes.push(vec![job]);
+        }
+    }
+
+    if part_keys.iter().any(|pk| lanes_by_dest.contains_key(pk)) {
+        return Err(DownloadError::Local(
+            "conflicting download jobs collide with a partial download path".into(),
+        ));
+    }
+
+    Ok(lanes)
+}
+
 fn ensure_parent_safe(root: Option<&Path>, parent: &Path) -> io::Result<()> {
     if let Some(base) = root {
-        reject_links_between(base, parent)?;
+        reject_links_between(base, parent).map_err(|e| sanitize_link_error(Some(base), e))?;
         fs::create_dir_all(parent)?;
-        reject_links_between(base, parent)?;
+        reject_links_between(base, parent).map_err(|e| sanitize_link_error(Some(base), e))?;
     } else {
         let mut existing = parent;
         while fs::symlink_metadata(existing).is_err() {
@@ -348,9 +747,9 @@ fn ensure_parent_safe(root: Option<&Path>, parent: &Path) -> io::Result<()> {
                 _ => break,
             }
         }
-        reject_links_between(existing, parent)?;
+        reject_links_between(existing, parent).map_err(|e| sanitize_link_error(None, e))?;
         fs::create_dir_all(parent)?;
-        reject_links_between(existing, parent)?;
+        reject_links_between(existing, parent).map_err(|e| sanitize_link_error(None, e))?;
         reject_if_link(parent)?;
     }
     Ok(())
@@ -424,6 +823,39 @@ impl<'a, S: Streamer> Downloader<'a, S> {
         self.fetch_with_scope(job, &scope, false).await
     }
 
+    async fn promote_part(
+        &self,
+        part: &Path,
+        dest: &Path,
+        known_len: Option<u64>,
+        size: Option<u64>,
+        credited: &mut u64,
+    ) -> Result<Outcome, DownloadError> {
+        let part_p = part.to_path_buf();
+        let dest_p = dest.to_path_buf();
+        let root_p = self.root.clone();
+        let len = tokio::task::spawn_blocking(move || -> io::Result<u64> {
+            if let Some(base) = root_p.as_deref() {
+                reject_links_between(base, &dest_p)
+                    .map_err(|e| sanitize_link_error(Some(base), e))?;
+            }
+            reject_if_link(&dest_p)?;
+            reject_if_link(&part_p)?;
+            let len = match known_len {
+                Some(n) => n,
+                None => fs::metadata(&part_p)?.len(),
+            };
+            rename_with_retry(&part_p, &dest_p)?;
+            Ok(len)
+        })
+        .await
+        .map_err(|e| DownloadError::Local(e.to_string()))?
+        .map_err(|e| DownloadError::Local(e.to_string()))?;
+        self.progress.set_credit(credited, size.unwrap_or(len));
+        self.progress.item_done();
+        Ok(Outcome::Downloaded)
+    }
+
     async fn fetch_with_scope(
         &self,
         job: &FileJob,
@@ -434,6 +866,7 @@ impl<'a, S: Streamer> Downloader<'a, S> {
             return Err(DownloadError::Cancelled);
         }
         let local = |e: io::Error| DownloadError::Local(e.to_string());
+        validate_job_dest_syntax(self.root.as_deref(), &job.dest).map_err(local)?;
         let mut credited = 0u64;
         let part = part_path(&job.dest);
 
@@ -443,14 +876,14 @@ impl<'a, S: Streamer> Downloader<'a, S> {
         let size_init = job.size;
         let root_init = self.root.clone();
         let reuse_len = tokio::task::spawn_blocking(move || -> io::Result<Option<u64>> {
-            match (
-                parents_ready,
-                dest_init.parent().filter(|p| !p.as_os_str().is_empty()),
-                root_init.as_deref(),
-            ) {
-                (false, Some(parent), root) => ensure_parent_safe(root, parent)?,
-                (_, None, Some(base)) => reject_links_between(base, &dest_init)?,
-                _ => {}
+            if !parents_ready {
+                if let Some(parent) = dest_init.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    ensure_parent_safe(root_init.as_deref(), parent)?;
+                }
+            }
+            if let Some(base) = root_init.as_deref() {
+                reject_links_between(base, &dest_init)
+                    .map_err(|e| sanitize_link_error(Some(base), e))?;
             }
             reject_if_link(&dest_init)?;
             reject_if_link(&part_init)?;
@@ -504,31 +937,28 @@ impl<'a, S: Streamer> Downloader<'a, S> {
             let already_whole = from > 0 && job.size == Some(from);
             let mut inline_verified: Option<(String, u64)> = None;
             if !already_whole {
-                let mut sink = PartWriter {
-                    part: &part,
+                let mut sink = PartWriter::new(
+                    &part,
                     from,
-                    limit: job.size,
-                    expected: &job.expected,
-                    len: from,
-                    writer: None,
-                    hasher: None,
-                    progress: &self.progress,
-                    credited: &mut credited,
-                    cancel: scope,
-                };
+                    job.size,
+                    &job.expected,
+                    &self.progress,
+                    &mut credited,
+                    scope,
+                );
                 let result = tokio::select! {
                     r = self.streamer.stream(&job.url, from, &mut sink) => r,
                     () = scope.cancelled() => {
-                        drop(sink);
+                        sink.abort(true).await;
                         return Err(DownloadError::Cancelled);
                     }
                 };
                 match result {
                     Ok(()) => {
-                        inline_verified = sink.finish().map_err(local)?;
+                        inline_verified = sink.finish().await.map_err(local)?;
                     }
                     Err(FetchError::Local(m)) if m.contains(OVERSIZE) => {
-                        drop(sink);
+                        sink.abort(false).await;
                         // More bytes than the file can have: whatever was written is not this file.
                         let part_rm = part.clone();
                         let _ =
@@ -543,23 +973,31 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                         continue;
                     }
                     Err(FetchError::Local(m)) => {
-                        drop(sink);
-                        return Err(if scope.is_cancelled() {
+                        let cancelled = scope.is_cancelled();
+                        sink.abort(cancelled).await;
+                        return Err(if cancelled {
                             DownloadError::Cancelled
                         } else {
                             DownloadError::Local(m)
                         });
                     }
                     Err(FetchError::Policy(e)) => {
-                        drop(sink);
+                        sink.abort(false).await;
                         return Err(DownloadError::Policy(e.to_string()));
                     }
                     Err(FetchError::TooLarge(_)) => {
-                        drop(sink);
+                        sink.abort(false).await;
                         return Err(DownloadError::Local("unexpected size limit".into()));
                     }
                     Err(FetchError::Status(416)) => {
-                        drop(sink);
+                        sink.abort(false).await;
+                        if from > 0
+                            && Self::verifies(part.clone(), job.expected.clone(), job.size).await
+                        {
+                            return self
+                                .promote_part(&part, &job.dest, None, job.size, &mut credited)
+                                .await;
+                        }
                         // The part is not a prefix of the file any more: start over.
                         let part_rm = part.clone();
                         let _ =
@@ -573,7 +1011,11 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                         continue;
                     }
                     Err(FetchError::Status(code)) if code == 408 || code == 429 || code >= 500 => {
-                        drop(sink);
+                        let cancelled = scope.is_cancelled();
+                        sink.abort(true).await;
+                        if cancelled {
+                            return Err(DownloadError::Cancelled);
+                        }
                         transient += 1;
                         if transient > MAX_TRANSIENT {
                             return Err(DownloadError::Status(code));
@@ -582,11 +1024,15 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                         continue;
                     }
                     Err(FetchError::Status(code)) => {
-                        drop(sink);
+                        sink.abort(false).await;
                         return Err(DownloadError::Status(code));
                     }
                     Err(FetchError::Network(m)) => {
-                        drop(sink);
+                        let cancelled = scope.is_cancelled();
+                        sink.abort(true).await;
+                        if cancelled {
+                            return Err(DownloadError::Cancelled);
+                        }
                         transient += 1;
                         if transient > MAX_TRANSIENT {
                             return Err(DownloadError::Offline(m));
@@ -604,36 +1050,14 @@ impl<'a, S: Streamer> Downloader<'a, S> {
                     Expected::Sha1(h) | Expected::Sha256(h) => h.as_str(),
                 };
                 if job.size.is_none_or(|s| s == len) && actual_hex.eq_ignore_ascii_case(want_hex) {
-                    let part_p = part.clone();
-                    let dest_p = job.dest.clone();
-                    tokio::task::spawn_blocking(move || -> io::Result<()> {
-                        reject_if_link(&dest_p)?;
-                        rename_with_retry(&part_p, &dest_p)
-                    })
-                    .await
-                    .map_err(|e| DownloadError::Local(e.to_string()))?
-                    .map_err(local)?;
-                    self.progress
-                        .set_credit(&mut credited, job.size.unwrap_or(len));
-                    self.progress.item_done();
-                    return Ok(Outcome::Downloaded);
+                    return self
+                        .promote_part(&part, &job.dest, Some(len), job.size, &mut credited)
+                        .await;
                 }
             } else if Self::verifies(part.clone(), job.expected.clone(), job.size).await {
-                let part_p = part.clone();
-                let dest_p = job.dest.clone();
-                let len = tokio::task::spawn_blocking(move || -> io::Result<u64> {
-                    reject_if_link(&dest_p)?;
-                    let len = fs::metadata(&part_p)?.len();
-                    rename_with_retry(&part_p, &dest_p)?;
-                    Ok(len)
-                })
-                .await
-                .map_err(|e| DownloadError::Local(e.to_string()))?
-                .map_err(local)?;
-                self.progress
-                    .set_credit(&mut credited, job.size.unwrap_or(len));
-                self.progress.item_done();
-                return Ok(Outcome::Downloaded);
+                return self
+                    .promote_part(&part, &job.dest, None, job.size, &mut credited)
+                    .await;
             }
 
             let part_rm = part.clone();
@@ -662,9 +1086,15 @@ impl<'a, S: Streamer> Downloader<'a, S> {
             return Err(DownloadError::Cancelled);
         }
 
-        let mut parents = HashSet::new();
         for job in &jobs {
-            if let Some(parent) = job.dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+            validate_job_dest_syntax(self.root.as_deref(), &job.dest)
+                .map_err(|e| DownloadError::Local(e.to_string()))?;
+        }
+        let lanes = group_jobs_for_fetch(jobs)?;
+
+        let mut parents = HashSet::new();
+        for lane in &lanes {
+            if let Some(parent) = lane[0].dest.parent().filter(|p| !p.as_os_str().is_empty()) {
                 parents.insert(parent.to_path_buf());
             }
         }
@@ -683,20 +1113,32 @@ impl<'a, S: Streamer> Downloader<'a, S> {
 
         let batch_cancel = Cancel::new();
         let mut report = Report::default();
-        let mut results = stream::iter(jobs)
-            .map(|job| {
+        let mut results = stream::iter(lanes)
+            .map(|lane| {
                 let scope = CancelScope {
                     outer: &self.cancel,
                     batch: Some(&batch_cancel),
                 };
-                async move { self.fetch_with_scope(&job, &scope, true).await }
+                async move {
+                    let mut outcomes = Vec::with_capacity(lane.len());
+                    for job in lane {
+                        outcomes.push(self.fetch_with_scope(&job, &scope, true).await?);
+                    }
+                    Ok::<Vec<Outcome>, DownloadError>(outcomes)
+                }
             })
             .buffer_unordered(concurrency.clamp(1, 32));
         let mut first_err: Option<DownloadError> = None;
         while let Some(r) = results.next().await {
             match r {
-                Ok(Outcome::Reused) => report.reused += 1,
-                Ok(Outcome::Downloaded) => report.downloaded += 1,
+                Ok(outcomes) => {
+                    for outcome in outcomes {
+                        match outcome {
+                            Outcome::Reused => report.reused += 1,
+                            Outcome::Downloaded => report.downloaded += 1,
+                        }
+                    }
+                }
                 Err(e) => {
                     batch_cancel.cancel();
                     first_err = Some(e);
@@ -1164,18 +1606,8 @@ mod tests {
             batch: None,
         };
         let mut credited = 0u64;
-        let mut writer = PartWriter {
-            part: &part,
-            from: 0,
-            limit: None,
-            expected: &expected,
-            len: 0,
-            writer: None,
-            hasher: None,
-            progress: &progress,
-            credited: &mut credited,
-            cancel: &scope,
-        };
+        let mut writer =
+            PartWriter::new(&part, 0, None, &expected, &progress, &mut credited, &scope);
         writer
             .begin(&StreamHead {
                 status: 200,
@@ -1214,18 +1646,15 @@ mod tests {
             batch: None,
         };
         let mut cred = 0u64;
-        let mut pw_fresh = PartWriter {
-            part: &p200,
-            from: 0,
-            limit: Some(data.len() as u64),
-            expected: &exp,
-            len: 0,
-            writer: None,
-            hasher: None,
-            progress: &e.progress,
-            credited: &mut cred,
-            cancel: &scope,
-        };
+        let mut pw_fresh = PartWriter::new(
+            &p200,
+            0,
+            Some(data.len() as u64),
+            &exp,
+            &e.progress,
+            &mut cred,
+            &scope,
+        );
         pw_fresh
             .begin(&StreamHead {
                 status: 200,
@@ -1233,23 +1662,20 @@ mod tests {
             })
             .unwrap();
         pw_fresh.chunk(&data).unwrap();
-        let inline = pw_fresh.finish().unwrap();
+        let inline = pw_fresh.finish().await.unwrap();
         assert!(inline.is_some());
 
         let mut cred2 = 0u64;
         fs::write(&p200, &data[..1000]).unwrap();
-        let mut pw_resume = PartWriter {
-            part: &p200,
-            from: 1000,
-            limit: Some(data.len() as u64),
-            expected: &exp,
-            len: 1000,
-            writer: None,
-            hasher: None,
-            progress: &e.progress,
-            credited: &mut cred2,
-            cancel: &scope,
-        };
+        let mut pw_resume = PartWriter::new(
+            &p200,
+            1000,
+            Some(data.len() as u64),
+            &exp,
+            &e.progress,
+            &mut cred2,
+            &scope,
+        );
         pw_resume
             .begin(&StreamHead {
                 status: 206,
@@ -1258,7 +1684,7 @@ mod tests {
             .unwrap();
         pw_resume.chunk(&data[1000..]).unwrap();
         assert!(
-            pw_resume.finish().unwrap().is_none(),
+            pw_resume.finish().await.unwrap().is_none(),
             "206 resume must fall back to full-file disk verification"
         );
 

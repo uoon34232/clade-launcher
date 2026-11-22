@@ -21,14 +21,14 @@ export function SettingsButton({ onClick }: Props) {
               onClick?.();
             }}
             aria-label={t("dock.settings")}
-            className="dock-item group text-cream/55 hover:bg-cream/[0.07] hover:text-cream focus-visible:ring-clay-soft grid size-12 cursor-default place-items-center rounded-full outline-none focus-visible:ring-2"
+            className="dock-item group text-cream/75 hover:bg-cream/[0.07] hover:text-cream focus-visible:ring-clay-soft grid size-12 cursor-default place-items-center rounded-full outline-hidden focus-visible:ring-2"
           />
         }
       >
         <SettingsIcon
           aria-hidden
           strokeWidth={1.75}
-          className="ease-out-soft size-5 transition-transform duration-300 group-hover:rotate-[30deg]"
+          className="settings-gear ease-out-soft size-5 transition-transform duration-300 group-hover:transform-[rotate(30deg)]"
         />
       </TooltipTrigger>
       <TooltipContent side="top" sideOffset={14}>

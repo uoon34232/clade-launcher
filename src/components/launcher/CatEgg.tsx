@@ -30,7 +30,7 @@ export function CatEgg() {
       if (next === "full" && typeof el.getAnimations === "function") {
         for (const a of el.getAnimations({ subtree: true })) {
           if (typeof CSSAnimation === "undefined" || a instanceof CSSAnimation) {
-            a.cancel();
+            a.currentTime = 0;
             a.play();
           }
         }
@@ -50,7 +50,7 @@ export function CatEgg() {
       type="button"
       aria-label={t("settings.cat")}
       onClick={react}
-      className="cat text-graphite/40 hover:text-graphite/65 focus-visible:ring-clay/45 -m-1 grid size-9 shrink-0 cursor-default place-items-center rounded-lg transition-colors duration-200 outline-none focus-visible:ring-2"
+      className="cat text-graphite/60 hover:text-graphite focus-visible:ring-ring -m-1 grid size-9 shrink-0 cursor-default place-items-center rounded-lg outline-hidden transition-colors duration-200 hover:bg-[var(--quiet-hover)] focus-visible:ring-2"
     >
       <svg
         aria-hidden

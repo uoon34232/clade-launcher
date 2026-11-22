@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes, itemsText, profileDetail } from "@/features/launcher/profileUi";
 import { stageText } from "@/features/launcher/prepareUi";
 import { useT } from "@/lib/i18n";
@@ -55,16 +55,40 @@ function sameProgress(a: PrepareProgress | null, b: PrepareProgress): boolean {
 export function PrepareDialog({ profile, verify = false, onClose, onPrepared, api }: Props) {
   // While preparing, closing the modal (Escape) cancels it; files already downloaded are kept.
   const cancelRef = useRef<(() => void) | null>(null);
+  const dismissedRef = useRef(false);
   const [shown, setShown] = useState(profile);
-  if (profile && profile !== shown && profile.id !== shown?.id) setShown(profile);
+  const [wasOpen, setWasOpen] = useState(profile !== null);
+  const [session, setSession] = useState(0);
+  if (profile && profile !== shown) setShown(profile);
+  const isOpen = profile !== null;
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    if (isOpen) setSession((n) => n + 1);
+  }
   const current = profile ?? shown;
+
+  useEffect(() => {
+    if (isOpen) {
+      dismissedRef.current = false;
+      return;
+    }
+    dismissedRef.current = true;
+    const cancel = cancelRef.current;
+    if (cancel) {
+      cancelRef.current = null;
+      cancel();
+    }
+  }, [isOpen]);
 
   return (
     <Modal
-      open={profile !== null}
+      open={isOpen}
       onOpenChange={(o) => {
         if (!o) {
-          cancelRef.current?.();
+          dismissedRef.current = true;
+          const cancel = cancelRef.current;
+          cancelRef.current = null;
+          cancel?.();
           onClose();
         }
       }}
@@ -73,11 +97,12 @@ export function PrepareDialog({ profile, verify = false, onClose, onPrepared, ap
     >
       {current && (
         <Run
-          key={current.id}
+          key={`${current.id}:${verify ? 1 : 0}:${session}`}
           profile={current}
           verify={verify}
           api={api}
           cancelRef={cancelRef}
+          dismissedRef={dismissedRef}
           onClose={onClose}
           onPrepared={onPrepared}
         />
@@ -91,12 +116,14 @@ function Run({
   verify,
   api,
   cancelRef,
+  dismissedRef,
   onClose,
   onPrepared,
 }: Pick<Props, "api" | "onClose" | "onPrepared"> & {
   verify: boolean;
   profile: ProfileSummary;
   cancelRef: React.RefObject<(() => void) | null>;
+  dismissedRef: React.RefObject<boolean>;
 }) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "working", progress: null });
@@ -105,15 +132,22 @@ function Run({
   const scheduledRef = useRef(false);
   const pendingRef = useRef<PrepareProgress | null>(null);
   const lastRenderedRef = useRef<PrepareProgress | null>(null);
+  const onCloseRef = useRef(onClose);
+  const onPreparedRef = useRef(onPrepared);
 
-  const clearScheduledFrame = () => {
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onPreparedRef.current = onPrepared;
+  }, [onClose, onPrepared]);
+
+  const clearScheduledFrame = useCallback(() => {
     if (rafRef.current !== null) {
       window.cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
     scheduledRef.current = false;
     pendingRef.current = null;
-  };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -121,19 +155,48 @@ function Run({
       mountedRef.current = false;
       clearScheduledFrame();
     };
-  }, []);
+  }, [clearScheduledFrame]);
 
-  const start = () => {
+  const working = phase.kind === "working";
+  const [wasWorking, setWasWorking] = useState(working);
+  const [cancelling, setCancelling] = useState(false);
+  if (working !== wasWorking) {
+    setWasWorking(working);
+    setCancelling(false);
+  }
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+  const pendingRetryFocusRef = useRef(false);
+  useEffect(() => {
+    if (working && pendingRetryFocusRef.current) {
+      pendingRetryFocusRef.current = false;
+      const activeEl = document.activeElement;
+      if (!activeEl || activeEl === document.body || activeEl === document.documentElement) {
+        cancelBtnRef.current?.focus();
+      }
+    }
+  }, [working]);
+  useEffect(() => {
+    if (!working) return;
+    let active = true;
+    let stop: (() => void) | null = null;
+    let prepareStarted = false;
+    let cancelRequested = false;
+
     clearScheduledFrame();
     lastRenderedRef.current = null;
-    let stop: (() => void) | null = null;
-    let finished = false;
-    const finishRun = () => {
-      finished = true;
-      clearScheduledFrame();
-      stop?.();
-      stop = null;
+
+    const myCancel = () => {
+      if (cancelRequested) return;
+      cancelRequested = true;
+      if (prepareStarted) {
+        void api.cancelPrepare().catch(() => undefined);
+      } else if (!dismissedRef.current) {
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        onCloseRef.current();
+      }
     };
+    cancelRef.current = myCancel;
+
     const commitProgress = (next: PrepareProgress) => {
       if (sameProgress(lastRenderedRef.current, next)) return;
       lastRenderedRef.current = next;
@@ -150,56 +213,77 @@ function Run({
         rafRef.current = null;
         const next = pendingRef.current;
         pendingRef.current = null;
-        if (finished || !mountedRef.current || !next) return;
+        if (!active || !mountedRef.current || !next) return;
         commitProgress(next);
       });
       if (scheduledRef.current) rafRef.current = id;
     };
-    void api
-      .onPrepareProgress((p) => {
-        if (finished || !mountedRef.current || p.instanceId !== profile.id) return;
-        const stageChanged = lastRenderedRef.current?.stage !== p.stage;
-        if (!scheduledRef.current || stageChanged) {
-          pendingRef.current = null;
-          commitProgress(p);
-          scheduleCoalesceWindow();
+
+    const run = async () => {
+      let unlisten: (() => void) | null;
+      try {
+        unlisten = await api.onPrepareProgress((p) => {
+          if (!active || !mountedRef.current || p.instanceId !== profile.id) return;
+          const stageChanged = lastRenderedRef.current?.stage !== p.stage;
+          if (!scheduledRef.current || stageChanged) {
+            pendingRef.current = null;
+            commitProgress(p);
+            scheduleCoalesceWindow();
+            return;
+          }
+          pendingRef.current = p;
+        });
+      } catch {
+        unlisten = null;
+      }
+
+      if (!active || !mountedRef.current || dismissedRef.current) {
+        unlisten?.();
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        return;
+      }
+      if (cancelRequested) {
+        unlisten?.();
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        onCloseRef.current();
+        return;
+      }
+
+      stop = unlisten;
+      prepareStarted = true;
+
+      try {
+        const snapshot = await (verify
+          ? api.prepare(profile.id, { verify: true })
+          : api.prepare(profile.id));
+        clearScheduledFrame();
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        if (!active || !mountedRef.current || dismissedRef.current) return;
+        playSound("primary");
+        onPreparedRef.current(snapshot);
+        setPhase({ kind: "done" });
+      } catch (e: unknown) {
+        clearScheduledFrame();
+        if (cancelRef.current === myCancel) cancelRef.current = null;
+        if (!active || !mountedRef.current || dismissedRef.current) return;
+        if (e instanceof BackendError && e.code === "cancelled") {
+          onCloseRef.current();
           return;
         }
-        pendingRef.current = p;
-      })
-      .then((u) => {
-        if (finished) u();
-        else stop = u;
-      });
-    cancelRef.current = () => void api.cancelPrepare().catch(() => undefined);
-    (verify ? api.prepare(profile.id, { verify: true }) : api.prepare(profile.id)).then(
-      (snapshot) => {
-        finishRun();
-        cancelRef.current = null;
-        if (!mountedRef.current) return;
-        playSound("primary");
-        onPrepared(snapshot);
-        setPhase({ kind: "done" });
-      },
-      (e: unknown) => {
-        finishRun();
-        cancelRef.current = null;
-        if (!mountedRef.current) return;
-        if (e instanceof BackendError && e.code === "cancelled") return onClose();
         setPhase({ kind: "error", message: describeError("prepare", e) });
-      },
-    );
-  };
+      }
+    };
 
-  // Begin exactly once per opening. (React re-runs effects in development; a second start would be
-  // refused as "another profile is being set up".)
-  const started = useRef(false);
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    start();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per opening
-  }, []);
+    void run();
+
+    return () => {
+      active = false;
+      clearScheduledFrame();
+      stop?.();
+      stop = null;
+      if (cancelRef.current === myCancel) cancelRef.current = null;
+    };
+  }, [working, api, profile.id, verify, cancelRef, dismissedRef, clearScheduledFrame]);
 
   if (phase.kind === "done") {
     return (
@@ -249,8 +333,8 @@ function Run({
             className={BUTTON_SOFT}
             onClick={() => {
               playSound("click");
+              pendingRetryFocusRef.current = true;
               setPhase({ kind: "working", progress: null });
-              start();
             }}
           >
             {t("common.tryAgain")}
@@ -272,7 +356,8 @@ function Run({
       <ModalHeader title={profile.name} description={profileDetail(profile)} />
       <div className="mb-6 flex flex-col gap-3">
         <p aria-live="polite" className="text-graphite min-h-6 text-[0.9375rem]">
-          {stageText(p?.stage ?? null, { verify, loader: profile.loader })}…
+          {stageText(p?.stage ?? null, { verify, loader: profile.loader })}
+          {p?.stage === "done" ? "" : "…"}
         </p>
         <div
           role="progressbar"
@@ -280,24 +365,29 @@ function Run({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={p?.overall != null ? Math.round(p.overall * 100) : undefined}
-          className="bg-sand/70 h-1.5 w-full overflow-hidden rounded-full"
+          className="bg-sand border-sand-border/60 h-1.5 w-full overflow-hidden rounded-full border"
         >
           {p?.overall != null ? (
             <div
-              className="bg-clay h-full w-full origin-left rounded-full transition-transform duration-150 ease-out"
+              className="bg-progress-fill h-full w-full origin-left rounded-full transition-transform duration-150 ease-out"
               style={{ transform: `scaleX(${Math.max(0, Math.min(1, p.overall))})` }}
             />
           ) : (
-            <div className="indeterminate-bar bg-clay/70 h-full w-1/3 rounded-full" />
+            <div className="indeterminate-bar bg-progress-fill h-full w-1/3 rounded-full" />
           )}
         </div>
         <p className="text-ink-muted min-h-5 text-[0.8125rem]">{counts.join(" · ")}</p>
       </div>
       <ModalFooter>
         <button
+          ref={cancelBtnRef}
           type="button"
+          disabled={cancelling}
+          aria-busy={cancelling || undefined}
           className={BUTTON_QUIET}
           onClick={() => {
+            if (cancelling) return;
+            setCancelling(true);
             playSound("click");
             cancelRef.current?.();
           }}

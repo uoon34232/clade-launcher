@@ -29,8 +29,10 @@ Tips
  - Use an NTFS or exFAT drive. FAT32 cannot hold files larger than 4 GB. On Windows 10, an NTFS folder
    uses Clade's bundled WebView2 directly, whereas an exFAT drive uses the PC's installed WebView2
    runtime (so prefer NTFS if a Windows 10 PC may not have WebView2 installed).
- - On Windows 10, where Windows 11's Mica backdrop is unavailable, Clade uses its opaque warm paper
-   window look.
+ - Clade offers Light and Dark ("Graphite Paper") themes (or Follow Windows) in Settings. On Windows 10,
+   where Windows 11's Mica backdrop is unavailable, Clade uses its opaque Light or Dark paper window look.
+ - Updates are checked only when you ask: open Settings > "Check for updates" to inspect new releases
+   and download, verify, and apply portable updates in-app while keeping your data and profiles.
  - For the best compatibility with older Minecraft and Java versions, keep the folder in a reasonably
    short path that uses only English letters, digits and plain punctuation (for example D:\Clade-Launcher).
  - Microsoft may ask you to sign in again, on any computer.

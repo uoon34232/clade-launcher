@@ -8,7 +8,7 @@ Clade is in pre-release (`0.x`). Security fixes are applied to `main` and shippe
 
 | Version                             | Supported |
 | ----------------------------------- | --------- |
-| `0.1.x` (latest preview) and `main` | Yes       |
+| `0.2.x` (latest preview) and `main` | Yes       |
 | Older pre-releases                  | No        |
 
 ## Reporting a vulnerability
@@ -43,7 +43,7 @@ Security-sensitive areas include:
 - Forge / NeoForge installer sandboxing;
 - Minecraft process construction and environment isolation;
 - log redaction;
-- future self-update verification.
+- in-app portable self-update download, verification, and swap integrity.
 
 ## Secrets and logs
 

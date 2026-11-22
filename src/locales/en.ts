@@ -13,6 +13,7 @@ export const en = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.done": "Done",
+  "common.apply": "Apply",
   "common.tryAgain": "Try again",
   "common.working": "Working…",
   "common.continue": "Continue",
@@ -164,7 +165,7 @@ export const en = {
   "create.loaderCheckFailed": "Could not check which loaders fit. Check your connection.",
   "create.loaderChecking": "Checking compatible loaders…",
   "create.loaderNone": "{loader} has no version for {minecraft}",
-  "create.loaderNoneAny": "{loader} has no version for this version",
+  "create.loaderNoneAny": "{loader} has no build for this Minecraft version",
   "create.loaderUnchecked": "{loader} could not be checked",
   "create.loaderVersion": "Loader version",
   "create.versionRecommended": "{version} (recommended)",
@@ -182,7 +183,7 @@ export const en = {
     by: "max",
     other: "Keep the name under {max} characters.",
   } satisfies Message,
-  "validate.nameControl": "The name can't contain control characters.",
+  "validate.nameControl": "The name can’t contain control characters.",
   "validate.nameDuplicate": "You already have a profile with this name.",
   "catalog.stale": "Offline: using the version list from {date}.",
   "catalog.staleUnknown": "Offline: using a saved version list.",
@@ -206,6 +207,7 @@ export const en = {
   "prepare.progress": "Setup progress",
   "prepare.files": {
     by: "total",
+    one: "{done} of {total} file",
     other: "{done} of {total} files",
   } satisfies Message,
   "prepare.bytes": "{done} of {total}",
@@ -217,7 +219,7 @@ export const en = {
   "problem.title.needs_repair": "Repair needed",
   "problem.title.approval_pending": "Sign-in not available yet",
   "problem.title.offline": "No connection",
-  "problem.title.other": "Can't start",
+  "problem.title.other": "Can’t start",
   "problem.repair": "Repair",
   "problem.addAccount": "Add account",
   "problem.unlockTitle": "Unlock your accounts",
@@ -225,15 +227,15 @@ export const en = {
   "exit.wrong_java":
     "Minecraft or a mod needs a different Java version than the one Clade prepared. Repairing the profile may help.",
   "exit.incomplete_files":
-    "Minecraft's files are incomplete. Repair the profile to download them again.",
+    "Minecraft’s files are incomplete. Repair the profile to download them again.",
   "exit.no_memory":
-    "There isn't enough free memory to start Minecraft. Close other programs and try again.",
+    "There isn’t enough free memory to start Minecraft. Close other programs and try again.",
   "exit.out_of_memory": "Minecraft ran out of memory.",
   "exit.native_library": "A native library (graphics or sound) could not be loaded.",
   "exit.java_crash": "The Java runtime crashed, often because of a graphics driver.",
   "exit.mod_loader": "The mod loader reported an error while starting.",
   "exit.mixin": "A mod could not be applied. Check the mods in this profile.",
-  "exit.incompatible_mods": "The mods in this profile don't work together.",
+  "exit.incompatible_mods": "The mods in this profile don’t work together.",
   "exit.missing_class": "A library or mod could not be loaded.",
   "exit.jvm_start": "Java could not start with the chosen settings.",
   "exit.early_exit": "Minecraft stopped right after starting (exit code {code}).",
@@ -251,7 +253,7 @@ export const en = {
   "signin.stage.finishing": "Finishing setup…",
   "signin.createTitle": "Protect your accounts",
   "signin.createDescription":
-    "Sign-in details are encrypted in this folder with a passphrase you choose. It can't be recovered, so keep it safe.",
+    "Sign-in details are encrypted in this folder with a passphrase you choose. It can’t be recovered, so keep it safe.",
   "signin.unlockTitle": "Unlock your accounts",
   "recovery.link": "Forgot passphrase?",
   "recovery.title": "Start fresh?",
@@ -313,6 +315,10 @@ export const en = {
   "settings.sound": "Sound effects",
   "settings.volume": "Volume",
   "settings.language": "Language",
+  "settings.theme": "Theme",
+  "settings.theme.system": "Follow Windows",
+  "settings.theme.light": "Light",
+  "settings.theme.dark": "Dark",
   "settings.interface": "Interface",
   "settings.minecraft": "Minecraft",
   "settings.behavior": "Behavior",
@@ -326,17 +332,17 @@ export const en = {
   "settings.transparency.on": "On",
   "settings.transparency.off": "Off",
   "settings.memory": "Memory",
-  "settings.memory.auto": "Automatic (recommended)",
+  "settings.memory.auto": "Automatic",
   "settings.memory.custom": "Custom",
   "settings.memory.autoNote": "Chosen automatically for this computer: {value}.",
   "settings.memory.slider": "Memory for Minecraft",
   "settings.memory.gb": "{value} GB",
   "settings.onLaunch": "When Minecraft starts",
   "settings.onLaunch.embed": "Inside Clade",
-  "settings.onLaunch.keep": "Keep Clade open",
-  "settings.onLaunch.hide": "Hide Clade",
+  "settings.onLaunch.keep": "Keep open",
+  "settings.onLaunch.hide": "Hide",
   "settings.onExit": "When Minecraft closes",
-  "settings.onExit.show": "Show Clade again",
+  "settings.onExit.show": "Show again",
   "settings.onExit.hidden": "Stay hidden",
   "settings.onExit.hiddenNote":
     "A hidden Clade closes quietly with the game. Start it again any time.",
@@ -370,6 +376,16 @@ export const en = {
   "settings.updatesUpToDate": "Up to date",
   "settings.updateAvailable": "{version} available",
   "settings.openRelease": "Open release",
+  "settings.installUpdate": "Update",
+  "settings.updatingDownloading": "Downloading… {percent}%",
+  "settings.updatingDownloadingUnknown": "Downloading…",
+  "settings.updatingVerifying": "Verifying…",
+  "settings.updatingExtracting": "Unpacking…",
+  "settings.updateReady": "Ready to update",
+  "settings.restartToUpdate": "Restart to update",
+  "settings.updatingRestarting": "Restarting…",
+  "settings.cancelUpdate": "Cancel",
+  "settings.updateProgress": "Update progress",
   "settings.cat": "Cat",
   "onboarding.step": "Step {current} of {total}",
   "onboarding.skip": "Skip",
@@ -386,63 +402,78 @@ export const en = {
   "onboarding.createProfile": "Create profile",
   "onboarding.addAccount": "Add Microsoft account",
   "onboarding.finish": "Finish",
-  "error.settings.unknown": "That didn't work.",
+  "error.settings.unknown": "That didn’t work.",
   "error.settings.diagnostics_failed":
-    "The diagnostics file couldn't be created. Check that the drive has space and isn't read-only.",
+    "The diagnostics file couldn’t be created. Check that the drive has space and isn’t read-only.",
   "error.settings.retired_vaults_clear_failed":
-    "Archived vaults couldn't be deleted. Check that the Clade folder isn't read-only or in use.",
+    "Archived vaults couldn’t be deleted. Check that the Clade folder isn’t read-only or in use.",
   "error.settings.offline": "No connection. Try again.",
   "error.settings.update_rate_limited": "Too many checks. Try later.",
-  "error.settings.update_check_failed": "Couldn't check for updates.",
-  "error.settings.browser_unavailable": "Couldn't open the release page.",
+  "error.settings.update_check_failed": "Couldn’t check for updates.",
+  "error.settings.update_not_portable": "In-app updates only work from the portable Clade folder.",
+  "error.settings.update_game_running": "Close Minecraft before updating Clade.",
+  "error.settings.update_prepare_running": "Wait for profile setup to finish before updating.",
+  "error.settings.update_in_progress": "An update is already in progress.",
+  "error.settings.update_unavailable":
+    "This release package isn’t ready yet. Open it in your browser instead.",
+  "error.settings.update_verify_failed":
+    "The update failed verification and was discarded. Try again.",
+  "error.settings.update_invalid_package":
+    "The downloaded archive doesn’t match the Clade package layout.",
+  "error.settings.update_install_failed":
+    "Couldn’t prepare the update. Check that the Clade folder isn’t read-only.",
+  "error.settings.not_enough_space":
+    "Not enough free space for the update: about {required} is needed and {available} is available.",
+  "error.settings.update_cancelled": "Update cancelled.",
+  "error.settings.browser_unavailable": "Couldn’t open the release page.",
   "error.settings.invalid_memory":
-    "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
-  "error.settings.unsupported_value": "That setting isn't supported.",
-  "error.settings.unsupported_language": "That language isn't supported.",
-  "error.settings.open_failed": "Windows couldn't open that folder.",
+    "That amount of memory isn’t safe for this computer. Choose between {min} and {max}.",
+  "error.settings.unsupported_value": "That setting isn’t supported.",
+  "error.settings.unsupported_language": "That language isn’t supported.",
+  "error.settings.open_failed": "Windows couldn’t open that folder.",
 
   // ---- errors from the launcher's backend, worded by code (see lib/i18n/errors.ts)
   "error.generic": "Something went wrong.",
   "error.common.storage":
-    "Clade couldn't read or write the files it needs. Check that its folder is writable.",
+    "Clade couldn’t read or write the files it needs. Check that its folder is writable.",
   "error.common.not_found": "That profile no longer exists.",
   "error.common.network_unavailable": "Networking is unavailable.",
   "error.common.backend_unavailable": "The launcher backend is not available here.",
   "error.common.unsupported_folder_path":
-    "Clade can't run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
+    "Clade can’t run from this folder path. Move the Clade folder to a local drive path without special device prefixes and try again.",
 
-  "error.launch.unknown": "Minecraft couldn't be started.",
+  "error.launch.unknown": "Minecraft couldn’t be started.",
   "error.launch.no_account": "Sign in with a Microsoft account to play.",
   "error.launch.needs_sign_in": "This account needs to sign in again before it can play.",
   "error.launch.needs_repair":
     "Part of this profile is missing or damaged. It needs to be repaired before it can start.",
   "error.launch.vault_locked": "Unlock your accounts to play.",
   "error.launch.offline":
-    "Clade can't refresh your Minecraft sign-in without a network. Connect and try again.",
+    "Clade can’t refresh your Minecraft sign-in without a network. Connect and try again.",
   "error.launch.approval_pending":
-    "Mojang has not approved this launcher for Minecraft sign-in yet, so a fresh sign-in can't be completed.",
+    "Mojang has not approved this launcher for Minecraft sign-in yet, so a fresh sign-in can’t be completed.",
   "error.launch.no_java_profile": "This Microsoft account has no Minecraft: Java Edition profile.",
   "error.launch.auth": "Your Minecraft sign-in could not be refreshed.",
   "error.launch.not_ready": "This profile has to be set up before it can start.",
-  "error.launch.unsupported": "This profile can't be started.",
+  "error.launch.unsupported": "This profile can’t be started.",
   "error.launch.already_running": "This profile is already starting or running.",
   "error.launch.already_preparing": "This profile is being set up. Wait for it to finish.",
   "error.launch.spawn_failed": "Java could not be started.",
 
   "error.prepare.unknown": "Setup failed.",
   "error.prepare.offline":
-    "Can't reach the network, and some files this profile needs aren't saved on this computer yet.",
+    "Can’t reach the network, and some files this profile needs aren’t saved on this computer yet.",
   "error.prepare.network": "A download failed. Check your connection and try again.",
   "error.prepare.verification":
     "A downloaded file failed verification, so it was discarded. Try again.",
-  "error.prepare.metadata": "Mojang's information for this version isn't available.",
-  "error.prepare.unsupported": "This version can't be prepared.",
-  "error.prepare.java": "Java couldn't be set up.",
-  "error.prepare.loader": "The mod loader couldn't be installed.",
+  "error.prepare.metadata": "Mojang’s information for this version isn’t available.",
+  "error.prepare.unsupported": "This version can’t be prepared.",
+  "error.prepare.java": "Java couldn’t be set up.",
+  "error.prepare.loader": "The mod loader couldn’t be installed.",
   "error.prepare.storage":
-    "Files couldn't be saved. Check that the drive has space and isn't read-only.",
+    "Files couldn’t be saved. Check that the drive has space and isn’t read-only.",
   "error.prepare.disk_space":
-    "There isn't enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
+    "There isn’t enough free space on the drive that holds Clade: about {required} is needed and {available} is available. Free some space and try again.",
   "error.prepare.account_required":
     "Sign in with a Minecraft account to download or verify game files. Your profiles stay as they are.",
   "error.prepare.busy": "Another profile is being set up. Wait for it to finish.",
@@ -458,7 +489,7 @@ export const en = {
   "error.signIn.needs_sign_in": "This account needs to sign in again.",
   "error.signIn.no_xbox_account":
     "This Microsoft account has no Xbox account. Create one at xbox.com, then try again.",
-  "error.signIn.xbox_region": "Xbox Live is not available in this account's country or region.",
+  "error.signIn.xbox_region": "Xbox Live is not available in this account’s country or region.",
   "error.signIn.adult_verification":
     "This account needs adult verification before it can sign in. Finish it on xbox.com.",
   "error.signIn.child_account":
@@ -476,10 +507,10 @@ export const en = {
   "error.signIn.wrong_account":
     "That is a different Minecraft account from the one being signed in again.",
   "error.signIn.unknown_account": "That account no longer exists.",
-  "error.signIn.sign_in_unavailable": "Microsoft sign-in isn't available in this build yet.",
+  "error.signIn.sign_in_unavailable": "Microsoft sign-in isn’t available in this build yet.",
 
-  "error.vault.unknown": "That didn't work.",
-  "error.vault.passphrase_mismatch": "That passphrase doesn't match.",
+  "error.vault.unknown": "That didn’t work.",
+  "error.vault.passphrase_mismatch": "That passphrase doesn’t match.",
   "error.vault.passphrase_too_short": "That passphrase is too short.",
   "error.vault.passphrase_too_long": "That passphrase is too long.",
   "error.vault.vault_exists": "Accounts are already protected by a passphrase.",
@@ -516,26 +547,26 @@ export const en = {
   "error.appearance.busy": "Another change is still running.",
   "error.appearance.unknown_account": "That account no longer exists.",
 
-  "error.profile.unknown": "Could not create the profile.",
+  "error.profile.unknown": "Could not complete the profile action.",
   "error.profile.duplicate_name": "A profile named “{name}” already exists.",
   "error.profile.unknown_minecraft":
     "Minecraft {minecraft} is not in Mojang’s official version list.",
   "error.profile.cannot_verify":
-    "Can't check Minecraft versions right now. Connect once and try again.",
+    "Can’t check Minecraft versions right now. Connect once and try again.",
   "error.profile.cannot_verify_loader":
-    "Can't check which {loader} versions fit Minecraft {minecraft} right now. Connect once and try again.",
+    "Can’t check which {loader} versions fit Minecraft {minecraft} right now. Connect once and try again.",
   "error.profile.no_compatible_loader": "{loader} has no version for Minecraft {minecraft}.",
   "error.profile.loader_version_not_offered":
     "{loader} {version} is not a compatible version for Minecraft {minecraft}.",
-  "error.profile.invalid_name": "That name can't be used.",
+  "error.profile.invalid_name": "That name can’t be used.",
   "error.profile.storage": "Could not save the profile.",
   "error.profile.remove_failed":
     "The profile could not be moved. Close anything that uses its folder (Explorer, an editor) and try again. Nothing was changed.",
-  "error.profile.remove_refused": "This profile can't be removed from here. Nothing was changed.",
+  "error.profile.remove_refused": "This profile can’t be removed from here. Nothing was changed.",
   "error.profile.already_running": "This profile is starting or running. Close the game first.",
   "error.profile.busy": "This profile is being set up. Wait for it to finish.",
   "error.profile.invalid_memory":
-    "That amount of memory isn't safe for this computer. Choose between {min} and {max}.",
+    "That amount of memory isn’t safe for this computer. Choose between {min} and {max}.",
   "error.profile.invalid_resolution":
     "Choose a window size between {minWidth}×{minHeight} and {maxWidth}×{maxHeight}.",
   "error.profile.invalid_jvm_args":
@@ -545,7 +576,7 @@ export const en = {
     "Couldn’t restore the profile. Make sure none of its files are open in another program.",
   "error.profile.duplicate_failed":
     "Could not duplicate the profile. Check available disk space and close anything using its folder.",
-  "error.profile.open_failed": "Windows couldn't open that folder.",
+  "error.profile.open_failed": "Windows couldn’t open that folder.",
 
   "error.catalog.unknown": "Could not load the version list.",
   "error.catalog.catalog_unavailable":

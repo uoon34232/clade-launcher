@@ -37,6 +37,7 @@ export interface FixtureUiSettings {
   language: "en" | "ru" | null;
   systemLocale: string | null;
   uiMode: "simple" | "advanced";
+  theme: "system" | "light" | "dark";
   reducedMotion: "system" | "on" | "off";
   transparency: "system" | "on" | "off";
   onboardingDone: boolean;
@@ -91,6 +92,10 @@ export interface BackendConfig {
   retiredVaults?: number;
   /** Optional synthetic latest GitHub release tag reported by `check_for_updates`. */
   latestRelease?: string | null;
+  /** Whether the synthetic release ships portable update assets (`canInstall`). */
+  latestReleaseInstallable?: boolean;
+  /** Byte size reported for the synthetic portable release ZIP. */
+  latestReleaseSize?: number | null;
   /** Skin model and owned capes by account id; an account not listed has no custom skin and no capes. */
   appearance: Record<string, FixtureAppearance>;
   ui: FixtureUiSettings;
@@ -100,7 +105,13 @@ export interface BackendConfig {
   /** Games that are already running when the window opens. */
   runs: Record<string, "launching" | "playing">;
   /** Optional initial framed-game attachment state. */
-  embed?: { active: boolean; instanceId: string | null; maximized: boolean };
+  embed?: {
+    active: boolean;
+    watching?: boolean;
+    instanceId: string | null;
+    maximized: boolean;
+    closing?: boolean;
+  };
   /** The (synthetic) Windows "Transparency effects" preference, and whether High Contrast is on. */
   windows: { transparencyEffects: boolean; highContrast: boolean };
 }
@@ -235,6 +246,7 @@ export const DEFAULT_CONFIG: BackendConfig = {
     language: "en",
     systemLocale: "en-US",
     uiMode: "simple",
+    theme: "system",
     reducedMotion: "system",
     transparency: "system",
     // Most tests are not about the introduction, so it counts as already seen; its own tests turn it on.

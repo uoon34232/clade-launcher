@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FolderIcon } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { playSound } from "@/lib/sound/soundService";
@@ -24,24 +24,53 @@ const STEPS = 3;
 export function OnboardingDialog({ open, onExit }: Props) {
   const t = useT();
   const [step, setStep] = useState(0);
+  const continueRef = useRef<HTMLButtonElement>(null);
+  const openRef = useRef(open);
+  const exitingRef = useRef(false);
+  useLayoutEffect(() => {
+    openRef.current = open;
+    if (!open) exitingRef.current = false;
+  }, [open]);
+  useEffect(
+    () => () => {
+      openRef.current = false;
+      exitingRef.current = false;
+    },
+    [],
+  );
   const go = (next: number) => {
+    if (!openRef.current || exitingRef.current) return;
     playSound("click");
+    // On step 1 -> 0, Back unmounts while Continue stays mounted (so autoFocus does not re-run);
+    // move focus explicitly before Back disappears.
+    if (next === 0) {
+      continueRef.current?.focus();
+    }
     setStep(next);
   };
-  const exit = (how: OnboardingExit) => {
-    playSound(how === "skip" ? "click" : "primary");
+  const exit = (how: OnboardingExit, sound = true) => {
+    if (!openRef.current || exitingRef.current) return;
+    exitingRef.current = true;
+    if (sound) playSound(how === "skip" ? "click" : "primary");
     onExit(how);
   };
 
   return (
-    <Modal open={open} onOpenChange={(o) => !o && onExit("skip")} size="md" closeOnBackdrop={false}>
-      <div key={step} className="animate-in fade-in-0 duration-300">
-        <p className="text-ink-muted mb-5 text-[0.8125rem]">
-          {t("onboarding.step", { current: step + 1, total: STEPS })}
-        </p>
-        {step === 0 && <Welcome />}
-        {step === 1 && <Portable />}
-        {step === 2 && <Ready />}
+    <Modal
+      open={open}
+      onOpenChange={(o) => !o && exit("skip", false)}
+      size="md"
+      closeOnBackdrop={false}
+    >
+      <div aria-live="polite" className="min-w-0">
+        <div key={step} className="animate-in fade-in-0 duration-300">
+          <p className="text-ink-muted mb-5 text-[0.8125rem]">
+            {t("onboarding.step", { current: step + 1, total: STEPS })}
+          </p>
+          {step === 0 && <Welcome />}
+          {step === 1 && <Portable />}
+          {step === 2 && <Ready />}
+        </div>
       </div>
 
       {step === 2 && (
@@ -73,6 +102,7 @@ export function OnboardingDialog({ open, onExit }: Props) {
           )}
           {step < 2 && (
             <button
+              ref={continueRef}
               key="continue"
               type="button"
               autoFocus

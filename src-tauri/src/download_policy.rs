@@ -58,6 +58,15 @@ pub const LOADER_HOSTS: &[&str] = &[
 /// can never fetch anything from GitHub.
 pub const UPDATE_CHECK_HOSTS: &[&str] = &["api.github.com"];
 
+/// Hosts allowed ONLY for explicit user-initiated portable launcher update downloads
+/// (`update_apply.rs`). Kept strictly separate from [`DEFAULT_ALLOWED_HOSTS`] and
+/// [`UPDATE_CHECK_HOSTS`] so game or loader manifests can never reach GitHub.
+pub const UPDATE_DOWNLOAD_HOSTS: &[&str] = &[
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+];
+
 impl DownloadPolicy {
     pub const fn new(allowed: &'static [&'static str]) -> Self {
         Self { allowed }

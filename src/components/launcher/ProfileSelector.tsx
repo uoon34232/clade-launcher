@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { ChevronUpIcon } from "lucide-react";
 import {
   DropdownMenu,
@@ -35,7 +36,7 @@ interface Props {
 }
 
 const TRIGGER =
-  "dock-item group flex h-12 min-w-[clamp(11rem,17vw,14.5rem)] max-w-[min(21rem,36vw)] cursor-default items-center justify-between gap-5 rounded-[1.25rem] bg-cream/[0.065] pr-3 pl-4 text-left outline-none hover:bg-cream/[0.11] focus-visible:ring-2 focus-visible:ring-clay-soft data-popup-open:bg-cream/[0.13]";
+  "dock-item group flex h-12 min-w-[clamp(11rem,17vw,14.5rem)] max-w-[min(21rem,36vw)] cursor-default items-center justify-between gap-5 rounded-[1.25rem] bg-cream/[0.065] pr-3 pl-4 text-left outline-hidden hover:bg-cream/[0.11] focus-visible:ring-2 focus-visible:ring-clay-soft data-popup-open:bg-cream/[0.13]";
 
 /**
  * The dock's profile control: shows the selected profile ("Survival"), lists the existing profiles,
@@ -58,6 +59,20 @@ export function ProfileSelector({
 }: Props) {
   const t = useT();
   const current = profiles.find((p) => p.id === selectedId) ?? profiles[0];
+  const actionTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (actionTimerRef.current !== null) window.clearTimeout(actionTimerRef.current);
+    },
+    [],
+  );
+  const scheduleMenuAction = (action: () => void) => {
+    if (actionTimerRef.current !== null) window.clearTimeout(actionTimerRef.current);
+    actionTimerRef.current = window.setTimeout(() => {
+      actionTimerRef.current = null;
+      action();
+    }, 0);
+  };
 
   if (!current) {
     return (
@@ -72,7 +87,7 @@ export function ProfileSelector({
         <span className="text-cream -translate-y-px text-[0.9375rem] leading-none font-medium tracking-[0.005em]">
           {t("profile.createFirst")}
         </span>
-        <span aria-hidden className="text-cream/55 text-[1.125rem] leading-none">
+        <span aria-hidden className="text-cream/75 text-[1.125rem] leading-none">
           +
         </span>
       </button>
@@ -92,14 +107,14 @@ export function ProfileSelector({
         <ChevronUpIcon
           aria-hidden
           strokeWidth={1.75}
-          className="text-cream/50 ease-out-soft group-hover:text-cream/85 group-data-popup-open:text-cream/85 size-4 shrink-0 transition-[transform,color] duration-200 group-data-popup-open:rotate-180"
+          className="text-cream/75 ease-out-soft group-hover:text-cream group-data-popup-open:text-cream size-4 shrink-0 transition-[transform,color] duration-200 group-data-popup-open:rotate-180"
         />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         side="top"
         align="center"
         sideOffset={14}
-        className="glass-menu flex max-h-[min(22rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
+        className="glass-menu flex max-h-[min(28rem,var(--available-height))] w-[max(var(--anchor-width),18rem)] flex-col overflow-hidden rounded-[1.25rem] p-1.5 duration-200"
       >
         {/* Only the list of profiles scrolls; profile actions stay in view below it. */}
         <div className="menu-scroll min-h-0 flex-1 overflow-y-auto">
@@ -119,7 +134,7 @@ export function ProfileSelector({
               >
                 <span className="flex min-w-0 flex-col leading-tight">
                   <span className="truncate text-[0.875rem] font-medium">{p.name}</span>
-                  <span className="text-cream/55 truncate text-[0.75rem]">{profileDetail(p)}</span>
+                  <span className="text-cream/75 truncate text-[0.75rem]">{profileDetail(p)}</span>
                 </span>
               </DropdownMenuRadioItem>
             ))}
@@ -127,26 +142,26 @@ export function ProfileSelector({
         </div>
         <DropdownMenuSeparator className="bg-cream/[0.08] my-1 shrink-0" />
         <DropdownMenuItem
-          className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] font-medium transition-colors duration-150"
+          className="text-cream/85 focus:bg-cream/[0.1] focus:text-cream min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] font-medium transition-colors duration-150"
           onClick={() => {
             playSound("click");
             // Let the menu finish closing (and return focus to its trigger) before the dialog takes focus.
-            window.setTimeout(onCreate, 0);
+            scheduleMenuAction(onCreate);
           }}
         >
           {t("profile.create")}
         </DropdownMenuItem>
         <DropdownMenuItem
-          className="text-cream/80 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
+          className="text-cream/85 focus:bg-cream/[0.1] focus:text-cream min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
           onClick={() => {
             playSound("click");
-            window.setTimeout(onOpenSettings, 0);
+            scheduleMenuAction(onOpenSettings);
           }}
         >
           {t("profile.settings")}
         </DropdownMenuItem>
         <DropdownMenuItem
-          className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          className="text-cream/75 focus:bg-cream/[0.1] focus:text-cream min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
             onOpenFolder();
@@ -156,20 +171,20 @@ export function ProfileSelector({
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={verifyDisabled}
-          className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          className="text-cream/75 focus:bg-cream/[0.1] focus:text-cream min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
-            window.setTimeout(onVerify, 0);
+            scheduleMenuAction(onVerify);
           }}
         >
           {t("profile.verify")}
         </DropdownMenuItem>
         {removedCount > 0 && onOpenRemoved && (
           <DropdownMenuItem
-            className="text-cream/65 focus:bg-cream/[0.1] focus:text-cream min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
+            className="text-cream/75 focus:bg-cream/[0.1] focus:text-cream min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150"
             onClick={() => {
               playSound("click");
-              window.setTimeout(onOpenRemoved, 0);
+              scheduleMenuAction(onOpenRemoved);
             }}
           >
             {t("profile.removedMenu", { count: removedCount })}
@@ -178,10 +193,10 @@ export function ProfileSelector({
         <DropdownMenuSeparator className="bg-cream/[0.08] my-1 shrink-0" />
         <DropdownMenuItem
           disabled={removeDisabled}
-          className="text-clay-soft focus:bg-clay/20 focus:text-clay-soft min-h-10 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
+          className="text-clay-soft focus:bg-clay/20 focus:text-clay-soft min-h-10 shrink-0 rounded-[0.875rem] py-1.5 pl-3 text-[0.875rem] transition-colors duration-150 data-disabled:opacity-40"
           onClick={() => {
             playSound("click");
-            window.setTimeout(onRemove, 0);
+            scheduleMenuAction(onRemove);
           }}
         >
           {t("profile.remove")}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Account, AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
@@ -36,8 +36,9 @@ export function AccountDialog({
 }: Props) {
   // Keep the last account while the closing animation runs.
   const [shown, setShown] = useState(account);
-  if (account && account !== shown) setShown(account);
-  const current = account ?? shown;
+  const open = account !== null;
+  const [wasOpen, setWasOpen] = useState(open);
+  const [session, setSession] = useState(0);
   const doneRef = useRef<HTMLButtonElement>(null);
   // Lives here, not in the body, so the modal can ignore Escape and the backdrop while the removal
   // is being confirmed: only Keep or Remove answer it. A closed dialog or another account starts over.
@@ -46,27 +47,37 @@ export function AccountDialog({
   const [confirmingReset, setConfirmingReset] = useState(false);
   // ...and the "Start fresh?" question of a forgotten passphrase.
   const [recovering, setRecovering] = useState(false);
-  if (
-    (confirming || confirmingReset || recovering) &&
-    (account === null || account.id !== shown?.id)
-  ) {
+
+  const accountChanged = account !== null && account.id !== shown?.id;
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setSession((n) => n + 1);
+      setConfirming(false);
+      setConfirmingReset(false);
+      setRecovering(false);
+    }
+  } else if (accountChanged) {
     setConfirming(false);
     setConfirmingReset(false);
     setRecovering(false);
   }
+  if (account && account !== shown) setShown(account);
+  const current = account ?? shown;
 
   return (
     <Modal
-      open={account !== null}
+      open={open}
       onOpenChange={(o) => !o && onClose()}
       size="md"
       initialFocus={doneRef}
-      locked={confirming || confirmingReset || recovering}
+      locked={open && (confirming || confirmingReset || recovering)}
     >
       {current && (
         <Body
-          key={current.id}
+          key={`${current.id}:${session}`}
           account={current}
+          open={open}
           confirming={confirming}
           setConfirming={setConfirming}
           confirmingReset={confirmingReset}
@@ -88,6 +99,7 @@ export function AccountDialog({
 
 function Body({
   account,
+  open,
   confirming,
   setConfirming,
   confirmingReset,
@@ -103,6 +115,7 @@ function Body({
   doneRef,
 }: Omit<Props, "account"> & {
   account: Account;
+  open: boolean;
   confirming: boolean;
   setConfirming: (confirming: boolean) => void;
   confirmingReset: boolean;
@@ -115,8 +128,29 @@ function Body({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const removeTriggerRef = useRef<HTMLButtonElement>(null);
+  const signInAgainRef = useRef<HTMLButtonElement>(null);
+  const keepBtnRef = useRef<HTMLButtonElement>(null);
   const restoreRemoveFocus = useRef(false);
+  const pendingVaultFocus = useRef<"reset" | "unlock" | null>(null);
+  const [unlockFocusSeq, setUnlockFocusSeq] = useState(0);
+  const mountedRef = useRef(true);
+  const openRef = useRef(open);
+  const inFlightRef = useRef(false);
   const inlineConfirming = confirmingReset || recovering;
+
+  useLayoutEffect(() => {
+    openRef.current = open;
+    if (!open) {
+      pendingVaultFocus.current = null;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!confirming && restoreRemoveFocus.current) {
@@ -125,17 +159,43 @@ function Body({
     }
   }, [confirming]);
 
+  useEffect(() => {
+    if (!open || !pendingVaultFocus.current) return;
+    const mode = pendingVaultFocus.current;
+    if (mode === "reset" && account.needsSignIn) {
+      pendingVaultFocus.current = null;
+      (signInAgainRef.current ?? doneRef.current)?.focus();
+    } else if (mode === "unlock" && !inlineConfirming) {
+      pendingVaultFocus.current = null;
+      doneRef.current?.focus();
+    }
+  }, [open, account.needsSignIn, inlineConfirming, unlockFocusSeq, doneRef]);
+
   const remove = () => {
+    if (busy || inFlightRef.current) return;
+    inFlightRef.current = true;
+    playSound("click");
     setBusy(true);
     setError(null);
     api.remove(account.id).then(
       (snapshot) => {
+        inFlightRef.current = false;
+        if (!mountedRef.current || !openRef.current) return;
+        setBusy(false);
         playSound("primary");
         onRemoved(snapshot);
       },
       (e: unknown) => {
+        inFlightRef.current = false;
+        if (!mountedRef.current || !openRef.current) return;
         setBusy(false);
         setError(describeError("account", e));
+        window.queueMicrotask(() => {
+          const activeEl = document.activeElement;
+          if (!activeEl || activeEl === document.body || activeEl === document.documentElement) {
+            keepBtnRef.current?.focus();
+          }
+        });
       },
     );
   };
@@ -178,10 +238,18 @@ function Body({
         skin={capabilities.skin}
         cape={capabilities.cape}
         api={api}
+        disabled={confirming || busy}
         confirmingReset={confirmingReset}
         setConfirmingReset={setConfirmingReset}
         setRecovering={setRecovering}
-        onVaultReset={onVaultReset}
+        onUnlockFocus={() => {
+          pendingVaultFocus.current = "unlock";
+          setUnlockFocusSeq((n) => n + 1);
+        }}
+        onVaultReset={(snap) => {
+          pendingVaultFocus.current = "reset";
+          onVaultReset?.(snap);
+        }}
       />
 
       <ModalFooter>
@@ -192,12 +260,15 @@ function Body({
             </p>
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
               <button
+                ref={keepBtnRef}
                 type="button"
                 autoFocus
                 disabled={busy}
                 className={BUTTON_QUIET}
                 onClick={() => {
+                  playSound("click");
                   restoreRemoveFocus.current = true;
+                  setError(null);
                   setConfirming(false);
                 }}
               >
@@ -215,16 +286,24 @@ function Body({
               type="button"
               disabled={inlineConfirming}
               className={`${BUTTON_DANGER} mr-auto`}
-              onClick={() => setConfirming(true)}
+              onClick={() => {
+                playSound("click");
+                setError(null);
+                setConfirming(true);
+              }}
             >
               {t("accountModal.signOutRemove")}
             </button>
             {account.needsSignIn && (
               <button
+                ref={signInAgainRef}
                 type="button"
                 disabled={inlineConfirming}
                 className={BUTTON_PRIMARY}
-                onClick={() => onSignInAgain(account.id)}
+                onClick={() => {
+                  playSound("click");
+                  onSignInAgain(account.id);
+                }}
               >
                 {t("common.signInAgain")}
               </button>

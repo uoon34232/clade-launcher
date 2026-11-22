@@ -4,6 +4,7 @@ dist
 dist-ssr
 dist-portable/
 *.local
+*.tsbuildinfo
 # src-tauri/.gitignore covers /target/ and /gen/schemas
 
 # ---- Logs and test output

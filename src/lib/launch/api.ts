@@ -2,9 +2,7 @@
 // the backend decides everything (account, integrity, Java, the command line); this only starts a
 // launch and listens to how the game is doing. No secrets ever pass through here.
 
-import { listen } from "@tauri-apps/api/event";
-import { BackendError, call } from "@/lib/ipc";
-import { inTauri } from "@/lib/settings/uiSettings";
+import { BackendError, call, listenEvent } from "@/lib/ipc";
 
 export type RunState = "launching" | "playing";
 
@@ -58,23 +56,41 @@ export function parseLaunchEvent(raw: unknown): LaunchEvent | null {
 
 export interface GameEmbedStatus {
   active: boolean;
+  watching?: boolean;
   instanceId: string | null;
   maximized: boolean;
+  closing?: boolean;
 }
 
 export const NO_EMBED: GameEmbedStatus = {
   active: false,
+  watching: false,
   instanceId: null,
   maximized: false,
+  closing: false,
 };
 
 export function parseGameEmbedStatus(raw: unknown): GameEmbedStatus {
-  if (!isObj(raw) || raw.active !== true) return NO_EMBED;
-  return {
-    active: true,
-    instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
-    maximized: raw.maximized === true,
-  };
+  if (!isObj(raw)) return NO_EMBED;
+  if (raw.active === true) {
+    return {
+      active: true,
+      watching: false,
+      instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
+      maximized: raw.maximized === true,
+      closing: raw.closing === true,
+    };
+  }
+  if (raw.watching === true) {
+    return {
+      active: false,
+      watching: true,
+      instanceId: typeof raw.instanceId === "string" ? raw.instanceId : null,
+      maximized: false,
+      closing: false,
+    };
+  }
+  return NO_EMBED;
 }
 
 export const launchApi = {
@@ -113,13 +129,11 @@ export const launchApi = {
   openLogs: async (id: string): Promise<void> => {
     await call("open_game_logs", { id });
   },
-  onState: async (callback: (e: LaunchEvent) => void): Promise<() => void> => {
-    if (!inTauri()) return () => undefined;
-    return listen<unknown>("launch-state", (e) => {
-      const ev = parseLaunchEvent(e.payload);
+  onState: async (callback: (e: LaunchEvent) => void): Promise<() => void> =>
+    listenEvent<unknown>("launch-state", (payload) => {
+      const ev = parseLaunchEvent(payload);
       if (ev) callback(ev);
-    });
-  },
+    }),
   embedStatus: async (): Promise<GameEmbedStatus> => {
     const raw = await call("get_game_embed_status");
     return parseGameEmbedStatus(raw);
@@ -137,12 +151,10 @@ export const launchApi = {
     const raw = await call("toggle_game_maximize");
     return parseGameEmbedStatus(raw);
   },
-  onEmbedState: async (callback: (s: GameEmbedStatus) => void): Promise<() => void> => {
-    if (!inTauri()) return () => undefined;
-    return listen<unknown>("game-embed-state", (e) => {
-      callback(parseGameEmbedStatus(e.payload));
-    });
-  },
+  onEmbedState: async (callback: (s: GameEmbedStatus) => void): Promise<() => void> =>
+    listenEvent<unknown>("game-embed-state", (payload) => {
+      callback(parseGameEmbedStatus(payload));
+    }),
 };
 
 type EmbedClientMethods = "embedStatus" | "setStageBounds" | "toggleMaximize" | "onEmbedState";

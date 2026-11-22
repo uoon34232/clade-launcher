@@ -35,9 +35,11 @@ pub enum StartupMessage {
     WebViewMissing,
     /// The main window could not be created or the app failed while running.
     WindowFailed,
+    /// Installing an update failed and the previous launcher binary was restored.
+    UpdateFailed,
 }
 
-pub const ALL_MESSAGES: [StartupMessage; 7] = [
+pub const ALL_MESSAGES: [StartupMessage; 8] = [
     StartupMessage::FolderInUse,
     StartupMessage::FolderNotWritable,
     StartupMessage::CannotLocateFolder,
@@ -45,6 +47,7 @@ pub const ALL_MESSAGES: [StartupMessage; 7] = [
     StartupMessage::StartupFailed,
     StartupMessage::WebViewMissing,
     StartupMessage::WindowFailed,
+    StartupMessage::UpdateFailed,
 ];
 
 /// The window title of every native dialog: the formal product name, never translated.
@@ -105,6 +108,8 @@ pub fn text(id: StartupMessage, lang: Language) -> &'static str {
         (WebViewMissing, Ru) => "Clade не смог запустить встроенный веб-компонент.\n\nОбычно Clade содержит собственный WebView2 в папке runtimes\\webview2 рядом с Clade.exe, но его там нет, и WebView2 не установлен на этом компьютере.\n\nРаспакуй Clade-Launcher-Portable.zip целиком заново (не копируй один Clade.exe) и проверь, что антивирус ничего не удалил.",
         (WindowFailed, En) => "Clade couldn't open its window.\n\nTry starting it again. If it keeps happening, the WebView2 files may be damaged.",
         (WindowFailed, Ru) => "Clade не удалось открыть окно.\n\nПопробуй запустить его снова. Если ошибка повторяется, файлы WebView2 могли повредиться.",
+        (UpdateFailed, En) => "Clade couldn't finish installing the update.\n\nYour previous version and all profiles were restored. Try again or download the new archive manually.",
+        (UpdateFailed, Ru) => "Clade не смог завершить установку обновления.\n\nПредыдущая версия и все профили восстановлены. Попробуй снова или скачай архив вручную.",
     }
 }
 

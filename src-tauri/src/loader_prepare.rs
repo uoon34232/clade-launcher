@@ -221,6 +221,14 @@ pub async fn resolve_loader_version<F: Fetcher, S: Streamer, R: InstallerRunner>
         return Ok(version.clone());
     }
     let dir = ctx.root.cache_dir().join("catalogs");
+    {
+        let root_base = ctx.root.path().to_path_buf();
+        let dir_check = dir.clone();
+        tokio::task::spawn_blocking(move || reject_links_between(&root_base, &dir_check))
+            .await
+            .map_err(|e| PrepareError::Storage(e.to_string()))?
+            .map_err(|e| PrepareError::Storage(e.to_string()))?;
+    }
     let options =
         crate::loader_options::options_for(ctx.loader_meta, &dir, kind, mc, ctx.now).await;
     options
@@ -235,6 +243,22 @@ pub async fn resolve_loader_version<F: Fetcher, S: Streamer, R: InstallerRunner>
                 kind.name()
             ))
         })
+}
+
+/// Resolves the loader version for an instance: preserves the installed version already pinned
+/// in `SetupState::Ready` when the profile uses `LoaderVersionSpec::Auto`, reserving catalog
+/// selection for `Pending` instances or explicit version changes.
+pub(crate) async fn resolve_loader_for_setup<F: Fetcher, S: Streamer, R: InstallerRunner>(
+    ctx: &Ctx<'_, F, S, R>,
+    kind: LoaderKind,
+    mc: &McVersion,
+    spec: &LoaderVersionSpec,
+    installed_ready: Option<&LoaderVersion>,
+) -> Result<LoaderVersion, PrepareError> {
+    if let (LoaderVersionSpec::Auto, Some(installed)) = (spec, installed_ready) {
+        return Ok(installed.clone());
+    }
+    resolve_loader_version(ctx, kind, mc, spec).await
 }
 
 fn version_dir(ctx_root: &PortableRoot, id: &VersionId) -> PathBuf {
@@ -373,25 +397,36 @@ pub fn read_sizes(root: &PortableRoot, id: &str) -> std::collections::HashMap<St
         .unwrap_or_default()
 }
 
-fn write_sizes(root: &PortableRoot, plan: &VersionPlan) {
+pub(crate) fn write_sizes(root: &PortableRoot, plan: &VersionPlan) -> Result<(), PrepareError> {
     let mut map = std::collections::BTreeMap::new();
     for lib in plan
         .libraries
         .iter()
         .filter(|l| l.artifact.url.is_some() && l.artifact.size.is_none())
     {
-        if let Ok(m) = fs::metadata(lib.artifact.path.to_path(&root.libraries_dir())) {
-            map.insert(lib.artifact.path.as_str().to_owned(), m.len());
+        let p = lib.artifact.path.to_path(&root.libraries_dir());
+        reject_links_between(root.path(), &p).map_err(|e| PrepareError::Storage(e.to_string()))?;
+        if !is_link(&p).unwrap_or(true) {
+            if let Ok(m) = fs::symlink_metadata(&p) {
+                if m.is_file() {
+                    map.insert(lib.artifact.path.as_str().to_owned(), m.len());
+                }
+            }
         }
     }
     if !map.is_empty() {
         let path = sizes_path(root, &plan.id);
-        if reject_links_between(root.path(), &path).is_ok() {
-            if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
-                let _ = atomic_write(&path, &bytes);
-            }
+        reject_links_between(root.path(), &path)
+            .map_err(|e| PrepareError::Storage(e.to_string()))?;
+        let bytes =
+            serde_json::to_vec_pretty(&map).map_err(|e| PrepareError::Storage(e.to_string()))?;
+        let unchanged =
+            read_bounded(&path, MAX_SIZES_BYTES).ok().as_deref() == Some(bytes.as_slice());
+        if !unchanged {
+            atomic_write(&path, &bytes).map_err(|e| PrepareError::Storage(e.to_string()))?;
         }
     }
+    Ok(())
 }
 
 /// Downloads (or checks) every library a profile names, and verifies any installer-generated jars.
@@ -409,21 +444,13 @@ pub async fn ensure_libraries<F: Fetcher, S: Streamer, R: InstallerRunner>(
     };
     let libs: Vec<_> = plan.libraries.iter().collect();
     let (jobs, generated) = jobs_for_libraries(ctx, &libs, &recorded).await?;
-    ctx.tracker.enter(
-        Stage::Verifying,
-        "Verifying files",
-        Some(jobs.len() as u64),
-        false,
-    );
-    ctx.tracker
-        .progress
-        .plan_bytes(jobs.iter().filter_map(|j| j.size).sum());
+    ctx.tracker.set_items(Some(jobs.len() as u64), false);
     downloader.fetch_all(jobs, ctx.concurrency).await?;
 
     let root = ctx.root.clone();
     let plan_clone = plan.clone();
     tokio::task::spawn_blocking(move || -> Result<(), PrepareError> {
-        write_sizes(&root, &plan_clone);
+        write_sizes(&root, &plan_clone)?;
         for g in &generated {
             verify_generated_file(g, &root)?;
         }
@@ -445,19 +472,57 @@ fn first_hex_token(body: &[u8], len: usize) -> Option<String> {
 /// Version folders the installer produced, other than the vanilla one it started from.
 fn new_version_ids(stage: &StageSession, mc: &McVersion) -> Result<Vec<VersionId>, PrepareError> {
     let dir = stage.minecraft_dir().join("versions");
+    reject_links_between(stage.base(), &dir).map_err(|e| PrepareError::Loader(e.to_string()))?;
     let mut ids = Vec::new();
-    for e in fs::read_dir(&dir)
-        .map_err(|e| PrepareError::Loader(e.to_string()))?
-        .flatten()
-    {
+    for entry in fs::read_dir(&dir).map_err(|e| PrepareError::Loader(e.to_string()))? {
+        let e = entry.map_err(|e| PrepareError::Loader(e.to_string()))?;
+        let path = e.path();
+        if is_link(&path).unwrap_or(true) {
+            return Err(PrepareError::Loader(
+                "the installer produced an unsafe link".into(),
+            ));
+        }
+        let Ok(ft) = e.file_type() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
         let name = e.file_name().to_string_lossy().into_owned();
-        if name != mc.as_str() && e.path().is_dir() {
+        if name != mc.as_str() {
             ids.push(VersionId::new(&name).map_err(|_| {
                 PrepareError::Loader("the installer produced an unsafe version name".into())
             })?);
         }
     }
     Ok(ids)
+}
+
+fn matches_installer_profile_id(
+    id: &VersionId,
+    kind: LoaderKind,
+    mc: &McVersion,
+    loader: &LoaderVersion,
+) -> bool {
+    if let Ok(expected) = loaders::expected_version_id(kind, mc, loader) {
+        if id == &expected {
+            return true;
+        }
+    }
+    if kind == LoaderKind::Forge {
+        let prefix = format!("{mc}-forge");
+        let suffix = format!("-{loader}");
+        if let Some(middle) = id
+            .as_str()
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(&suffix))
+        {
+            return middle.is_empty()
+                || middle == mc.as_str()
+                || middle.strip_prefix('-') == Some(mc.as_str());
+        }
+    }
+    false
 }
 
 /// Checks whether a Forge or NeoForge loader profile and all of its locally generated (`url: None`)
@@ -483,13 +548,14 @@ pub fn find_reusable_installer_loader(
         }
     };
     if let Some(cur) = current_ready_id {
-        push_unique(cur.clone());
+        if matches_installer_profile_id(cur, kind, mc, loader) {
+            push_unique(cur.clone());
+        }
     }
     if let Ok(expected) = loaders::expected_version_id(kind, mc, loader) {
         push_unique(expected);
     }
     if kind == LoaderKind::Forge {
-        let prefix = format!("{mc}-forge");
         if let Ok(rd) = fs::read_dir(&versions_dir) {
             let mut extras: Vec<String> = rd
                 .flatten()
@@ -499,7 +565,8 @@ pub fn find_reusable_installer_loader(
                         return None;
                     }
                     let name = e.file_name().into_string().ok()?;
-                    (name.starts_with(&prefix) && name.ends_with(loader.as_str())).then_some(name)
+                    let id = VersionId::new(&name).ok()?;
+                    matches_installer_profile_id(&id, kind, mc, loader).then_some(name)
                 })
                 .collect();
             extras.sort();
@@ -686,7 +753,9 @@ async fn run_in_stage<F: Fetcher, S: Streamer, R: InstallerRunner>(
             .join("versions")
             .join(id.as_str())
             .join(format!("{id}.json"));
-        if is_link(&staged_json).unwrap_or(true) {
+        if reject_links_between(stage.base(), &staged_json).is_err()
+            || is_link(&staged_json).unwrap_or(true)
+        {
             return Err(PrepareError::Loader(
                 "the installer did not produce a valid version profile".into(),
             ));
@@ -1122,5 +1191,904 @@ mod tests {
                 .expect("job object terminated grandchild and released all handles");
             assert!(!work.exists());
         }
+    }
+
+    struct MiniEnv {
+        _dir: tempfile::TempDir,
+        root: PortableRoot,
+        fetcher: FakeFetcher,
+        streamer: FakeStreamer,
+        runner: ScriptedRunner,
+        events: Arc<Mutex<Vec<crate::prepare::PrepareProgress>>>,
+        tracker: Tracker,
+        cancel: Arc<Cancel>,
+    }
+
+    impl MiniEnv {
+        fn ctx(&self, verify_all: bool) -> Ctx<'_, FakeFetcher, FakeStreamer, ScriptedRunner> {
+            Ctx {
+                root: &self.root,
+                meta: &self.fetcher,
+                loader_meta: &self.fetcher,
+                streamer: &self.streamer,
+                loader_streamer: &self.streamer,
+                runner: &self.runner,
+                sys: SystemEnv::from_process(),
+                concurrency: 4,
+                now: 1_000,
+                backoff: Duration::ZERO,
+                cancel: self.cancel.clone(),
+                tracker: &self.tracker,
+                verify_all,
+                free_space: Arc::new(|_| None),
+            }
+        }
+    }
+
+    fn test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            w.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    fn setup_vanilla_env(mc: &str, extra_libraries: Vec<serde_json::Value>) -> MiniEnv {
+        let dir = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(dir.path());
+        root.ensure_layout().unwrap();
+        let fetcher = FakeFetcher::new();
+        let streamer = FakeStreamer::new();
+
+        let client = vec![0xCAu8; 512];
+        let client_url = format!(
+            "https://piston-data.mojang.com/v1/objects/{}/client.jar",
+            sha1_hex(&client)
+        );
+        streamer.add(&client_url, &client);
+
+        let native_jar = test_zip(&[("windows/x64/lwjgl.dll", b"dll")]);
+        let native_path = "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar";
+        let native_url = format!("https://libraries.minecraft.net/{native_path}");
+        streamer.add(&native_url, &native_jar);
+
+        let mut libraries = vec![json!({
+            "name": "org.lwjgl:lwjgl:3.3.3:natives-windows",
+            "rules": [{"action": "allow", "os": {"name": "windows"}}],
+            "downloads": {"artifact": {
+                "path": native_path,
+                "sha1": sha1_hex(&native_jar),
+                "size": native_jar.len(),
+                "url": native_url,
+            }}
+        })];
+        libraries.extend(extra_libraries);
+
+        let asset_data = b"asset-bytes".to_vec();
+        let asset_hash = sha1_hex(&asset_data);
+        let asset_url = format!(
+            "https://resources.download.minecraft.net/{}/{}",
+            &asset_hash[..2],
+            asset_hash
+        );
+        streamer.add(&asset_url, &asset_data);
+        let index_bytes = json!({
+            "objects": {
+                "icons/icon.png": {"hash": asset_hash, "size": asset_data.len()}
+            }
+        })
+        .to_string()
+        .into_bytes();
+        let index_url = format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/19.json",
+            sha1_hex(&index_bytes)
+        );
+        streamer.add(&index_url, &index_bytes);
+
+        let java_exe = b"MZ-java".to_vec();
+        let javaw_exe = b"MZ-javaw".to_vec();
+        let modules = b"modules-data".to_vec();
+        let mut java_entries = serde_json::Map::new();
+        java_entries.insert("bin".into(), json!({"type": "directory"}));
+        java_entries.insert("lib".into(), json!({"type": "directory"}));
+        for (rel, data) in [
+            ("bin/java.exe", &java_exe),
+            ("bin/javaw.exe", &javaw_exe),
+            ("lib/modules", &modules),
+        ] {
+            let u = format!(
+                "https://piston-data.mojang.com/v1/objects/{}/java-runtime-delta/{rel}",
+                sha1_hex(data)
+            );
+            streamer.add(&u, data);
+            java_entries.insert(
+                rel.into(),
+                json!({
+                    "type": "file",
+                    "downloads": {"raw": {"sha1": sha1_hex(data), "size": data.len(), "url": u}}
+                }),
+            );
+        }
+        let runtime_manifest = json!({"files": java_entries}).to_string();
+        let runtime_manifest_url =
+            "https://piston-meta.mojang.com/v1/packages/java-runtime-delta/manifest.json";
+        fetcher.ok(runtime_manifest_url, &runtime_manifest);
+        fetcher.ok(
+            crate::java_install::RUNTIME_INDEX_URL,
+            json!({
+                "windows-x64": {
+                    "java-runtime-delta": [{
+                        "availability": {"group": 1, "progress": 100},
+                        "manifest": {
+                            "sha1": sha1_hex(runtime_manifest.as_bytes()),
+                            "size": runtime_manifest.len(),
+                            "url": runtime_manifest_url
+                        },
+                        "version": {"name": "21.0.7", "released": "2025-01-01T00:00:00+00:00"}
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        let version_json = json!({
+            "id": mc,
+            "type": "release",
+            "mainClass": "net.minecraft.client.main.Main",
+            "assets": "19",
+            "assetIndex": {
+                "id": "19",
+                "sha1": sha1_hex(&index_bytes),
+                "size": index_bytes.len(),
+                "totalSize": asset_data.len(),
+                "url": index_url
+            },
+            "downloads": {
+                "client": {
+                    "sha1": sha1_hex(&client),
+                    "size": client.len(),
+                    "url": client_url
+                }
+            },
+            "javaVersion": {"component": "java-runtime-delta", "majorVersion": 21},
+            "libraries": libraries,
+            "arguments": {
+                "game": [
+                    "--username", "${auth_player_name}", "--version", "${version_name}",
+                    "--gameDir", "${game_directory}", "--assetsDir", "${assets_root}",
+                    "--assetIndex", "${assets_index_name}", "--uuid", "${auth_uuid}",
+                    "--accessToken", "${auth_access_token}", "--userType", "${user_type}",
+                    "--versionType", "${version_type}"
+                ],
+                "jvm": ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"]
+            }
+        })
+        .to_string()
+        .into_bytes();
+        let version_url = format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{mc}.json",
+            sha1_hex(&version_json)
+        );
+        fetcher.ok(&version_url, &version_json);
+        fetcher.ok(
+            crate::mc_catalog::MANIFEST_URL,
+            json!({
+                "latest": {"release": mc, "snapshot": mc},
+                "versions": [{
+                    "id": mc,
+                    "type": "release",
+                    "url": version_url,
+                    "time": "2024-12-03T10:12:57+00:00",
+                    "releaseTime": "2024-12-03T10:12:57+00:00",
+                    "sha1": sha1_hex(&version_json),
+                    "complianceLevel": 1
+                }]
+            })
+            .to_string(),
+        );
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let tracker = Tracker::new(
+            &InstanceId::new("test").unwrap(),
+            Progress::new(),
+            Box::new(move |p| sink.lock().unwrap().push(p)),
+        );
+        MiniEnv {
+            _dir: dir,
+            root,
+            fetcher,
+            streamer,
+            runner: ScriptedRunner {
+                on_run: Mutex::new(None),
+            },
+            events,
+            tracker,
+            cancel: Cancel::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_auto_profile_preserves_installed_loader_during_repair_and_verify() {
+        use crate::instances::{InstanceStore, NewInstance, SetupState};
+        use crate::prepare::{check_installed, prepare_instance};
+
+        // 1. Profile loader (Fabric): initial Auto selects 0.16.9 and pins it in SetupState::Ready.
+        let env = setup_vanilla_env("1.21.4", Vec::new());
+        let fab_old = b"fabric-0.16.9-jar".to_vec();
+        let fab_old_rel = "net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar";
+        env.streamer.add(
+            &format!("https://maven.fabricmc.net/{fab_old_rel}"),
+            &fab_old,
+        );
+        env.fetcher.ok(
+            "https://meta.fabricmc.net/v2/versions/loader/1.21.4",
+            r#"[{"loader":{"version":"0.16.9","stable":true}}]"#,
+        );
+        env.fetcher.ok(
+            "https://meta.fabricmc.net/v2/versions/loader/1.21.4/0.16.9/profile/json",
+            json!({
+                "id": "fabric-loader-0.16.9-1.21.4",
+                "inheritsFrom": "1.21.4",
+                "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{
+                    "name": "net.fabricmc:fabric-loader:0.16.9",
+                    "url": "https://maven.fabricmc.net/",
+                    "sha1": sha1_hex(&fab_old),
+                    "size": fab_old.len()
+                }]
+            })
+            .to_string(),
+        );
+        let store = InstanceStore::new(&env.root);
+        let id = store
+            .create(
+                NewInstance::modded(
+                    "FabAuto",
+                    "1.21.4",
+                    LoaderKind::Fabric,
+                    LoaderVersionSpec::Auto,
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap()
+            .id;
+        let inst = prepare_instance(&env.ctx(false), &id).await.unwrap();
+        assert_eq!(
+            inst.setup,
+            SetupState::Ready {
+                version_id: VersionId::new("fabric-loader-0.16.9-1.21.4").unwrap(),
+                loader_version: Some(LoaderVersion::new("0.16.9").unwrap()),
+            }
+        );
+
+        // Publish a newer Fabric version 0.16.10 in the catalog, delete catalog cache, and corrupt
+        // the installed loader jar: repair must keep 0.16.9 without consulting the catalog.
+        let fab_new = b"fabric-0.16.10-jar".to_vec();
+        env.streamer.add(
+            "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar",
+            &fab_new,
+        );
+        env.fetcher.ok(
+            "https://meta.fabricmc.net/v2/versions/loader/1.21.4",
+            r#"[{"loader":{"version":"0.16.10","stable":true}},{"loader":{"version":"0.16.9","stable":true}}]"#,
+        );
+        env.fetcher.ok(
+            "https://meta.fabricmc.net/v2/versions/loader/1.21.4/0.16.10/profile/json",
+            json!({
+                "id": "fabric-loader-0.16.10-1.21.4",
+                "inheritsFrom": "1.21.4",
+                "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{
+                    "name": "net.fabricmc:fabric-loader:0.16.10",
+                    "url": "https://maven.fabricmc.net/",
+                    "sha1": sha1_hex(&fab_new),
+                    "size": fab_new.len()
+                }]
+            })
+            .to_string(),
+        );
+        let catalogs_dir = env.root.cache_dir().join("catalogs");
+        let _ = fs::remove_dir_all(&catalogs_dir);
+        fs::create_dir_all(&catalogs_dir).unwrap();
+
+        let fab_jar_path = env.root.libraries_dir().join(fab_old_rel);
+        fs::write(&fab_jar_path, b"short").unwrap();
+        assert!(check_installed(&env.root, &inst).is_err());
+
+        let repair_calls_before = env.fetcher.calls().len();
+        let repaired = prepare_instance(&env.ctx(false), &id).await.unwrap();
+        assert_eq!(repaired.setup, inst.setup);
+        assert_eq!(fs::read(&fab_jar_path).unwrap(), fab_old);
+        assert!(
+            !env.fetcher.calls()[repair_calls_before..]
+                .iter()
+                .any(|u| u == "https://meta.fabricmc.net/v2/versions/loader/1.21.4"),
+            "repairing a Ready Auto profile must not re-query the loader catalog"
+        );
+
+        // Full verification (verify_all = true) also preserves 0.16.9 while catalog offers 0.16.10,
+        // and works offline even with evicted catalog cache when the local profile JSON is intact.
+        let calls_before = env.fetcher.calls().len();
+        let verified = prepare_instance(&env.ctx(true), &id).await.unwrap();
+        assert_eq!(verified.setup, inst.setup);
+        assert!(
+            !env.fetcher.calls()[calls_before..]
+                .iter()
+                .any(|u| u.ends_with("/v2/versions/loader/1.21.4") || u.contains("0.16.10")),
+            "verify_all must keep the installed loader version instead of upgrading to 0.16.10"
+        );
+
+        env.fetcher.fail_all();
+        for entry in fs::read_dir(&catalogs_dir).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().starts_with("loader-") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let offline_verified = prepare_instance(&env.ctx(true), &id).await.unwrap();
+        assert_eq!(offline_verified.setup, inst.setup);
+
+        // 2. Installer loader (Forge): Auto initially pins 54.1.14; later catalog update to 54.1.18
+        //    must not upgrade or re-run installer during repair or verify_all.
+        let f_env = setup_vanilla_env("1.21.4", Vec::new());
+        let installer_bytes = b"forge-installer-54.1.14".to_vec();
+        let installer_url = "https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-installer.jar";
+        f_env.streamer.add(installer_url, &installer_bytes);
+        f_env.fetcher.ok(
+            &format!("{installer_url}.sha256"),
+            sha256_hex_bytes(&installer_bytes),
+        );
+        let uni_bytes = b"forge-universal-54.1.14".to_vec();
+        let uni_rel = "net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-universal.jar";
+        f_env.streamer.add(
+            &format!("https://maven.minecraftforge.net/{uni_rel}"),
+            &uni_bytes,
+        );
+        f_env.fetcher.ok(
+            "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+            json!({"promos": {"1.21.4-recommended": "54.1.14", "1.21.4-latest": "54.1.14"}})
+                .to_string(),
+        );
+        let installer_runs = Arc::new(Mutex::new(0usize));
+        let runs_ctr = installer_runs.clone();
+        let uni_copy = uni_bytes.clone();
+        *f_env.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+            *runs_ctr.lock().unwrap() += 1;
+            let mc_dir = PathBuf::from(cmd.args.last().unwrap());
+            let vdir = mc_dir.join("versions/1.21.4-forge-54.1.14");
+            fs::create_dir_all(&vdir)?;
+            fs::write(
+                vdir.join("1.21.4-forge-54.1.14.json"),
+                json!({
+                    "id": "1.21.4-forge-54.1.14",
+                    "inheritsFrom": "1.21.4",
+                    "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                    "libraries": [{
+                        "name": "net.minecraftforge:forge:1.21.4-54.1.14:universal",
+                        "downloads": {"artifact": {
+                            "path": uni_rel,
+                            "url": format!("https://maven.minecraftforge.net/{uni_rel}"),
+                            "sha1": sha1_hex(&uni_copy),
+                            "size": uni_copy.len()
+                        }}
+                    }]
+                })
+                .to_string(),
+            )?;
+            Ok(RunResult {
+                success: true,
+                tail: String::new(),
+            })
+        }));
+
+        let f_store = InstanceStore::new(&f_env.root);
+        let f_id = f_store
+            .create(
+                NewInstance::modded(
+                    "ForgeAuto",
+                    "1.21.4",
+                    LoaderKind::Forge,
+                    LoaderVersionSpec::Auto,
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap()
+            .id;
+        let f_inst = prepare_instance(&f_env.ctx(false), &f_id).await.unwrap();
+        assert_eq!(*installer_runs.lock().unwrap(), 1);
+        assert_eq!(
+            f_inst.setup,
+            SetupState::Ready {
+                version_id: VersionId::new("1.21.4-forge-54.1.14").unwrap(),
+                loader_version: Some(LoaderVersion::new("54.1.14").unwrap()),
+            }
+        );
+
+        // Catalog updates to 54.1.18 and cache is wiped; corrupt universal jar to force repair.
+        f_env.fetcher.ok(
+            "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+            json!({"promos": {"1.21.4-recommended": "54.1.18", "1.21.4-latest": "54.1.18"}})
+                .to_string(),
+        );
+        let _ = fs::remove_dir_all(f_env.root.cache_dir().join("catalogs"));
+        let uni_path = f_env.root.libraries_dir().join(uni_rel);
+        fs::write(&uni_path, b"bad").unwrap();
+
+        let f_repaired = prepare_instance(&f_env.ctx(false), &f_id).await.unwrap();
+        assert_eq!(f_repaired.setup, f_inst.setup);
+        assert_eq!(fs::read(&uni_path).unwrap(), uni_bytes);
+        assert_eq!(
+            *installer_runs.lock().unwrap(),
+            1,
+            "repairing Forge Auto must reuse 54.1.14 without running installer for 54.1.18"
+        );
+
+        let f_verified = prepare_instance(&f_env.ctx(true), &f_id).await.unwrap();
+        assert_eq!(f_verified.setup, f_inst.setup);
+        assert_eq!(*installer_runs.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn find_reusable_installer_loader_checks_kind_mc_and_loader_version() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+
+        let mc_21 = McVersion::new("1.21.4").unwrap();
+        let mc_20 = McVersion::new("1.20.1").unwrap();
+        let lv_14 = LoaderVersion::new("54.1.14").unwrap();
+        let lv_18 = LoaderVersion::new("54.1.18").unwrap();
+        let ready_14 = VersionId::new("1.21.4-forge-54.1.14").unwrap();
+
+        let vdir = root
+            .minecraft_dir()
+            .join("versions")
+            .join(ready_14.as_str());
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(
+            vdir.join(format!("{ready_14}.json")),
+            json!({
+                "id": ready_14.as_str(),
+                "inheritsFrom": "1.21.4",
+                "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "libraries": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Exact match with matching current_ready_id succeeds.
+        let found = find_reusable_installer_loader(
+            &root,
+            LoaderKind::Forge,
+            &mc_21,
+            &lv_14,
+            Some(&ready_14),
+        );
+        assert_eq!(found.map(|(id, _)| id), Some(ready_14.clone()));
+
+        // Newer loader version requested: must NEVER return the old 54.1.14 current_ready_id!
+        assert!(
+            find_reusable_installer_loader(
+                &root,
+                LoaderKind::Forge,
+                &mc_21,
+                &lv_18,
+                Some(&ready_14),
+            )
+            .is_none(),
+            "old Forge ready id must not be reused when a newer loader version is requested"
+        );
+
+        // Wrong LoaderKind (NeoForge): must NOT reuse Forge's current_ready_id.
+        assert!(
+            find_reusable_installer_loader(
+                &root,
+                LoaderKind::NeoForge,
+                &mc_21,
+                &lv_14,
+                Some(&ready_14),
+            )
+            .is_none(),
+            "NeoForge must never reuse a Forge ready id"
+        );
+
+        // Wrong Minecraft version: must NOT reuse 1.21.4 ready id for 1.20.1.
+        assert!(
+            find_reusable_installer_loader(
+                &root,
+                LoaderKind::Forge,
+                &mc_20,
+                &lv_14,
+                Some(&ready_14),
+            )
+            .is_none(),
+            "Forge must never reuse a ready id from another Minecraft version"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_and_reused_installer_progress_never_double_counts_or_overwrites_loader_stage()
+    {
+        use crate::instances::{InstanceStore, NewInstance};
+        use crate::prepare::prepare_instance;
+
+        // 1. Fabric (PlannedLoader::Profile): bytes_done == bytes_total and no premature Verifying.
+        let env = setup_vanilla_env("1.21.4", Vec::new());
+        let fab_jar = vec![0xABu8; 2500];
+        let fab_rel = "net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar";
+        env.streamer
+            .add(&format!("https://maven.fabricmc.net/{fab_rel}"), &fab_jar);
+        env.fetcher.ok(
+            "https://meta.fabricmc.net/v2/versions/loader/1.21.4/0.16.9/profile/json",
+            json!({
+                "id": "fabric-loader-0.16.9-1.21.4",
+                "inheritsFrom": "1.21.4",
+                "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{
+                    "name": "net.fabricmc:fabric-loader:0.16.9",
+                    "url": "https://maven.fabricmc.net/",
+                    "sha1": sha1_hex(&fab_jar),
+                    "size": fab_jar.len()
+                }]
+            })
+            .to_string(),
+        );
+        let id = InstanceStore::new(&env.root)
+            .create(
+                NewInstance::modded(
+                    "FabProgress",
+                    "1.21.4",
+                    LoaderKind::Fabric,
+                    LoaderVersionSpec::Pinned {
+                        version: LoaderVersion::new("0.16.9").unwrap(),
+                    },
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap()
+            .id;
+        prepare_instance(&env.ctx(false), &id).await.unwrap();
+        let snap = env.tracker.progress.snapshot();
+        assert_eq!(
+            snap.bytes_done, snap.bytes_total,
+            "Profile loader library bytes must not be double-counted"
+        );
+        {
+            let events = env.events.lock().unwrap();
+            assert_eq!(events.last().unwrap().overall, Some(1.0));
+            let loader_idx = events
+                .iter()
+                .position(|e| e.stage == Stage::Loader)
+                .unwrap();
+            let natives_idx = events
+                .iter()
+                .position(|e| e.stage == Stage::Natives)
+                .unwrap();
+            assert!(
+                !events[loader_idx..natives_idx]
+                    .iter()
+                    .any(|e| e.stage == Stage::Verifying),
+                "ensure_libraries must not overwrite Stage::Loader with Stage::Verifying"
+            );
+        }
+
+        // 2. ReusedInstaller (Forge): install once, then prepare second instance with fresh tracker.
+        let f_env = setup_vanilla_env("1.21.4", Vec::new());
+        let inst_jar = b"forge-inst".to_vec();
+        let inst_url = "https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-installer.jar";
+        f_env.streamer.add(inst_url, &inst_jar);
+        f_env
+            .fetcher
+            .ok(&format!("{inst_url}.sha256"), sha256_hex_bytes(&inst_jar));
+        let uni_jar = vec![0xCDu8; 1800];
+        let uni_rel = "net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-universal.jar";
+        f_env.streamer.add(
+            &format!("https://maven.minecraftforge.net/{uni_rel}"),
+            &uni_jar,
+        );
+        let uni_copy = uni_jar.clone();
+        *f_env.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+            let mc_dir = PathBuf::from(cmd.args.last().unwrap());
+            let vdir = mc_dir.join("versions/1.21.4-forge-54.1.14");
+            fs::create_dir_all(&vdir)?;
+            fs::write(
+                vdir.join("1.21.4-forge-54.1.14.json"),
+                json!({
+                    "id": "1.21.4-forge-54.1.14",
+                    "inheritsFrom": "1.21.4",
+                    "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                    "libraries": [{
+                        "name": "net.minecraftforge:forge:1.21.4-54.1.14:universal",
+                        "downloads": {"artifact": {
+                            "path": uni_rel,
+                            "url": format!("https://maven.minecraftforge.net/{uni_rel}"),
+                            "sha1": sha1_hex(&uni_copy),
+                            "size": uni_copy.len()
+                        }}
+                    }]
+                })
+                .to_string(),
+            )?;
+            Ok(RunResult {
+                success: true,
+                tail: String::new(),
+            })
+        }));
+        let store = InstanceStore::new(&f_env.root);
+        let first = store
+            .create(
+                NewInstance::modded(
+                    "Forge1",
+                    "1.21.4",
+                    LoaderKind::Forge,
+                    LoaderVersionSpec::Pinned {
+                        version: LoaderVersion::new("54.1.14").unwrap(),
+                    },
+                )
+                .unwrap(),
+                1,
+            )
+            .unwrap()
+            .id;
+        prepare_instance(&f_env.ctx(false), &first).await.unwrap();
+
+        let events2 = Arc::new(Mutex::new(Vec::new()));
+        let sink2 = events2.clone();
+        let tracker2 = Tracker::new(
+            &InstanceId::new("reuse").unwrap(),
+            Progress::new(),
+            Box::new(move |p| sink2.lock().unwrap().push(p)),
+        );
+        let second = store
+            .create(
+                NewInstance::modded(
+                    "Forge2",
+                    "1.21.4",
+                    LoaderKind::Forge,
+                    LoaderVersionSpec::Pinned {
+                        version: LoaderVersion::new("54.1.14").unwrap(),
+                    },
+                )
+                .unwrap(),
+                2,
+            )
+            .unwrap()
+            .id;
+        let ctx2 = Ctx {
+            root: &f_env.root,
+            meta: &f_env.fetcher,
+            loader_meta: &f_env.fetcher,
+            streamer: &f_env.streamer,
+            loader_streamer: &f_env.streamer,
+            runner: &f_env.runner,
+            sys: SystemEnv::from_process(),
+            concurrency: 4,
+            now: 1_000,
+            backoff: Duration::ZERO,
+            cancel: f_env.cancel.clone(),
+            tracker: &tracker2,
+            verify_all: false,
+            free_space: Arc::new(|_| None),
+        };
+        prepare_instance(&ctx2, &second).await.unwrap();
+        let snap2 = tracker2.progress.snapshot();
+        assert_eq!(
+            snap2.bytes_done, snap2.bytes_total,
+            "ReusedInstaller loader library bytes must not be double-counted"
+        );
+        let ev2 = events2.lock().unwrap();
+        assert_eq!(ev2.last().unwrap().overall, Some(1.0));
+        let l2 = ev2.iter().position(|e| e.stage == Stage::Loader).unwrap();
+        let n2 = ev2.iter().position(|e| e.stage == Stage::Natives).unwrap();
+        assert!(!ev2[l2..n2].iter().any(|e| e.stage == Stage::Verifying));
+    }
+
+    #[tokio::test]
+    async fn vanilla_coordinate_only_library_persists_sizes_and_passes_check_files() {
+        use crate::instances::{InstanceStore, NewInstance};
+        use crate::prepare::{check_installed, prepare_instance};
+
+        let coord_lib = b"coordinate-only-vanilla-lib".to_vec();
+        let coord_rel = "com/example/coordonly/1.0/coordonly-1.0.jar";
+        let coord_url = format!("https://libraries.minecraft.net/{coord_rel}");
+        let env = setup_vanilla_env(
+            "1.21.4",
+            vec![json!({
+                "name": "com.example:coordonly:1.0",
+                "url": "https://libraries.minecraft.net/"
+            })],
+        );
+        env.streamer.add(&coord_url, &coord_lib);
+        env.fetcher
+            .ok(&format!("{coord_url}.sha1"), sha1_hex(&coord_lib));
+
+        let id = InstanceStore::new(&env.root)
+            .create(NewInstance::vanilla("VanillaCoord", "1.21.4").unwrap(), 1)
+            .unwrap()
+            .id;
+        let inst = prepare_instance(&env.ctx(false), &id).await.unwrap();
+        assert!(inst.is_ready());
+        assert_eq!(
+            read_sizes(&env.root, "1.21.4").get(coord_rel),
+            Some(&(coord_lib.len() as u64))
+        );
+        assert!(check_installed(&env.root, &inst).is_ok());
+
+        // Truncating the jar is caught offline via <mc>.sizes.json and repaired via sidecar.
+        let lib_file = env.root.libraries_dir().join(coord_rel);
+        fs::write(&lib_file, b"short").unwrap();
+        assert!(check_installed(&env.root, &inst).is_err());
+        prepare_instance(&env.ctx(false), &id).await.unwrap();
+        assert_eq!(fs::read(&lib_file).unwrap(), coord_lib);
+    }
+
+    #[cfg(windows)]
+    fn create_test_junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_junction_checks_reject_links_in_version_json_unhashed_libs_and_stage() {
+        use crate::instances::{InstanceStore, NewInstance};
+        use crate::mc_meta::{Artifact, Library, Role};
+        use crate::portable::RelPath;
+        use crate::prepare::{check_files, jobs_for_libraries, prepare_instance};
+
+        // 1. Junction at minecraft/versions/<mc> prevents ensure_version_json from reading/writing outside root.
+        let env = setup_vanilla_env("1.21.4", Vec::new());
+        let outside = env._dir.path().join("outside-vers");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("1.21.4.json"), b"{}").unwrap();
+        let versions_dir = env.root.minecraft_dir().join("versions");
+        fs::create_dir_all(&versions_dir).unwrap();
+        create_test_junction(&versions_dir.join("1.21.4"), &outside);
+
+        let id = InstanceStore::new(&env.root)
+            .create(NewInstance::vanilla("LinkVer", "1.21.4").unwrap(), 1)
+            .unwrap()
+            .id;
+        assert!(matches!(
+            prepare_instance(&env.ctx(false), &id).await,
+            Err(PrepareError::Storage(_))
+        ));
+
+        // 2. Junction on an ancestor directory in libraries/ is rejected by both jobs_for_libraries
+        //    unhashed reuse and check_files.
+        let env2 = setup_vanilla_env("1.21.4", Vec::new());
+        let outside_lib = env2._dir.path().join("outside-lib");
+        fs::create_dir_all(outside_lib.join("1.0")).unwrap();
+        fs::write(outside_lib.join("1.0").join("u-1.0.jar"), b"outside").unwrap();
+        let lib_group = env2.root.libraries_dir().join("com").join("example");
+        fs::create_dir_all(&lib_group).unwrap();
+        create_test_junction(&lib_group.join("u"), &outside_lib);
+
+        let lib = Library {
+            name: "com.example:u:1.0".into(),
+            artifact: Artifact {
+                path: RelPath::new("com/example/u/1.0/u-1.0.jar").unwrap(),
+                url: Some(
+                    url::Url::parse("https://libraries.minecraft.net/com/example/u/1.0/u-1.0.jar")
+                        .unwrap(),
+                ),
+                expected: None,
+                size: None,
+            },
+            role: Role::Classpath,
+        };
+        let recorded =
+            std::collections::HashMap::from([("com/example/u/1.0/u-1.0.jar".to_owned(), 7u64)]);
+        assert!(matches!(
+            jobs_for_libraries(&env2.ctx(false), &[&lib], &recorded).await,
+            Err(PrepareError::Storage(_))
+        ));
+        let v_inst = InstanceStore::new(&env2.root)
+            .create(NewInstance::vanilla("LinkCheck", "1.21.4").unwrap(), 1)
+            .unwrap();
+        let v2_dir = env2.root.minecraft_dir().join("versions").join("1.21.4");
+        fs::create_dir_all(&v2_dir).unwrap();
+        let client_bytes = b"vanilla-client".to_vec();
+        fs::write(v2_dir.join("1.21.4.jar"), &client_bytes).unwrap();
+        fs::write(
+            v2_dir.join("1.21.4.json"),
+            json!({
+                "id": "1.21.4",
+                "type": "release",
+                "mainClass": "net.minecraft.client.main.Main",
+                "downloads": {"client": {
+                    "sha1": sha1_hex(&client_bytes),
+                    "size": client_bytes.len(),
+                    "url": "https://piston-data.mojang.com/v1/objects/x/client.jar"
+                }},
+                "libraries": [{
+                    "name": "com.example:u:1.0",
+                    "url": "https://libraries.minecraft.net/"
+                }],
+                "arguments": {"game": ["--version", "1.21.4"], "jvm": []}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            check_files(&env2.root, &v_inst, None),
+            Err("the library com.example:u:1.0".to_owned())
+        );
+
+        // 3. Installer creating a junction inside stage/versions/ is rejected before reading JSON.
+        let env3 = setup_vanilla_env("1.21.4", Vec::new());
+        let v3 = env3.root.minecraft_dir().join("versions").join("1.21.4");
+        fs::create_dir_all(&v3).unwrap();
+        fs::write(v3.join("1.21.4.jar"), b"client").unwrap();
+        fs::write(v3.join("1.21.4.json"), b"{}").unwrap();
+
+        let outside_stage = env3._dir.path().join("outside-stage");
+        fs::create_dir_all(&outside_stage).unwrap();
+        fs::write(
+            outside_stage.join("1.21.4-forge-54.1.14.json"),
+            json!({
+                "id": "1.21.4-forge-54.1.14",
+                "inheritsFrom": "1.21.4",
+                "libraries": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let java_home = env3.root.java_runtimes_dir().join("jre-test");
+        fs::create_dir_all(java_home.join("bin")).unwrap();
+        let java_exe = java_home.join("bin").join("java.exe");
+        fs::write(&java_exe, b"MZ").unwrap();
+        let java = ManagedJava {
+            id: "jre-test".into(),
+            java_major: 21,
+            exe: java_exe,
+            home: java_home,
+        };
+        let inst_bytes = b"inst".to_vec();
+        let inst_url = "https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-installer.jar";
+        env3.streamer.add(inst_url, &inst_bytes);
+        env3.fetcher
+            .ok(&format!("{inst_url}.sha256"), sha256_hex_bytes(&inst_bytes));
+        let outside_for_runner = outside_stage.clone();
+        *env3.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+            let mc_dir = PathBuf::from(cmd.args.last().unwrap());
+            create_test_junction(
+                &mc_dir.join("versions").join("1.21.4-forge-54.1.14"),
+                &outside_for_runner,
+            );
+            Ok(RunResult {
+                success: true,
+                tail: String::new(),
+            })
+        }));
+        let err = install_with_installer(
+            &env3.ctx(false),
+            LoaderKind::Forge,
+            &McVersion::new("1.21.4").unwrap(),
+            &LoaderVersion::new("54.1.14").unwrap(),
+            &java,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PrepareError::Loader(_)), "{err:?}");
     }
 }

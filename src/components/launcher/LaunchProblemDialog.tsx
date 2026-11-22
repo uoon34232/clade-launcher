@@ -1,4 +1,11 @@
-import { useState, type ReactNode, type SubmitEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type SubmitEvent,
+} from "react";
 import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { hasMessage, tDynamic, useT, type MessageKey } from "@/lib/i18n";
 import { describeCode, describeError } from "@/lib/i18n/errors";
@@ -33,19 +40,39 @@ interface Props {
 export function LaunchProblemDialog(p: Props) {
   // Keep the last problem while the closing animation runs.
   const [shown, setShown] = useState(p.problem);
+  const [wasOpen, setWasOpen] = useState(p.problem !== null);
+  const [session, setSession] = useState(0);
+  const isOpen = p.problem !== null;
   if (p.problem && p.problem !== shown) setShown(p.problem);
   const problem = p.problem ?? shown;
-  // "Start fresh?" is showing: Escape and the backdrop leave it alone.
+  // "Start fresh?" or vault KDF is running: Escape and the backdrop leave it alone.
   const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    if (isOpen) setSession((s) => s + 1);
+    setAsking(false);
+    setBusy(false);
+  }
   return (
     <Modal
-      open={p.problem !== null}
+      open={isOpen}
       onOpenChange={(o) => !o && p.onClose()}
       size="sm"
       closeOnBackdrop={false}
-      locked={asking}
+      locked={asking || busy}
     >
-      {problem && <Body key={problemKey(problem)} {...p} problem={problem} onAsking={setAsking} />}
+      {problem && (
+        <Body
+          key={`${session}:${problemKey(problem)}`}
+          {...p}
+          isOpen={isOpen}
+          problem={problem}
+          busy={busy}
+          setBusy={setBusy}
+          onAsking={setAsking}
+        />
+      )}
     </Modal>
   );
 }
@@ -69,24 +96,54 @@ const problemKey = (x: Problem) =>
 
 function Body({
   problem,
+  isOpen,
   onClose,
   onRepair,
   onSignIn,
   onRetry,
   onOpenLogs,
   onVaultReset,
+  busy,
+  setBusy,
   onAsking,
   accountsClient,
-}: Props & { problem: Problem; onAsking: (asking: boolean) => void }) {
+}: Props & {
+  problem: Problem;
+  isOpen: boolean;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onAsking: (asking: boolean) => void;
+}) {
   const t = useT();
   const [pass, setPass] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const quiet = (label: string, fn: () => void) => (
+  const mountedRef = useRef(true);
+  const openRef = useRef(isOpen);
+  const passInputRef = useRef<HTMLInputElement>(null);
+  const pendingPassFocusRef = useRef(false);
+  useLayoutEffect(() => {
+    openRef.current = isOpen;
+  }, [isOpen]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      setBusy(false);
+    };
+  }, [setBusy]);
+  useEffect(() => {
+    if (!busy && error && pendingPassFocusRef.current) {
+      pendingPassFocusRef.current = false;
+      passInputRef.current?.focus();
+    }
+  }, [busy, error]);
+  const quiet = (label: string, fn: () => void, disabled = false) => (
     <button
       type="button"
+      disabled={disabled}
       className={BUTTON_QUIET}
       onClick={() => {
+        if (!openRef.current) return;
         playSound("click");
         fn();
       }}
@@ -100,6 +157,7 @@ function Body({
       autoFocus
       className={BUTTON_PRIMARY}
       onClick={() => {
+        if (!openRef.current) return;
         playSound("click");
         fn();
       }}
@@ -119,7 +177,11 @@ function Body({
           <button
             type="button"
             className={BUTTON_SOFT}
-            onClick={() => onOpenLogs(problem.profileId)}
+            onClick={() => {
+              if (!openRef.current) return;
+              playSound("click");
+              onOpenLogs(problem.profileId);
+            }}
           >
             {t("common.openLogs")}
           </button>
@@ -139,10 +201,14 @@ function Body({
       setError(null);
       accountsClient.unlockVault(pass).then(
         () => {
+          if (!mountedRef.current || !openRef.current) return;
           setPass("");
+          setBusy(false);
           onRetry(profileId); // unlocked: play again straight away
         },
         (err: unknown) => {
+          if (!mountedRef.current || !openRef.current) return;
+          pendingPassFocusRef.current = true;
           setBusy(false);
           setPass("");
           setError(describeError("vault", err));
@@ -160,24 +226,28 @@ function Body({
             {t("common.passphrase")}
           </label>
           <input
+            ref={passInputRef}
             id="unlock-pass"
             autoFocus
             type="password"
+            disabled={busy}
             autoComplete="off"
             spellCheck={false}
             value={pass}
             onChange={(e) => setPass(e.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? "unlock-pass-error" : undefined}
             className={FIELD}
           />
         </div>
         {error && (
-          <p role="alert" className="text-clay-deep text-[0.875rem]">
+          <p id="unlock-pass-error" role="alert" className="text-clay-deep text-[0.875rem]">
             {error}
           </p>
         )}
         {recoveryLink}
         <ModalFooter>
-          {quiet(t("common.cancel"), onClose)}
+          {quiet(t("common.cancel"), onClose, busy)}
           <button type="submit" disabled={busy || pass.length === 0} className={BUTTON_PRIMARY}>
             {busy ? t("common.working") : t("common.unlock")}
           </button>
@@ -188,6 +258,7 @@ function Body({
       <VaultRecovery
         api={accountsClient}
         layout="modal"
+        disabled={busy}
         onAsking={onAsking}
         onReset={(snap) => {
           setPass("");

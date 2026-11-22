@@ -41,12 +41,10 @@ Avoid:
 
 ## Palette
 
-The existing product direction is based on:
+Clade ships with dual warm editorial themes sharing a restrained clay accent and zero pure `#000`, neon gradients, or heavy glassmorphism:
 
-- warm ivory / cream surfaces;
-- graphite text and controls;
-- muted clay / terracotta accents;
-- low-saturation warm gradients.
+- **Light (Warm Paper)** — warm ivory / cream surfaces (`#F3EDE3` / `#F6F0E6`), graphite text (`#2B2622`) and muted ink (`#52493F`), terracotta clay accents (`#A3523D`), and soft warm ambient gradients.
+- **Dark (Graphite Paper)** — soft warm graphite paper surfaces (`#1C1917` / `#24201C`), warm cream paper ink (`#EFE8DD`) and parchment muted ink (`#B2A696`), terracotta clay (`#AB563F`) / soft ember accents (`#E2917A`), and low-saturation warm umber fields.
 
 Exact production colors should be taken from the launcher design tokens rather than duplicated independently in GitHub assets.
 
@@ -54,8 +52,12 @@ Exact production colors should be taken from the launcher design tokens rather t
 
 Current UI direction:
 
-- **Fraunces** for editorial display/headline moments;
-- **Instrument Sans** for controls, labels, navigation, and body text.
+- **English / Latin** (default):
+  - **Fraunces** (`@fontsource-variable/fraunces` / `"Fraunces Variable"`) for editorial display/headline moments;
+  - **Instrument Sans** (`@fontsource-variable/instrument-sans` / `"Instrument Sans Variable"`) for controls, labels, navigation, and body text.
+- **Russian / Cyrillic** (`html[lang="ru"]`):
+  - **Literata** (`@fontsource-variable/literata` / `"Literata Variable"`) for editorial display/heading moments;
+  - **Onest** (`@fontsource-variable/onest` / `"Onest Variable"`) for controls, labels, navigation, and body text.
 
 GitHub imagery should follow the same relationship where licensing and rendering context permit it.
 

@@ -18,6 +18,16 @@ const IN_MS = 230; // OUT + IN = 400 ms
 const REDUCED_FADE_MS = 100;
 const SAVE_DEBOUNCE_MS = 800;
 
+export type HeroEntrance = "rise" | "return" | "settled";
+
+const HERO_ENTRANCE_CLASS: Readonly<Record<HeroEntrance, string>> = {
+  rise: "hero-rise",
+  return: "hero-return",
+  settled: "",
+};
+
+const HERO_BASE_CLASS = "flex flex-col items-center px-8 text-center";
+
 interface HeroProps {
   /** Facts for future contextual messages (last instance, playtime, time since last session). */
   context?: PhraseContext;
@@ -25,9 +35,19 @@ interface HeroProps {
   lastPhraseId?: string | null;
   /** Total Minecraft playtime across all profiles, in seconds (the real backend value). */
   playtimeSeconds?: number;
+  /** Entrance animation mode: initial `"rise"`, post-embed `"return"`, or static `"settled"`. */
+  entrance?: HeroEntrance;
+  /** True right after an embedded game closes so the headline glides back swiftly instead of the startup entrance. */
+  returning?: boolean;
 }
 
-export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) {
+export function Hero({
+  context,
+  lastPhraseId,
+  playtimeSeconds = 0,
+  entrance,
+  returning = false,
+}: HeroProps) {
   const t = useT(); // re-renders on a language change; the phrase itself (its id) stays the same
   // A fresh phrase on every start, never the one shown last time.
   const [phrase, setPhrase] = useState<Phrase>(() =>
@@ -193,8 +213,10 @@ export function Hero({ context, lastPhraseId, playtimeSeconds = 0 }: HeroProps) 
     rotate();
   };
 
+  const entranceClass = HERO_ENTRANCE_CLASS[entrance ?? (returning ? "return" : "rise")];
+
   return (
-    <div className="hero-rise flex flex-col items-center px-8 text-center">
+    <div className={entranceClass ? `${entranceClass} ${HERO_BASE_CLASS}` : HERO_BASE_CLASS}>
       <h1
         className="text-graphite font-serif"
         style={{

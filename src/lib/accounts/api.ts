@@ -4,9 +4,7 @@
 //
 // Thin, validating wrapper over Rust commands. Outside the launcher nothing is invented.
 
-import { listen } from "@tauri-apps/api/event";
-import { call } from "@/lib/ipc";
-import { inTauri } from "@/lib/settings/uiSettings";
+import { call, listenEvent } from "@/lib/ipc";
 
 export interface SkinDimensions {
   width: number;
@@ -220,19 +218,15 @@ export const accountsApi = {
     await call("cancel_sign_in");
   },
   /** Progress of a running sign-in. Returns a function that stops listening. */
-  onSignInProgress: async (callback: (stage: SignInStage) => void): Promise<() => void> => {
-    if (!inTauri()) return () => undefined;
-    return listen<unknown>("sign-in-progress", (e) => {
-      if (typeof e.payload === "string" && STAGES.includes(e.payload))
-        callback(e.payload as SignInStage);
-    });
-  },
+  onSignInProgress: async (callback: (stage: SignInStage) => void): Promise<() => void> =>
+    listenEvent<unknown>("sign-in-progress", (payload) => {
+      if (typeof payload === "string" && STAGES.includes(payload)) callback(payload as SignInStage);
+    }),
 };
 
 /** The backend finished fetching avatars in the background: list the accounts again. */
 async function onChanged(callback: () => void): Promise<() => void> {
-  if (!inTauri()) return () => undefined;
-  return listen<unknown>("accounts-changed", () => callback());
+  return listenEvent<unknown>("accounts-changed", () => callback());
 }
 
 export const accountsEvents = { onChanged };

@@ -3,15 +3,16 @@
 //! Every path stored here is a `RelPath`: relative to the launcher root, validated on load.
 //! A settings file copied between PCs, or edited by hand, cannot point outside the folder.
 
-use std::fs;
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::instances::InstanceId;
-use crate::portable::fsutil::{atomic_write, quarantine_corrupt};
+use crate::portable::fsutil::{atomic_write, is_link, quarantine_corrupt, read_bounded};
 use crate::portable::root::LAYOUT_VERSION;
+
+const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 /// UI sound preferences ("Sound effects" switch and volume).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +32,8 @@ impl Default for SoundPrefs {
     }
 }
 
+/// How the interface chooses its colour palette: follow Windows, light paper, or graphite dark.
+pub const THEME_MODES: [&str; 3] = ["system", "light", "dark"];
 /// How the interface treats decorative motion: follow Windows, always reduce, or never reduce.
 pub const MOTION_MODES: [&str; 3] = ["system", "on", "off"];
 /// How the window material (the translucent "glass" treatment) is chosen: follow the Windows
@@ -57,6 +60,8 @@ pub struct UiPrefs {
     pub language: Option<String>,
     /// `simple` (minimal everyday controls) or `advanced` (full controls).
     pub ui_mode: String,
+    /// `system` (follow Windows), `light` or `dark`.
+    pub theme: String,
     /// `system` (follow Windows), `on` or `off`.
     pub reduced_motion: String,
     /// `system` (follow the Windows "Transparency effects" setting), `on` or `off`.
@@ -73,6 +78,7 @@ impl Default for UiPrefs {
             last_phrase: None,
             language: None,
             ui_mode: "simple".to_owned(),
+            theme: "system".to_owned(),
             reduced_motion: "system".to_owned(),
             transparency: "system".to_owned(),
             onboarding_done: false,
@@ -184,6 +190,9 @@ impl UiPrefs {
         if !UI_MODES.contains(&self.ui_mode.as_str()) {
             self.ui_mode = Self::default().ui_mode;
         }
+        if !THEME_MODES.contains(&self.theme.as_str()) {
+            self.theme = Self::default().theme;
+        }
         if !MOTION_MODES.contains(&self.reduced_motion.as_str()) {
             self.reduced_motion = Self::default().reduced_motion;
         }
@@ -232,11 +241,12 @@ pub enum SettingsError {
 
 impl LauncherSettings {
     /// Startup loading: like [`Self::load_or_default`], except that a file whose *contents* are
-    /// damaged (empty, truncated, malformed JSON, or values that cannot be read) never stops
-    /// Clade. The damaged file is moved aside (`settings.json.corrupt`, never overwriting an
-    /// earlier backup) and the defaults are used. A newer folder layout and real filesystem
-    /// failures (permissions, a locked or unreadable file) are still reported as errors, and so is
-    /// a failure to move the damaged file aside, because carrying on would overwrite it later.
+    /// damaged (empty, truncated, malformed JSON, exceeds the maximum size, or values that cannot
+    /// be read) never stops Clade. The damaged file is moved aside (`settings.json.corrupt`, never
+    /// overwriting an earlier backup) and the defaults are used. A newer folder layout and real
+    /// filesystem failures (permissions, a locked or unreadable file) are still reported as errors,
+    /// and so is a failure to move the damaged file aside, because carrying on would overwrite it
+    /// later.
     pub fn load_or_recover(path: &Path) -> Result<Self, SettingsError> {
         match Self::load_or_default(path) {
             Err(SettingsError::Invalid(e)) => {
@@ -248,6 +258,15 @@ impl LauncherSettings {
                     kind = ?e.classify(),
                     backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
                     "settings.json was damaged; it was set aside and the defaults are in use"
+                );
+                Ok(Self::default().sanitized())
+            }
+            Err(SettingsError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                let moved = quarantine_corrupt(path)?;
+                tracing::warn!(
+                    reason = %e,
+                    backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
+                    "settings.json exceeded maximum size; it was set aside and the defaults are in use"
                 );
                 Ok(Self::default().sanitized())
             }
@@ -348,6 +367,7 @@ impl LauncherSettings {
                 ),
                 language: leaf(&ui, "language", "ui.language", d.ui.language, &mut bad),
                 ui_mode: leaf(&ui, "ui_mode", "ui.ui_mode", d.ui.ui_mode, &mut bad),
+                theme: leaf(&ui, "theme", "ui.theme", d.ui.theme, &mut bad),
                 reduced_motion: leaf(
                     &ui,
                     "reduced_motion",
@@ -408,7 +428,17 @@ impl LauncherSettings {
     }
 
     pub fn load_or_default(path: &Path) -> Result<Self, SettingsError> {
-        let s: Self = match fs::read(path) {
+        match is_link(path) {
+            Ok(true) => {
+                return Err(io::Error::other("refusing to read settings through a link").into());
+            }
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self::default().sanitized());
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let s: Self = match read_bounded(path, MAX_SETTINGS_BYTES) {
             Ok(b) => {
                 // Syntax first, so a file from a newer Clade whose shape this build cannot read is
                 // reported as "too new" and not mistaken for damage.
@@ -485,6 +515,15 @@ impl LauncherSettings {
             return false;
         }
         self.ui.ui_mode = mode.to_owned();
+        true
+    }
+
+    /// Records the colour theme choice (`system`, `light` or `dark`).
+    pub fn set_theme(&mut self, mode: &str) -> bool {
+        if !THEME_MODES.contains(&mode) {
+            return false;
+        }
+        self.ui.theme = mode.to_owned();
         true
     }
 
@@ -572,6 +611,8 @@ impl LauncherSettings {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -1088,6 +1129,7 @@ mod tests {
                 "sound": { "enabled": false, "volume": 0.25 },
                 "last_phrase": "take-your-time",
                 "language": "ru",
+                "theme": "dark",
                 "reduced_motion": "on",
                 "transparency": "off",
                 "onboarding_done": true
@@ -1128,6 +1170,7 @@ mod tests {
         assert!(!s.ui.sound.enabled && (s.ui.sound.volume - 0.25).abs() < f32::EPSILON);
         assert_eq!(s.ui.last_phrase.as_deref(), Some("take-your-time"));
         assert_eq!(s.ui.language.as_deref(), Some("ru"));
+        assert_eq!(s.ui.theme, "dark");
         assert_eq!(s.ui.reduced_motion, "on");
         assert_eq!(s.ui.transparency, "off");
         assert!(s.ui.onboarding_done);
@@ -1160,6 +1203,9 @@ mod tests {
         if keep("ui.language") {
             assert_eq!(s.ui.language.as_deref(), Some("ru"));
         }
+        if keep("ui.theme") {
+            assert_eq!(s.ui.theme, "dark");
+        }
         if keep("ui.reduced_motion") {
             assert_eq!(s.ui.reduced_motion, "on");
         }
@@ -1185,6 +1231,8 @@ mod tests {
         // (path, bad value, what it must become, or None when only "siblings kept" is checked)
         use serde_json::json;
         let cases = [
+            ("ui.theme", json!("midnight"), "ui.theme"),
+            ("ui.theme", json!(42), "ui.theme"),
             ("ui.reduced_motion", json!("sometimes"), "ui.reduced_motion"),
             ("ui.reduced_motion", json!(7), "ui.reduced_motion"),
             ("ui.transparency", json!("glassy"), "ui.transparency"),
@@ -1222,6 +1270,7 @@ mod tests {
             assert_siblings_kept(&s, name);
             // and the broken value itself ended up somewhere safe
             match name {
+                "ui.theme" => assert_eq!(s.ui.theme, "system", "{bad}"),
                 "ui.reduced_motion" => assert_eq!(s.ui.reduced_motion, "system", "{bad}"),
                 "ui.transparency" => assert_eq!(s.ui.transparency, "system", "{bad}"),
                 "behavior.on_launch" => assert_eq!(s.behavior.on_launch, "embed", "{bad}"),
@@ -1319,5 +1368,78 @@ mod tests {
         let (_d, salvaged) = load_json(&doc);
         assert_eq!(salvaged.ui.ui_mode, "simple");
         assert_eq!(salvaged.ui.language.as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn theme_defaults_to_system_switches_and_sanitizes_unknown_values() {
+        let mut s = LauncherSettings::default();
+        assert_eq!(s.ui.theme, "system");
+        assert!(s.set_theme("dark"));
+        assert_eq!(s.ui.theme, "dark");
+        assert!(s.set_theme("light"));
+        assert_eq!(s.ui.theme, "light");
+        assert!(!s.set_theme("neon"));
+        assert_eq!(s.ui.theme, "light");
+        assert!(s.reset_user_prefs());
+        assert_eq!(s.ui.theme, "system");
+
+        let mut doc = full_valid();
+        doc["ui"]["theme"] = serde_json::json!("sepia");
+        let (_d, salvaged) = load_json(&doc);
+        assert_eq!(salvaged.ui.theme, "system");
+        assert_eq!(salvaged.ui.language.as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn oversized_settings_file_is_rejected_by_load_or_default_and_quarantined_by_recover() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        let padding = " ".repeat((MAX_SETTINGS_BYTES as usize) + 128);
+        let bytes =
+            format!(r#"{{"layout_version":1,{padding}"ui":{{"language":"ru"}}}}"#).into_bytes();
+        fs::write(&p, &bytes).unwrap();
+
+        let err = LauncherSettings::load_or_default(&p).unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsError::Io(ref io_err) if io_err.kind() == io::ErrorKind::InvalidData
+        ));
+
+        let recovered = LauncherSettings::load_or_recover(&p).unwrap();
+        assert_eq!(recovered, LauncherSettings::default());
+        assert!(!p.exists(), "oversized file was quarantined");
+        assert_eq!(
+            fs::read(d.path().join("settings.json.corrupt")).unwrap(),
+            bytes,
+            "oversized file was preserved untouched"
+        );
+    }
+
+    #[test]
+    fn link_settings_file_is_rejected_without_quarantine() {
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("outside-settings.json");
+        fs::write(&outside_file, r#"{"ui":{"language":"ru"}}"#).unwrap();
+
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        if let Err(e) = std::os::windows::fs::symlink_file(&outside_file, &p) {
+            if e.raw_os_error() == Some(1314) {
+                // Unprivileged Windows account without Developer Mode cannot create symlinks.
+                return;
+            }
+            panic!("failed to create test symlink: {e}");
+        }
+
+        assert!(matches!(
+            LauncherSettings::load_or_default(&p),
+            Err(SettingsError::Io(_))
+        ));
+        assert!(matches!(
+            LauncherSettings::load_or_recover(&p),
+            Err(SettingsError::Io(_))
+        ));
+        assert!(is_link(&p).unwrap(), "link was left untouched");
+        assert!(!d.path().join("settings.json.corrupt").exists());
     }
 }

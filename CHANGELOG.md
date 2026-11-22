@@ -2,15 +2,49 @@
 
 All notable changes to Clade Launcher will be documented in this file.
 
-The project is currently pre-release. The first public preview is 0.1.0; its entry below is the text of its release notes.
+The project is currently in pre-release (`0.2.0` follows the initial `0.1.0` preview); each version section below serves as its release notes.
 
 ## Release policy
 
 Clade follows semantic versioning where practical.
 
-The first public build is planned as a preview release rather than `1.0.0`. Breaking changes may occur during the preview period.
+The initial `0.x` releases are preview builds rather than `1.0.0`. Breaking changes may occur during the preview period.
 
 ## [Unreleased]
+
+## [0.2.0]
+
+Before you run it: the Preview targets **Windows 10 (64-bit) and Windows 11 (64-bit) (`x64`)**. Clade is not code-signed, so Windows SmartScreen may warn about `Clade.exe`, and Windows 11 Smart App Control in enforcement mode may block it completely, with no "Run anyway" option. Please do not disable or bypass Windows security features to run Clade. Report bugs in [GitHub Issues](https://github.com/uoon34232/clade-launcher/issues/new/choose) and never post passwords, sign-in codes, tokens or vault files.
+
+### Added
+
+- Warm editorial Dark theme (**"Graphite Paper"**) with a `Theme` selector in Settings (`Follow Windows`, `Light`, `Dark`), synchronized Windows 11 dark Mica backdrop (`DWMWA_USE_IMMERSIVE_DARK_MODE`), opaque dark paper fallback (`#1C1917`), and a theme-matched reveal veil for framed game mode.
+- Verified in-app portable self-updater in Settings (`Check for updates` -> `Update` -> `Restart to update`): downloads `Clade-Launcher-Portable.zip` and `.sha256` exclusively from the isolated `UPDATE_DOWNLOAD_HOSTS` allowlist, checks free disk space, verifies both `.sha256` and any GitHub API digest via streamed SHA-256 hashing, unpacks through `safe_archive` against a fail-closed portable package allowlist, performs lock-aware staged replacement (`--apply-update`) with automatic rollback on error, and cleans up old staged/backup directories at startup.
+- Bundled Cyrillic variable fonts (`Literata` and `Onest`) alongside `Fraunces` and `Instrument Sans` so Russian typography renders consistently offline.
+- Animated framed game launch, native window reveal, and return-to-launcher close transitions.
+
+### Changed
+
+- Overhauled framed game mode (**Inside Clade**) to host Minecraft inside an owned borderless `WS_POPUP` surface instead of `WS_CHILD` reparenting, adding STA subclass safety, cursor-capture compatibility (`Back to Game` and raw mouse focus), `DwmFlush`-paced transitions, and exact stage-resolution matching on launch.
+- Added frosted backdrop blur treatment for translucent glass modal dialogs and overlay backdrops when transparency effects are enabled.
+- Polished English and Russian copy and compact `960x600` dialog layouts, including text wrapping/truncation fixes and a pinned `+ Add account` footer in `AccountMenu`.
+- Expanded forbidden JVM argument exclusions to block additional heap, archive, flight-recorder, and diagnostic output flags (`-XX:Flags`, `-XX:MaxHeapSize`, `-XX:InitialHeapSize`, `-XX:StartFlightRecording`, `-XX:FlightRecorderOptions`, `-XX:DumpLoadedClassList`, `-XX:CompileCommandFile`, `-XX:SharedArchiveConfigFile`, `-XX:PerfDataSaveFile`, `-XX:ReplayDataFile`).
+
+### Fixed
+
+- Consolidated Windows appearance tracking onto a single permanent `glass-watch` WinRT `UISettings` MTA observer thread without calling `RoUninitialize`, eliminating WinRT activation factory unload access violations while tracking Light/Dark and transparency changes live.
+- Eliminated white flash frames and layering artifacts during framed game open, reveal veil handoff, and close transitions, and ensured launcher controls and focus recover cleanly when the game closes.
+- Fixed WCAG AA/AAA contrast and control theming across Light, Dark, Glass, and Windows Forced Colors modes, including dark-themed native range sliders and `Select` popovers, clear hover feedback pills on `Segmented` toggles and quiet/soft modal buttons in Light and Dark, and readable `Equipped` cape badges.
+- Improved keyboard accessibility and modal state safety: 2D arrow-key navigation in `AccountMenu`, accessible alert/form error links, focus recovery on dialog close, in-flight/double-submit guards across dialogs, and a CSS minification fix (`transform: none !important`) keeping `.settings-gear` stationary under Reduced Motion.
+- Hardened backend network, storage, auth, and lifecycle paths: propagated HTTP redirect policy rejection errors, switched encrypted vault `.bak` writes to atomic writes with link checks and error propagation on stale backup cleanup failures, left explicit AppContainer NULL DACLs untouched during Windows 10 WebView2 ACL setup, rejected non-origin-form OAuth loopback targets and dead IPv6 listener loops while moving browser launches to `spawn_blocking`, enforced `reject_links_between` checks when opening support folders, latched window-closing guards before game spawn, prioritized download cancellation during retries, aligned runtime preview version reporting (`CLADE_RELEASE_TAG` / `CARGO_PKG_VERSION`), and fixed UTF-8-safe diagnostics truncation.
+
+### Known limitations
+
+- 64-bit Windows 10 and Windows 11 (`x64`) only. On Windows 10, FAT32 and exFAT drives do not support persistent ACLs, so Clade cannot grant the bundled WebView2 runtime's AppContainer permissions on those drives and falls back to the PC's installed Evergreen WebView2 runtime; prefer NTFS if a clean Windows 10 PC may not have WebView2 installed.
+- Not code-signed. SmartScreen may warn, and Smart App Control in enforcement mode may block `Clade.exe` outright.
+- No background auto-update: checking for and installing updates runs strictly on demand in Settings.
+- Skin and cape changes have not yet been exercised against a live Minecraft account, so report anything odd.
+- Launching needs a network connection once the saved Minecraft sign-in has expired. There is no offline mode.
 
 ## [0.1.0]
 

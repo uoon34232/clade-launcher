@@ -33,8 +33,10 @@ param(
   [switch] $KeepFolder
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw "ZIP not found: $Zip" }
 $zipPath = (Resolve-Path -LiteralPath $Zip).Path
 $failures = New-Object System.Collections.Generic.List[string]
 function Check($ok, $what) { if ($ok) { Write-Host "  ok    $what" } else { Write-Host "  FAIL  $what"; $failures.Add($what) } }
@@ -43,8 +45,12 @@ Write-Host "Smoke test: $zipPath"
 
 # ---- the checksum file
 $sidecar = "$zipPath.sha256"
-$hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
-$expected = if (Test-Path -LiteralPath $sidecar) { ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLower() } else { '' }
+$hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = ''
+if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+  $rawSidecar = Get-Content -LiteralPath $sidecar -Raw
+  if ($rawSidecar) { $expected = ($rawSidecar.Trim() -split '\s+')[0].ToLowerInvariant() }
+}
 Check ($expected -eq $hash) 'the .sha256 file matches the ZIP'
 
 # ---- the allowlist
@@ -95,7 +101,8 @@ try {
   Check (-not (Test-Path -LiteralPath (Join-Path $dir 'clade-root'))) 'no debug-style clade-root folder (this is a release build)'
 
   $logFile = Join-Path $dir 'logs\clade.log'
-  $log = if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Raw } else { '' }
+  $log = if (Test-Path -LiteralPath $logFile -PathType Leaf) { Get-Content -LiteralPath $logFile -Raw } else { '' }
+  if ($null -eq $log) { $log = '' }
   Check ($log -match 'launcher starting') 'the log says the launcher started'
   if ($WithoutWebView2) { Check ($log -match 'webview=System') 'the log says the system WebView2 is used (development package)' }
   else { Check ($log -match 'webview=Bundled') 'the log says the BUNDLED WebView2 runtime is used' }

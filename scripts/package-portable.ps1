@@ -43,9 +43,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).ProviderPath
 $target = 'x86_64-pc-windows-msvc'
-$outDir = [System.IO.Path]::GetFullPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
+$outDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
 $rel = Join-Path $repo 'scripts\release'
 function Run-Node { & node @args; if ($LASTEXITCODE) { throw "node $($args -join ' ') failed" } }
 function ConvertTo-TomlString([string] $value) {
@@ -61,7 +61,7 @@ $version = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | Con
 # ---- 1b. the pinned WebView2 runtime is checked FIRST, so a missing pin or a wrong CAB fails in seconds, not after a build
 if (-not $WithoutWebView2) {
   Run-Node (Join-Path $rel 'webview2.mjs') status                  # says exactly what is not configured yet
-  $cab = (Resolve-Path -LiteralPath $WebView2Cab).Path
+  $cab = (Resolve-Path -LiteralPath $WebView2Cab).ProviderPath
   Run-Node (Join-Path $rel 'webview2.mjs') verify --cab $cab       # SHA-256 against the pin, before anything is extracted
 }
 
@@ -104,8 +104,10 @@ if (-not $SkipBuild) {
     [System.IO.File]::WriteAllText($cargoCfg, $tomlText, (New-Object System.Text.UTF8Encoding($false)))
 
     # The C code that is compiled into the binary (the TLS library) records its source paths too; MSVC's
-    # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered.
-    $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ + '' }) -join ' '
+    # /d1trimfile removes a folder prefix from them. Both the long and the 8.3 forms are covered; paths
+    # containing spaces are skipped here because cc-rs splits CFLAGS on whitespace, while their space-free
+    # 8.3 short paths remain in $forbid.
+    $env:CFLAGS = ($forbid | Where-Object { $_ -notmatch '[ "]' } | ForEach-Object { '/d1trimfile:' + $_ }) -join ' '
     if ($Tag) { $env:CLADE_RELEASE_TAG = $Tag } else { Remove-Item -LiteralPath Env:CLADE_RELEASE_TAG -ErrorAction SilentlyContinue }
     pnpm install --frozen-lockfile
     if ($LASTEXITCODE) { throw 'pnpm install failed' }

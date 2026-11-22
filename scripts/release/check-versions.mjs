@@ -129,7 +129,13 @@ export function checkVersions({ root, tag = null, requireChangelog = false }) {
 function main(argv) {
   const arg = (name) => {
     const i = argv.indexOf(name);
-    return i >= 0 ? argv[i + 1] : null;
+    if (i < 0) return null;
+    const val = argv[i + 1];
+    if (!val || val.startsWith("--")) {
+      console.error(`missing value for ${name}`);
+      process.exit(2);
+    }
+    return val;
   };
   const root = resolve(arg("--root") ?? ".");
   const tag = arg("--tag");

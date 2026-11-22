@@ -32,21 +32,35 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).ProviderPath
 $templateDir = Join-Path $repo 'qa\windows-sandbox'
 
 if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw "ZIP not found: $Zip" }
-$zipFull = (Resolve-Path -LiteralPath $Zip).Path
+$zipFull = (Resolve-Path -LiteralPath $Zip).ProviderPath
 if ((Split-Path -Leaf $zipFull) -notlike 'Clade-Launcher-Portable*.zip') { throw 'The file name must look like Clade-Launcher-Portable*.zip' }
 
 # The staging folder must be a fresh folder of its own, nowhere near real user data.
-$rootFull = [System.IO.Path]::GetFullPath($StagingRoot).TrimEnd('\')
-foreach ($forbidden in @($env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, (Join-Path $env:APPDATA '.minecraft'), [Environment]::GetFolderPath('MyDocuments'))) {
-  if ($forbidden -and ($rootFull -ieq $forbidden.TrimEnd('\'))) { throw "Refusing to stage directly in $forbidden. Use a temp folder." }
+if ([string]::IsNullOrWhiteSpace($StagingRoot)) { throw 'StagingRoot must not be empty.' }
+$rootFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StagingRoot)
+$rootFull = $rootFull.TrimEnd('\') + ($(if ($rootFull -match '^[A-Za-z]:$') { '\' } else { '' }))
+if (Test-Path -LiteralPath $rootFull -PathType Leaf) { throw "StagingRoot is a file, expected a directory: $rootFull" }
+$rootCompare = $rootFull.TrimEnd('\')
+$forbiddenExact = New-Object System.Collections.Generic.List[string]
+foreach ($candidate in @($env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, [Environment]::GetFolderPath('MyDocuments'))) {
+  if ($candidate) { [void]$forbiddenExact.Add($candidate) }
+}
+foreach ($forbidden in $forbiddenExact) {
+  if ($rootCompare -ieq $forbidden.TrimEnd('\')) { throw "Refusing to stage directly in $forbidden. Use a temp folder." }
+}
+if ($env:APPDATA) {
+  $mcClean = (Join-Path $env:APPDATA '.minecraft').TrimEnd('\')
+  if (($rootCompare -ieq $mcClean) -or $rootCompare.StartsWith($mcClean + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Refusing to stage inside .minecraft.'
+  }
 }
 $repoClean = $repo.TrimEnd('\')
 $repoPrefix = $repoClean + '\'
-if (($rootFull -ieq $repoClean) -or $rootFull.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to stage inside the repository.' }
+if (($rootCompare -ieq $repoClean) -or $rootCompare.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to stage inside the repository.' }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $staging = Join-Path $rootFull ('clade-qa-' + $stamp)
@@ -62,7 +76,7 @@ New-Item -ItemType Directory -Path $qaDir -Force | Out-Null
 New-Item -ItemType Directory -Path $results -Force | Out-Null
 Copy-Item -LiteralPath $zipFull -Destination $inDir
 $sum = $zipFull + '.sha256'
-if (Test-Path -LiteralPath $sum) { Copy-Item -LiteralPath $sum -Destination $inDir }
+if (Test-Path -LiteralPath $sum -PathType Leaf) { Copy-Item -LiteralPath $sum -Destination $inDir }
 else {
   $h = (Get-FileHash -LiteralPath $zipFull -Algorithm SHA256).Hash.ToLowerInvariant()
   Set-Content -LiteralPath (Join-Path $inDir ((Split-Path -Leaf $zipFull) + '.sha256')) -Value ('{0}  {1}' -f $h, (Split-Path -Leaf $zipFull)) -Encoding ASCII

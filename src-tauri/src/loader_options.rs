@@ -29,7 +29,9 @@ use crate::portable::fsutil::{atomic_write, read_bounded, remove_file_with_retry
 use crate::versions::{LoaderVersion, McVersion};
 
 const SCHEMA: u32 = 1;
-const MAX_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+/// Must exceed `loaders::MAX_CATALOG_BYTES` (8 MiB) so `CachedRaw` (catalog + JSON envelope)
+/// written online can always be read back offline.
+const MAX_CACHE_BYTES: u64 = (loaders::MAX_CATALOG_BYTES as u64) + 1024 * 1024;
 /// How many per-Minecraft-version loader lists to keep on disk.
 const KEEP_PER_MC_FILES: usize = 24;
 
@@ -94,12 +96,18 @@ fn read_raw(path: &Path) -> Option<CachedRaw> {
     (c.schema == SCHEMA).then_some(c)
 }
 
-/// Keeps only the newest `keep` files whose names start with `prefix`.
+/// Keeps only the newest `keep` completed `.json` cache files whose names start with `prefix`.
 fn prune(dir: &Path, prefix: &str, keep: usize) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix)
+                && name.ends_with(".json")
+                && e.file_type().is_ok_and(|t| t.is_file())
+        })
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.0));
@@ -536,5 +544,73 @@ mod tests {
         let frg = options_for(&f, &cache, LoaderKind::Forge, &mc("1.21.4"), 1).await;
         assert_eq!(fab.status, Status::Unavailable);
         assert_eq!(frg.status, Status::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn large_global_catalog_near_fetch_limit_is_still_readable_offline() {
+        let (_d, cache) = dir();
+        let f = FakeFetcher::new();
+        let prefix =
+            r#"{"promos":{"1.21.4-latest":"54.1.18","1.21.4-recommended":"54.1.14"},"padding":""#;
+        let suffix = r#""}"#;
+        let pad_len = loaders::MAX_CATALOG_BYTES - prefix.len() - suffix.len();
+        let large_forge = format!("{prefix}{}{suffix}", "a".repeat(pad_len));
+        assert_eq!(large_forge.len(), loaders::MAX_CATALOG_BYTES);
+
+        f.ok(
+            "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+            large_forge,
+        );
+        let online = options_for(&f, &cache, LoaderKind::Forge, &mc("1.21.4"), 1).await;
+        assert_eq!(online.status, Status::Ok);
+        assert_eq!(online.origin, Some(Origin::Network));
+        assert!(
+            fs::metadata(cache.join("loader-forge.json")).unwrap().len()
+                > loaders::MAX_CATALOG_BYTES as u64,
+            "CachedRaw envelope pushes the saved file past MAX_CATALOG_BYTES"
+        );
+
+        f.fail_all();
+        let offline = options_for(&f, &cache, LoaderKind::Forge, &mc("1.21.4"), 2).await;
+        assert_eq!(offline.status, Status::Ok);
+        assert_eq!(offline.origin, Some(Origin::CacheStale));
+        assert_eq!(offline.recommended.as_ref().unwrap().as_str(), "54.1.14");
+    }
+
+    #[test]
+    fn prune_ignores_tmp_staging_files_and_subdirectories() {
+        let (_d, cache) = dir();
+        fs::create_dir_all(&cache).unwrap();
+
+        for i in 0..KEEP_PER_MC_FILES {
+            fs::write(cache.join(format!("loader-fabric--1.{i}.0.json")), b"{}").unwrap();
+        }
+        let tmp_file = cache.join("loader-fabric--1.99.0.json.a1b2c3d4e5f6.tmp");
+        fs::write(&tmp_file, b"{}").unwrap();
+        let subdir = cache.join("loader-fabric--nested.json");
+        fs::create_dir(&subdir).unwrap();
+
+        prune(&cache, "loader-fabric--", KEEP_PER_MC_FILES);
+
+        assert!(
+            tmp_file.exists(),
+            "in-flight .tmp file must never be pruned"
+        );
+        assert!(subdir.is_dir(), "directory must never be pruned");
+        let json_count = fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("loader-fabric--")
+                    && n.ends_with(".json")
+                    && e.file_type().is_ok_and(|t| t.is_file())
+            })
+            .count();
+        assert_eq!(
+            json_count, KEEP_PER_MC_FILES,
+            ".tmp and directory must not evict completed .json cache files"
+        );
     }
 }

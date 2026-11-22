@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountsSnapshot, Appearance } from "@/lib/accounts/api";
+import { MAX_SKIN_BYTES, type AccountsSnapshot, type Appearance } from "@/lib/accounts/api";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
-import { READY_ACCOUNTS, readyAccountsClient, type appearanceStubs } from "@/test/testAccounts";
+import { READY_ACCOUNTS, readyAccountsClient } from "@/test/testAccounts";
 import { AccountAppearance } from "./AccountAppearance";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
 
 const CAPE = "11111111-2222-4333-8444-555555555555";
+const CAPE_2 = "22222222-3333-4444-8555-666666666666";
 const look: Appearance = {
   skinModel: "slim",
   capes: [{ id: CAPE, alias: "Migrator", active: false }],
@@ -35,7 +36,7 @@ function Harness(
 }
 
 function setup(
-  over: Partial<ReturnType<typeof appearanceStubs>> = {},
+  over: Partial<ReturnType<typeof readyAccountsClient>> = {},
   needsSignIn = false,
   onVaultReset?: (snapshot: AccountsSnapshot) => void,
 ) {
@@ -53,11 +54,13 @@ function setup(
   return { api, ...view };
 }
 
-const choose = (name = "skin.png") => {
+const choose = (name = "skin.png", bytes = 32) => {
   const input = document.querySelector<HTMLInputElement>('input[type="file"]');
   if (!input) throw new Error("no file input");
-  const file = new File([new Uint8Array(32)], name, { type: "image/png" });
-  Object.defineProperty(file, "arrayBuffer", { value: () => Promise.resolve(new ArrayBuffer(32)) });
+  const file = new File([new Uint8Array(bytes)], name, { type: "image/png" });
+  Object.defineProperty(file, "arrayBuffer", {
+    value: () => Promise.resolve(new ArrayBuffer(bytes)),
+  });
   fireEvent.change(input, { target: { files: [file] } });
 };
 
@@ -125,6 +128,110 @@ describe("account appearance", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Forgot passphrase?" }));
     fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
     await waitFor(() => expect(onVaultReset).toHaveBeenCalledWith(READY_ACCOUNTS));
+  });
+
+  it("rejects an oversized skin file without uploading and hides Try again", async () => {
+    const { api } = setup();
+    await screen.findByText("Migrator");
+    choose("huge.png", MAX_SKIN_BYTES + 1);
+    expect(api.setSkin).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toBe("Choose a 64×64 or 64×32 PNG skin.");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("shows a load error and reloads appearance when Try again is clicked", async () => {
+    const appearance = vi
+      .fn()
+      .mockRejectedValueOnce(new BackendError("offline", "offline"))
+      .mockResolvedValueOnce(look);
+    const { api } = setup({ appearance });
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Connect to the internet to change your Minecraft appearance.",
+    );
+    expect(screen.queryByLabelText("Passphrase")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText("Migrator");
+    expect(api.appearance).toHaveBeenCalledTimes(2);
+    expect(api.appearance).toHaveBeenCalledWith("acc");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("disables Unlock while the passphrase is empty and shows a vault error when unlocking fails", async () => {
+    const appearance = vi.fn(() => Promise.reject(new BackendError("locked", "vault_locked")));
+    const unlockVault = vi.fn(() => Promise.reject(new BackendError("bad", "passphrase_mismatch")));
+    const { api } = setup({ appearance, unlockVault });
+    const input = await screen.findByLabelText<HTMLInputElement>("Passphrase");
+    const unlock = screen.getByRole("button", { name: "Unlock" });
+    expect(unlock).toHaveProperty("disabled", true);
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+    expect(input.getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.submit(input.closest("form")!);
+    expect(api.unlockVault).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "wrong-pass" } });
+    expect(unlock).toHaveProperty("disabled", false);
+    fireEvent.click(unlock);
+
+    await waitFor(() => expect(api.unlockVault).toHaveBeenCalledWith("wrong-pass"));
+    const error = await screen.findByText("That passphrase doesn’t match.");
+    expect(error.getAttribute("role")).toBe("alert");
+    expect(error.id).toBe("appearance-unlock-error");
+    expect(input.value).toBe("");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe("appearance-unlock-error");
+    expect(unlock).toHaveProperty("disabled", true);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("unlocks a locked vault with the passphrase and reloads appearance", async () => {
+    const appearance = vi
+      .fn()
+      .mockRejectedValueOnce(new BackendError("locked", "vault_locked"))
+      .mockResolvedValueOnce(look);
+    const unlockVault = vi.fn(() => Promise.resolve());
+    const { api } = setup({ appearance, unlockVault });
+    const input = await screen.findByLabelText("Passphrase");
+    fireEvent.change(input, { target: { value: "correct-passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await waitFor(() => expect(api.unlockVault).toHaveBeenCalledWith("correct-passphrase"));
+    await screen.findByText("Migrator");
+    expect(api.appearance).toHaveBeenCalledTimes(2);
+    expect(screen.queryByLabelText("Passphrase")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows Equipped, labels unnamed capes, and hides an active cape via Hide cape", async () => {
+    const activeLook: Appearance = {
+      skinModel: "slim",
+      capes: [
+        { id: CAPE, alias: "Migrator", active: true },
+        { id: CAPE_2, alias: null, active: false },
+      ],
+    };
+    const hiddenLook: Appearance = {
+      skinModel: "slim",
+      capes: [
+        { id: CAPE, alias: "Migrator", active: false },
+        { id: CAPE_2, alias: null, active: false },
+      ],
+    };
+    const setCape = vi.fn(() => Promise.resolve(hiddenLook));
+    const { api } = setup({
+      appearance: vi.fn(() => Promise.resolve(activeLook)),
+      setCape,
+    });
+    await screen.findByText("Migrator");
+    expect(screen.getByText("Equipped")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Equip Migrator" })).toBeNull();
+    expect(screen.getByText("Cape 2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Equip Cape 2" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide cape" }));
+    await waitFor(() => expect(api.setCape).toHaveBeenCalledWith("acc", null));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Hide cape" })).toBeNull());
+    expect(screen.queryByText("Equipped")).toBeNull();
+    expect(screen.getByRole("button", { name: "Equip Migrator" })).toBeTruthy();
   });
 });
 
@@ -198,10 +305,49 @@ describe("restoring the default skin", () => {
     fireEvent.click(screen.getByRole("button", { name: "Вернуть стандартный" }));
     expect(
       screen.getByText(
-        "Вернуть стандартный скин? Текущий пользовательский скин будет удалён с этого аккаунта Minecraft.",
+        "Вернуть стандартный скин? Текущий скин будет удалён с этого аккаунта Minecraft.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Оставить текущий скин" })).toBeTruthy();
     expect(api.resetSkin).not.toHaveBeenCalled();
+  });
+
+  it("disables Forgot passphrase while inline unlock is in flight or when AccountAppearance is disabled", async () => {
+    let rejectUnlock!: (err: unknown) => void;
+    const appearance = vi.fn(() => Promise.reject(new BackendError("locked", "vault_locked")));
+    const unlockVault = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectUnlock = reject;
+        }),
+    );
+    const { api } = setup({ appearance, unlockVault });
+
+    const input = await screen.findByLabelText("Passphrase");
+    fireEvent.change(input, { target: { value: "attempt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+
+    const forgot = screen.getByRole<HTMLButtonElement>("button", { name: "Forgot passphrase?" });
+    expect(forgot.disabled).toBe(true);
+
+    await act(async () => {
+      rejectUnlock(new BackendError("bad", "passphrase_mismatch"));
+      await Promise.resolve();
+    });
+    expect(forgot.disabled).toBe(false);
+    expect(document.activeElement).toBe(input);
+
+    cleanup();
+    const disabledApi = {
+      ...api,
+      appearance: vi.fn(() => Promise.reject(new BackendError("locked", "vault_locked"))),
+    };
+    render(
+      <Harness account={{ id: "acc", needsSignIn: false }} skin cape api={disabledApi} disabled />,
+    );
+    expect(
+      (await screen.findByRole<HTMLButtonElement>("button", { name: "Forgot passphrase?" }))
+        .disabled,
+    ).toBe(true);
   });
 });

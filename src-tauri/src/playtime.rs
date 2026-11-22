@@ -37,14 +37,20 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::instances::InstanceId;
-use crate::portable::fsutil::{atomic_write, quarantine_corrupt, remove_file_with_retry};
+use crate::portable::fsutil::{
+    atomic_write, quarantine_corrupt, read_bounded, remove_file_with_retry,
+};
 use crate::portable::PortableRoot;
 
 static BANK_LOCK: Mutex<()> = Mutex::new(());
 
+const MAX_PLAYTIME_FILE_BYTES: u64 = 256 * 1024;
+const LEGACY_START_TOLERANCE_SECS: u64 = 10;
+const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+
 fn fallback_monotonic_ms() -> u64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Monotonic milliseconds excluding time spent in Windows sleep or hibernation
@@ -59,22 +65,91 @@ pub fn unbiased_ms() -> u64 {
     fallback_monotonic_ms()
 }
 
+fn creation_filetime_from_raw_handle(raw: std::os::windows::io::RawHandle) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    if raw.is_null() {
+        return None;
+    }
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut kernel = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut user = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    // SAFETY: `raw` is a non-null process handle with `PROCESS_QUERY_LIMITED_INFORMATION`
+    // (or broader access) and all `FILETIME` out-pointers are valid stack locals.
+    if unsafe { GetProcessTimes(raw.cast(), &mut creation, &mut exit, &mut kernel, &mut user) } == 0
+    {
+        return None;
+    }
+    Some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+/// Queries the OS kernel creation timestamp (64-bit Windows `FILETIME` in 100 ns ticks) for `pid`.
+/// Returns `None` for PID 0, the launcher's own PID, or processes that cannot be opened/queried.
+pub fn process_creation_filetime(pid: u32) -> Option<u64> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    // SAFETY: `OpenProcess` takes plain integer arguments and returns a null handle on error.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: `raw` is a fresh non-null process handle owned exclusively by `owned`.
+    let owned = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    creation_filetime_from_raw_handle(owned.as_raw_handle())
+}
+
+/// Queries the OS kernel creation timestamp (64-bit Windows `FILETIME` in 100 ns ticks) from an
+/// existing process handle (such as `Child::raw_handle()`).
+///
+/// # Safety
+/// `handle` must be either null or a valid Windows process handle with
+/// `PROCESS_QUERY_LIMITED_INFORMATION` (or broader) access for the duration of this call.
+pub unsafe fn process_creation_filetime_from_handle(
+    handle: std::os::windows::io::RawHandle,
+) -> Option<u64> {
+    creation_filetime_from_raw_handle(handle)
+}
+
 /// Handle to a verified OS process matching an [`ActiveSession`]'s PID and creation timestamp.
 pub(crate) struct LiveProcess(std::os::windows::io::OwnedHandle);
 
 impl LiveProcess {
     /// Opens `pid` with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE` and verifies its
-    /// OS creation timestamp is within 120 seconds of `started_at` (defending against PID reuse).
+    /// OS creation timestamp:
+    /// - when `expected_filetime` is `Some(ft)`, requires an exact 64-bit `FILETIME` match;
+    /// - when `None` (legacy journal), falls back to a tight wall-clock window around `started_at`.
+    ///
+    /// Rejects `pid == 0` and the launcher's own PID (`std::process::id()`).
     /// Returns `(handle, still_running)`.
-    pub(crate) fn open_matching(pid: u32, started_at: i64) -> Option<(Self, bool)> {
+    pub(crate) fn open_matching_with_filetime(
+        pid: u32,
+        started_at: i64,
+        expected_filetime: Option<u64>,
+    ) -> Option<(Self, bool)> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-        use windows_sys::Win32::Foundation::{FILETIME, WAIT_TIMEOUT};
         use windows_sys::Win32::System::Threading::{
-            GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
 
-        if pid == 0 {
+        if pid == 0 || pid == std::process::id() {
             return None;
         }
         // SAFETY: `OpenProcess` takes plain integer arguments and returns a null handle on error.
@@ -91,44 +166,61 @@ impl LiveProcess {
         // SAFETY: `raw` is a fresh non-null process handle owned exclusively by `owned`, which
         // calls `CloseHandle` automatically on every exit path.
         let owned = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
-        let h = owned.as_raw_handle().cast();
+        let actual_filetime = creation_filetime_from_raw_handle(owned.as_raw_handle())?;
 
-        let mut creation = FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        };
-        let mut exit = FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        };
-        let mut kernel = FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        };
-        let mut user = FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        };
-        // SAFETY: `h` is valid with `PROCESS_QUERY_LIMITED_INFORMATION` and all `FILETIME`
-        // out-pointers are valid stack locals.
-        if unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
-            return None;
+        match expected_filetime {
+            Some(expected) => {
+                if actual_filetime != expected {
+                    return None;
+                }
+            }
+            None => {
+                let created_secs =
+                    (actual_filetime / 10_000_000).checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)?;
+                let created_unix = i64::try_from(created_secs).ok()?;
+                if created_unix.abs_diff(started_at) > LEGACY_START_TOLERANCE_SECS {
+                    return None;
+                }
+            }
         }
-        const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
-        let ticks_100ns =
-            (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
-        let created_secs = (ticks_100ns / 10_000_000).checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)?;
-        let created_unix = i64::try_from(created_secs).ok()?;
-        if created_unix.abs_diff(started_at) > 120 {
-            return None;
-        }
-        // SAFETY: `h` is valid with `PROCESS_SYNCHRONIZE`; timeout 0 polls without blocking.
-        let alive = unsafe { WaitForSingleObject(h, 0) } == WAIT_TIMEOUT;
-        Some((Self(owned), alive))
+
+        let proc_handle = Self(owned);
+        let alive = proc_handle.is_alive();
+        Some((proc_handle, alive))
     }
 
+    /// Opens `pid` and verifies it against `started_at` using the legacy start-time tolerance.
+    #[allow(dead_code)]
+    pub(crate) fn open_matching(pid: u32, started_at: i64) -> Option<(Self, bool)> {
+        Self::open_matching_with_filetime(pid, started_at, None)
+    }
+
+    /// Opens and verifies the process recorded in `session` using its exact kernel `FILETIME`
+    /// when available, falling back to `started_at` for legacy journals.
+    pub(crate) fn open_matching_session(session: &ActiveSession) -> Option<(Self, bool)> {
+        Self::open_matching_with_filetime(
+            session.pid,
+            session.started_at,
+            session.process_creation_filetime,
+        )
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn open_alive(pid: u32, started_at: i64) -> Option<Self> {
         Self::open_matching(pid, started_at).and_then(|(p, alive)| alive.then_some(p))
+    }
+
+    pub(crate) fn open_alive_session(session: &ActiveSession) -> Option<Self> {
+        Self::open_matching_session(session).and_then(|(p, alive)| alive.then_some(p))
+    }
+
+    /// Non-blocking liveness poll on this already-verified process handle.
+    pub(crate) fn is_alive(&self) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: `self.0` owns a valid process handle with `PROCESS_SYNCHRONIZE`.
+        unsafe { WaitForSingleObject(self.0.as_raw_handle().cast(), 0) == WAIT_TIMEOUT }
     }
 
     /// Blocks until the process terminates and returns its raw OS exit code.
@@ -151,7 +243,7 @@ impl LiveProcess {
 /// True if the game process recorded in `s` is still running on this machine (matching both PID
 /// and creation time to guard against Windows PID reuse).
 pub fn is_session_process_alive(s: &ActiveSession) -> bool {
-    LiveProcess::open_alive(s.pid, s.started_at).is_some()
+    LiveProcess::open_alive_session(s).is_some()
 }
 
 const SCHEMA: u32 = 1;
@@ -212,6 +304,10 @@ pub struct ActiveSession {
     pub pid: u32,
     /// Unix seconds when the game started (display/diagnostics only).
     pub started_at: i64,
+    /// Kernel process creation timestamp (`FILETIME` in 100 ns ticks from `GetProcessTimes`), if
+    /// known. Used across restarts to verify the PID has not been reused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_creation_filetime: Option<u64>,
     /// Unix seconds of the last heartbeat (display/diagnostics only).
     pub last_heartbeat_at: i64,
     /// Milliseconds of confirmed play so far. This is the number that gets banked.
@@ -226,19 +322,19 @@ pub struct BankedSession {
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> io::Result<T> {
-    match fs::read(path) {
+    match read_bounded(path, MAX_PLAYTIME_FILE_BYTES) {
         Ok(b) => serde_json::from_slice(&b).map_err(io::Error::other),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
     }
 }
 
-/// Like [`read_json`], but a total file whose *contents* cannot be read (empty, truncated, garbage)
-/// does not stop banking: the damaged file is moved aside (`<name>.corrupt`, never overwriting an
-/// earlier backup, never deleted), a fresh default total starts, and the recovery is logged. A real
-/// I/O failure is still an error.
+/// Like [`read_json`], but a total file whose *contents* cannot be read (empty, truncated, garbage,
+/// or oversized) does not stop banking: the damaged file is moved aside (`<name>.corrupt`, never
+/// overwriting an earlier backup, never deleted), a fresh default total starts, and the recovery is
+/// logged. A real I/O failure is still an error.
 fn read_total_or_quarantine<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> io::Result<T> {
-    match fs::read(path) {
+    match read_bounded(path, MAX_PLAYTIME_FILE_BYTES) {
         Ok(b) => match serde_json::from_slice(&b) {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -252,8 +348,36 @@ fn read_total_or_quarantine<T: for<'de> Deserialize<'de> + Default>(path: &Path)
                 Ok(T::default())
             }
         },
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            let moved = quarantine_corrupt(path)?;
+            tracing::warn!(
+                error = %e,
+                backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
+                "a playtime file exceeded size bounds; it was set aside and a fresh total started"
+            );
+            Ok(T::default())
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
+    }
+}
+
+enum JournalRead {
+    Parsed(ActiveSession),
+    NotFound,
+    IoError(io::Error),
+    Corrupt,
+}
+
+fn read_journal_entry(path: &Path) -> JournalRead {
+    match read_bounded(path, MAX_PLAYTIME_FILE_BYTES) {
+        Ok(bytes) => match serde_json::from_slice::<ActiveSession>(&bytes) {
+            Ok(session) => JournalRead::Parsed(session),
+            Err(_) => JournalRead::Corrupt,
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => JournalRead::NotFound,
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => JournalRead::Corrupt,
+        Err(e) => JournalRead::IoError(e),
     }
 }
 
@@ -266,8 +390,9 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 
 fn remember(applied: &mut Vec<String>, id: &str) {
     applied.push(id.to_owned());
-    if applied.len() > APPLIED_MEMORY {
-        applied.remove(0);
+    let excess = applied.len().saturating_sub(APPLIED_MEMORY);
+    if excess > 0 {
+        applied.drain(..excess);
     }
 }
 
@@ -314,6 +439,20 @@ impl<'a> PlaytimeStore<'a> {
         now_unix: i64,
         now: Instant,
     ) -> io::Result<SessionTracker> {
+        let creation_filetime = process_creation_filetime(pid);
+        self.begin_session_with_filetime(instance, pid, creation_filetime, now_unix, now)
+    }
+
+    /// Call right after the game process was spawned when the caller already captured the child's
+    /// kernel creation `FILETIME` (see [`process_creation_filetime_from_handle`]).
+    pub fn begin_session_with_filetime(
+        &self,
+        instance: &InstanceId,
+        pid: u32,
+        process_creation_filetime: Option<u64>,
+        now_unix: i64,
+        now: Instant,
+    ) -> io::Result<SessionTracker> {
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).map_err(|e| io::Error::other(e.to_string()))?;
         let session = ActiveSession {
@@ -322,6 +461,7 @@ impl<'a> PlaytimeStore<'a> {
             instance_id: instance.clone(),
             pid,
             started_at: now_unix,
+            process_creation_filetime,
             last_heartbeat_at: now_unix,
             accumulated_ms: 0,
         };
@@ -340,15 +480,15 @@ impl<'a> PlaytimeStore<'a> {
     /// Adds a finished session to the per-instance and lifetime totals. Idempotent.
     fn bank(&self, s: &ActiveSession) -> io::Result<BankedSession> {
         let _guard = BANK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let seconds = (s.accumulated_ms + 500) / 1000;
+        let seconds = s.accumulated_ms.saturating_add(500) / 1000;
 
         // Per instance (skipped if the instance was deleted meanwhile; lifetime still counts it).
         if self.instance_dir(&s.instance_id).is_dir() {
             let path = self.instance_file(&s.instance_id);
             let mut t: InstancePlaytime = read_total_or_quarantine(&path)?;
             if !t.applied.contains(&s.session_id) {
-                t.total_seconds += seconds;
-                t.sessions += 1;
+                t.total_seconds = t.total_seconds.saturating_add(seconds);
+                t.sessions = t.sessions.saturating_add(1);
                 t.last_played_at = Some(s.last_heartbeat_at);
                 remember(&mut t.applied, &s.session_id);
                 write_json(&path, &t)?;
@@ -358,8 +498,8 @@ impl<'a> PlaytimeStore<'a> {
         let path = self.lifetime_file();
         let mut l: LifetimePlaytime = read_total_or_quarantine(&path)?;
         if !l.applied.contains(&s.session_id) {
-            l.total_seconds += seconds;
-            l.sessions += 1;
+            l.total_seconds = l.total_seconds.saturating_add(seconds);
+            l.sessions = l.sessions.saturating_add(1);
             remember(&mut l.applied, &s.session_id);
             write_json(&path, &l)?;
         }
@@ -370,9 +510,11 @@ impl<'a> PlaytimeStore<'a> {
         })
     }
 
-    /// Returns valid open journal entries whose game process is still running on this machine, so
-    /// startup can reattach to them rather than banking them early or truncating their output.
-    pub fn live_sessions(&self) -> io::Result<Vec<(PathBuf, ActiveSession)>> {
+    /// Returns valid open journal entries together with an already-opened, verified [`LiveProcess`]
+    /// handle so startup reattachment can wait on the exact process handle without close/reopen TOCTOU.
+    pub(crate) fn live_sessions_with_handles(
+        &self,
+    ) -> io::Result<Vec<(PathBuf, ActiveSession, LiveProcess)>> {
         let dir = self.active_dir();
         let mut live = Vec::new();
         let entries = match fs::read_dir(&dir) {
@@ -385,20 +527,38 @@ impl<'a> PlaytimeStore<'a> {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(s) = fs::read(&path)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<ActiveSession>(&b).ok())
-                .filter(is_session_process_alive)
-            {
-                live.push((path, s));
+            let session = match read_journal_entry(&path) {
+                JournalRead::Parsed(s) => s,
+                JournalRead::NotFound | JournalRead::Corrupt => continue,
+                JournalRead::IoError(e) => {
+                    tracing::warn!(
+                        file = %path.file_name().unwrap_or_default().to_string_lossy(),
+                        error = %e,
+                        "could not read a playtime journal entry while scanning live sessions"
+                    );
+                    continue;
+                }
+            };
+            if let Some(proc_handle) = LiveProcess::open_alive_session(&session) {
+                live.push((path, session, proc_handle));
             }
         }
         Ok(live)
     }
 
+    /// Returns valid open journal entries whose game process is still running on this machine, so
+    /// startup can reattach to them rather than banking them early or truncating their output.
+    pub fn live_sessions(&self) -> io::Result<Vec<(PathBuf, ActiveSession)>> {
+        Ok(self
+            .live_sessions_with_handles()?
+            .into_iter()
+            .map(|(path, session, _)| (path, session))
+            .collect())
+    }
+
     /// Startup recovery: bank every session left open by a crash, power loss or forced kill,
-    /// skipping any session whose game process is still running. Unreadable journal entries are
-    /// set aside (`.corrupt`) rather than lost or retried forever.
+    /// skipping any session whose game process is still running. Damaged journal entries are
+    /// set aside (`.corrupt`), while transient I/O read errors leave the entry in place to retry.
     pub fn recover(&self) -> io::Result<Vec<BankedSession>> {
         let dir = self.active_dir();
         let mut banked = Vec::new();
@@ -412,14 +572,11 @@ impl<'a> PlaytimeStore<'a> {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            match fs::read(&path)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<ActiveSession>(&b).ok())
-            {
-                Some(s) if is_session_process_alive(&s) => {
+            match read_journal_entry(&path) {
+                JournalRead::Parsed(s) if is_session_process_alive(&s) => {
                     // The game is still running: leave the journal entry for `reattach_live_sessions`.
                 }
-                Some(s) => match self.bank(&s) {
+                JournalRead::Parsed(s) => match self.bank(&s) {
                     Ok(b) => {
                         banked.push(b);
                         if let Err(e) = remove_file_with_retry(&path) {
@@ -432,9 +589,20 @@ impl<'a> PlaytimeStore<'a> {
                         tracing::warn!(error = %e, "could not bank a playtime session; it stays in the journal")
                     }
                 },
-                None => match quarantine_corrupt(&path) {
-                    Ok(_) => {
-                        tracing::warn!("a playtime journal entry was damaged and was set aside")
+                JournalRead::NotFound => {}
+                JournalRead::IoError(e) => {
+                    tracing::warn!(
+                        file = %path.file_name().unwrap_or_default().to_string_lossy(),
+                        error = %e,
+                        "could not read a playtime journal entry; leaving it for retry"
+                    );
+                }
+                JournalRead::Corrupt => match quarantine_corrupt(&path) {
+                    Ok(moved) => {
+                        tracing::warn!(
+                            backup = %moved.file_name().unwrap_or_default().to_string_lossy(),
+                            "a playtime journal entry was damaged and was set aside"
+                        )
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not set aside a damaged journal entry")
@@ -486,7 +654,8 @@ impl SessionTracker {
         } else {
             HEARTBEAT
         };
-        self.session.accumulated_ms += counted.as_millis() as u64;
+        let counted_ms = u64::try_from(counted.as_millis()).unwrap_or(u64::MAX);
+        self.session.accumulated_ms = self.session.accumulated_ms.saturating_add(counted_ms);
         self.session.last_heartbeat_at = now_unix;
         self.last_tick = now;
         write_json(&self.path, &self.session)
@@ -857,6 +1026,8 @@ mod tests {
 
     #[test]
     fn live_process_sessions_are_detected_skipped_by_recover_and_resumable_until_exit() {
+        use std::os::windows::io::AsRawHandle;
+
         let (_d, root, id) = setup();
         let store = PlaytimeStore::new(&root);
 
@@ -868,6 +1039,8 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
+        let expected_ft = unsafe { process_creation_filetime_from_handle(child.as_raw_handle()) }
+            .expect("spawned child exposes creation FILETIME");
         let started = crate::profiles::now_unix();
         let t0 = Instant::now();
         let mut s = store.begin_session(&id, pid, started, t0).unwrap();
@@ -878,14 +1051,30 @@ mod tests {
         let live = store.live_sessions().unwrap();
         assert_eq!(live.len(), 1, "running child must be detected as live");
         assert_eq!(live[0].1.pid, pid);
+        assert_eq!(live[0].1.process_creation_filetime, Some(expected_ft));
 
-        // PID-reuse guard: the same live PID with a stale `started_at` (> 120s away) is rejected.
-        let mut stale = live[0].1.clone();
-        stale.started_at = started - 3_600;
-        assert!(!is_session_process_alive(&stale));
+        // PID-reuse guard: a mismatched kernel creation FILETIME is rejected even if `started_at` matches.
+        let mut mismatched_ft = live[0].1.clone();
+        mismatched_ft.process_creation_filetime = Some(expected_ft.wrapping_add(1));
+        assert!(!is_session_process_alive(&mismatched_ft));
+
+        // Legacy journals without `process_creation_filetime` fall back to the tight `started_at` window.
+        let legacy_ok = ActiveSession {
+            process_creation_filetime: None,
+            ..live[0].1.clone()
+        };
+        assert!(is_session_process_alive(&legacy_ok));
+        assert!(!is_session_process_alive(&ActiveSession {
+            started_at: started - (LEGACY_START_TOLERANCE_SECS as i64 + 5),
+            ..legacy_ok
+        }));
         assert!(!is_session_process_alive(&ActiveSession {
             pid: 0,
-            ..stale
+            ..live[0].1.clone()
+        }));
+        assert!(!is_session_process_alive(&ActiveSession {
+            pid: std::process::id(),
+            ..live[0].1.clone()
         }));
 
         // `recover` must leave the live session untouched rather than banking or deleting it early.
@@ -893,8 +1082,16 @@ mod tests {
         assert_eq!(store.instance_total(&id).unwrap().total_seconds, 0);
         assert!(live[0].0.is_file());
 
-        // Once the process actually exits, `live_sessions` is empty and `recover` banks it.
+        // `live_sessions_with_handles` keeps the verified kernel handle open with no close/reopen TOCTOU.
+        let mut handles = store.live_sessions_with_handles().unwrap();
+        assert_eq!(handles.len(), 1);
+        let (_jpath, sess, proc_handle) = handles.pop().unwrap();
+        assert_eq!(sess.pid, pid);
+        assert!(proc_handle.is_alive());
+
+        // Once the process actually exits, the kept handle reports exit code 0 and `recover` banks it.
         let _ = child.wait().unwrap();
+        assert_eq!(proc_handle.wait_blocking(), Some(0));
         assert!(store.live_sessions().unwrap().is_empty());
         let banked = store.recover().unwrap();
         assert_eq!(banked.len(), 1);
@@ -911,5 +1108,178 @@ mod tests {
         let b2 = resumed.finish(&store, started + 50, t0 + secs(50)).unwrap();
         assert_eq!(b2.seconds, 50);
         assert_eq!(store.instance_total(&id).unwrap().total_seconds, 110);
+    }
+
+    #[test]
+    fn open_matching_rejects_launcher_own_pid() {
+        let self_pid = std::process::id();
+        let now = crate::profiles::now_unix();
+        assert!(LiveProcess::open_matching(0, now).is_none());
+        assert!(LiveProcess::open_matching(self_pid, now).is_none());
+
+        let self_ft = unsafe {
+            process_creation_filetime_from_handle(
+                windows_sys::Win32::System::Threading::GetCurrentProcess().cast(),
+            )
+        };
+        assert!(self_ft.is_some());
+        let bogus = ActiveSession {
+            schema: SCHEMA,
+            session_id: "self-pid-reuse".to_owned(),
+            instance_id: InstanceId::new("vanilla").unwrap(),
+            pid: self_pid,
+            started_at: now,
+            process_creation_filetime: self_ft,
+            last_heartbeat_at: now,
+            accumulated_ms: 1_000,
+        };
+        assert!(LiveProcess::open_matching_session(&bogus).is_none());
+        assert!(!is_session_process_alive(&bogus));
+    }
+
+    #[test]
+    fn legacy_journal_without_filetime_deserializes_with_none() {
+        let json = r#"{
+            "schema": 1,
+            "session_id": "1000-0102030405060708",
+            "instance_id": "survival",
+            "pid": 4242,
+            "started_at": 1000,
+            "last_heartbeat_at": 1060,
+            "accumulated_ms": 60000
+        }"#;
+        let parsed: ActiveSession = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.process_creation_filetime, None);
+        assert_eq!(parsed.accumulated_ms, 60_000);
+    }
+
+    #[test]
+    fn recover_and_live_sessions_do_not_quarantine_on_sharing_lock_and_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_d, root, id) = setup();
+        let store = PlaytimeStore::new(&root);
+        let t0 = Instant::now();
+        let mut s = store.begin_session(&id, 1, 1_000, t0).unwrap();
+        s.tick(1_060, t0 + secs(60)).unwrap();
+        let jpath = s.path.clone();
+        drop(s);
+
+        // An unshared lock (e.g. Windows Defender / Search Indexer) causes `read_bounded` to fail
+        // with an I/O error; `recover` must leave the valid journal intact rather than quarantining it.
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&jpath)
+            .unwrap();
+        assert!(store.recover().unwrap().is_empty());
+        assert!(
+            jpath.is_file(),
+            "valid locked journal must stay on disk for retry"
+        );
+        let corrupt_name = format!("{}.corrupt", jpath.file_name().unwrap().to_string_lossy());
+        assert!(
+            !jpath.with_file_name(corrupt_name).exists(),
+            "sharing lock must not quarantine a valid journal"
+        );
+        drop(locked);
+
+        // A transient sharing lock on a live session clears within `read_bounded`'s retry window.
+        let mut child = std::process::Command::new("cmd")
+            .args(["/D", "/C", "ping -n 4 127.0.0.1 >nul"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = crate::profiles::now_unix();
+        let s_live = store.begin_session(&id, child.id(), started, t0).unwrap();
+        let live_path = s_live.path.clone();
+        drop(s_live);
+
+        let live_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&live_path)
+            .unwrap();
+        let live_releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(live_lock);
+        });
+        let live = store.live_sessions().unwrap();
+        live_releaser.join().unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].1.pid, child.id());
+
+        // Transient sharing lock on the crashed journal during `recover` is retried and banked.
+        let recover_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&jpath)
+            .unwrap();
+        let recover_releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(recover_lock);
+        });
+        let banked = store.recover().unwrap();
+        recover_releaser.join().unwrap();
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0].seconds, 60);
+        assert!(!jpath.exists());
+
+        let _ = child.wait().unwrap();
+        let _ = store.recover().unwrap();
+
+        // Oversized journal entries (> MAX_PLAYTIME_FILE_BYTES) are treated as corrupt and quarantined.
+        let huge_path = root.data_dir().join("playtime-active").join("huge.json");
+        fs::write(
+            &huge_path,
+            vec![b' '; (MAX_PLAYTIME_FILE_BYTES + 1024) as usize],
+        )
+        .unwrap();
+        assert!(store.recover().unwrap().is_empty());
+        assert!(!huge_path.exists());
+        assert!(root
+            .data_dir()
+            .join("playtime-active")
+            .join("huge.json.corrupt")
+            .is_file());
+    }
+
+    #[test]
+    fn saturating_arithmetic_prevents_overflow_on_extreme_counters() {
+        let (_d, root, id) = setup();
+        let store = PlaytimeStore::new(&root);
+
+        let inst_seed = InstancePlaytime {
+            schema: SCHEMA,
+            total_seconds: u64::MAX - 5,
+            sessions: u32::MAX,
+            last_played_at: Some(1_000),
+            applied: Vec::new(),
+        };
+        write_json(&store.instance_file(&id), &inst_seed).unwrap();
+        let life_seed = LifetimePlaytime {
+            schema: SCHEMA,
+            total_seconds: u64::MAX - 5,
+            sessions: u64::MAX,
+            applied: Vec::new(),
+        };
+        write_json(&store.lifetime_file(), &life_seed).unwrap();
+
+        let t0 = Instant::now();
+        let mut tracker = store.begin_session(&id, 1, 1_000, t0).unwrap();
+        tracker.session.accumulated_ms = u64::MAX - 10;
+        tracker.tick(1_060, t0 + secs(60)).unwrap();
+        assert_eq!(tracker.session.accumulated_ms, u64::MAX);
+
+        let banked = tracker.finish(&store, 1_060, t0 + secs(60)).unwrap();
+        assert_eq!(banked.seconds, u64::MAX / 1000);
+        let inst = store.instance_total(&id).unwrap();
+        assert_eq!(inst.total_seconds, u64::MAX);
+        assert_eq!(inst.sessions, u32::MAX);
+        let life = store.lifetime_total().unwrap();
+        assert_eq!(life.total_seconds, u64::MAX);
+        assert_eq!(life.sessions, u64::MAX);
     }
 }

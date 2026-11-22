@@ -6,9 +6,7 @@
 // development, unit tests) there is no backend and nothing is invented: calls reject with a clear
 // message.
 
-import { listen } from "@tauri-apps/api/event";
-import { call } from "@/lib/ipc";
-import { inTauri } from "@/lib/settings/uiSettings";
+import { call, listenEvent } from "@/lib/ipc";
 
 export type LoaderKind = "fabric" | "forge" | "neoforge" | "quilt";
 /** The display order of the loaders. */
@@ -399,13 +397,11 @@ export const profilesApi = {
     await call("open_removed_profiles_folder");
   },
   /** Progress events of a running preparation. Returns a function that stops listening. */
-  onPrepareProgress: async (callback: (p: PrepareProgress) => void): Promise<() => void> => {
-    if (!inTauri()) return () => undefined;
-    return listen<unknown>("prepare-progress", (e) => {
-      const p = parsePrepareProgress(e.payload);
+  onPrepareProgress: async (callback: (p: PrepareProgress) => void): Promise<() => void> =>
+    listenEvent<unknown>("prepare-progress", (payload) => {
+      const p = parsePrepareProgress(payload);
       if (p) callback(p);
-    });
-  },
+    }),
 };
 
 export type ProfilesApi = Omit<typeof profilesApi, "restore" | "openRemovedFolder"> &

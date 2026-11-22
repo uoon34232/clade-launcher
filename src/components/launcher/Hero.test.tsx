@@ -92,6 +92,29 @@ describe("Hero headline without animation support (instant swap)", () => {
     expect(saveLastPhrase).toHaveBeenLastCalledWith(final?.id);
   });
 
+  it("flushes a pending debounced phrase save synchronously on unmount", () => {
+    vi.useFakeTimers();
+    const { unmount } = render(<Hero />);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
+    saveLastPhrase.mockClear();
+
+    const button = heading().querySelector("button") as HTMLButtonElement;
+    fireEvent.click(button, { detail: 1 });
+    const next = BASE_PHRASES.find((p) => phraseText(p) === headline());
+
+    // Still inside the 800 ms debounce window: no IPC yet.
+    vi.advanceTimersByTime(400);
+    expect(saveLastPhrase).not.toHaveBeenCalled();
+
+    // Unmounting mid-debounce flushes the pending phrase immediately and cancels the timer.
+    unmount();
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
+    expect(saveLastPhrase).toHaveBeenLastCalledWith(next?.id);
+
+    vi.advanceTimersByTime(1000);
+    expect(saveLastPhrase).toHaveBeenCalledTimes(1);
+  });
+
   it("does not touch any WebView storage", () => {
     const get = vi.spyOn(Storage.prototype, "getItem");
     const set = vi.spyOn(Storage.prototype, "setItem");
@@ -126,12 +149,26 @@ describe("Hero headline without animation support (instant swap)", () => {
     expect(playSound).toHaveBeenCalledWith("headline");
   });
 
-  it("treats keyboard activation (a click with detail 0) the same: new phrase, burst, sound", () => {
+  it("treats keyboard activation (a click with detail 0) the same: new phrase, center burst, sound", () => {
     render(<Hero />);
+    const button = heading().querySelector("button") as HTMLButtonElement;
+    const textSpan = button.querySelector(".hero-text") as HTMLSpanElement;
+    vi.spyOn(textSpan, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      top: 40,
+      width: 200,
+      height: 50,
+      right: 300,
+      bottom: 90,
+      x: 100,
+      y: 40,
+      toJSON: () => ({}),
+    });
     const before = headline();
-    act(() => (heading().querySelector("button") as HTMLButtonElement).click()); // what Enter/Space produce in a browser
+    act(() => button.click()); // what Enter/Space produce in a browser
     expect(headline()).not.toBe(before);
     expect(emitBurst).toHaveBeenCalledTimes(1);
+    expect(emitBurst.mock.calls[0].slice(0, 2)).toEqual([200, 65]);
     expect(playSound).toHaveBeenCalledWith("headline");
   });
 
@@ -144,20 +181,93 @@ describe("Hero headline without animation support (instant swap)", () => {
     expect(button.getAttribute("aria-description")).toMatch(/different message/i);
     expect(button.className).toBe("hero-link");
   });
+
+  it("hides playtime when zero and shows formatted playtime when positive", () => {
+    const { container, rerender } = render(<Hero playtimeSeconds={0} />);
+    const playtime = container.querySelectorAll("p")[1];
+    expect(playtime.getAttribute("aria-hidden")).toBe("true");
+    expect(playtime.className).toContain("opacity-0");
+    expect(playtime.className).not.toContain("opacity-85");
+    expect(playtime.textContent?.trim()).toBe("");
+
+    rerender(<Hero playtimeSeconds={3720} />);
+    expect(playtime.getAttribute("aria-hidden")).toBeNull();
+    expect(playtime.className).toContain("opacity-85");
+    expect(playtime.className).not.toContain("opacity-0");
+    expect(playtime.textContent).toBe("Played 1h 2m");
+  });
+
+  it("applies entrance and returning classes correctly", () => {
+    const { container, rerender } = render(<Hero />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.classList.contains("hero-rise")).toBe(true);
+    expect(root.classList.contains("hero-return")).toBe(false);
+
+    rerender(<Hero returning />);
+    expect(root.classList.contains("hero-return")).toBe(true);
+    expect(root.classList.contains("hero-rise")).toBe(false);
+
+    rerender(<Hero entrance="settled" returning />);
+    expect(root.classList.contains("hero-rise")).toBe(false);
+    expect(root.classList.contains("hero-return")).toBe(false);
+
+    rerender(<Hero entrance="return" />);
+    expect(root.classList.contains("hero-return")).toBe(true);
+    expect(root.classList.contains("hero-rise")).toBe(false);
+
+    rerender(<Hero entrance="rise" returning />);
+    expect(root.classList.contains("hero-rise")).toBe(true);
+    expect(root.classList.contains("hero-return")).toBe(false);
+  });
 });
 
 describe("Hero transition lock (with a controllable Web Animations API)", () => {
-  type Fake = { target: Element; resolve: () => void; cancelled: boolean };
+  type Fake = {
+    target: Element;
+    resolve: () => void;
+    reject: (reason?: unknown) => void;
+    cancelled: boolean;
+  };
   let fakes: Fake[];
 
   beforeEach(() => {
     fakes = [];
     (HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element) {
       let resolve!: () => void;
-      const finished = new Promise<void>((r) => (resolve = r));
-      const entry: Fake = { target: this, resolve: () => resolve(), cancelled: false };
+      let reject!: (reason?: unknown) => void;
+      let settled = false;
+      let finishedAccessed = false;
+      const finished = new Promise<void>((res, rej) => {
+        resolve = () => {
+          if (settled) return;
+          settled = true;
+          res();
+        };
+        reject = (reason?: unknown) => {
+          if (settled) return;
+          settled = true;
+          rej(reason instanceof Error ? reason : new Error(String(reason)));
+        };
+      });
+      const entry: Fake = {
+        target: this,
+        resolve: () => resolve(),
+        reject: (reason = new DOMException("Animation cancelled", "AbortError")) => reject(reason),
+        cancelled: false,
+      };
       fakes.push(entry);
-      return { finished, cancel: () => (entry.cancelled = true), onfinish: null, oncancel: null };
+      return {
+        get finished() {
+          finishedAccessed = true;
+          return finished;
+        },
+        cancel: () => {
+          entry.cancelled = true;
+          if (finishedAccessed && !settled) entry.reject();
+        },
+        onfinish: null,
+        oncancel: null,
+      };
     };
   });
 
@@ -189,6 +299,48 @@ describe("Hero transition lock (with a controllable Web Animations API)", () => 
     await settle();
     fireEvent.click(button, { detail: 1 });
     expect(textAnimations()).toHaveLength(3); // a new transition begins
+  });
+
+  it("cancels active animations and settles safely when unmounted mid-fade-out", async () => {
+    const { unmount } = render(<Hero />);
+    const button = heading().querySelector("button") as HTMLButtonElement;
+    const first = headline();
+
+    fireEvent.click(button, { detail: 1 });
+    expect(textAnimations()).toHaveLength(1);
+    expect(headline()).toBe(first);
+
+    unmount();
+    await settle();
+    expect(textAnimations()[0].cancelled).toBe(true);
+    expect(fakes.every((f) => f.cancelled)).toBe(true);
+  });
+
+  it("resets the transition lock if fade-out or fade-in animation rejects", async () => {
+    render(<Hero />);
+    const button = heading().querySelector("button") as HTMLButtonElement;
+    const first = headline();
+
+    // Fade-out rejected: phrase stays unchanged and busy resets for the next click.
+    fireEvent.click(button, { detail: 1 });
+    expect(textAnimations()).toHaveLength(1);
+    act(() => textAnimations()[0].reject(new DOMException("Aborted", "AbortError")));
+    await settle();
+    expect(headline()).toBe(first);
+
+    fireEvent.click(button, { detail: 1 });
+    expect(textAnimations()).toHaveLength(2);
+    act(() => textAnimations()[1].resolve());
+    await settle();
+    const second = headline();
+    expect(second).not.toBe(first);
+    expect(textAnimations()).toHaveLength(3);
+
+    // Fade-in rejected: busy resets so another click starts a new transition.
+    act(() => textAnimations()[2].reject(new DOMException("Aborted", "AbortError")));
+    await settle();
+    fireEvent.click(button, { detail: 1 });
+    expect(textAnimations()).toHaveLength(4);
   });
 
   it("uses a fade out then a fade in with small vertical movement, totalling about 400 ms", async () => {

@@ -203,18 +203,41 @@ fn get_or_build_client(
         .clone())
 }
 
-fn check_redirect_hop(previous_count: usize, url: &Url) -> Result<(), &'static str> {
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+enum RedirectReject {
+    #[error("too many redirects")]
+    TooManyRedirects,
+    #[error("{0}")]
+    Blocked(#[from] PolicyError),
+}
+
+fn check_redirect_hop(previous_count: usize, url: &Url) -> Result<(), RedirectReject> {
     if previous_count >= MAX_REDIRECTS {
-        return Err("too many redirects");
+        return Err(RedirectReject::TooManyRedirects);
     }
     let policy = ACTIVE_POLICY
         .try_with(|p| *p)
         .unwrap_or_else(|_| DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS));
-    if policy.check(url).is_ok() {
-        Ok(())
-    } else {
-        Err("redirect target is not on the allow-list")
+    policy.check(url).map_err(RedirectReject::Blocked)
+}
+
+fn blocked_policy_in_chain(
+    mut cur: Option<&(dyn std::error::Error + 'static)>,
+) -> Option<PolicyError> {
+    while let Some(err) = cur {
+        if let Some(RedirectReject::Blocked(policy)) = err.downcast_ref::<RedirectReject>() {
+            return Some(policy.clone());
+        }
+        cur = err.source();
     }
+    None
+}
+
+fn map_reqwest_err(e: reqwest::Error) -> FetchError {
+    if let Some(policy) = blocked_policy_in_chain(Some(&e)) {
+        return FetchError::Policy(policy);
+    }
+    FetchError::Network(e.without_url().to_string())
 }
 
 fn no_redirect_client() -> Result<reqwest::Client, FetchError> {
@@ -233,7 +256,7 @@ fn redirect_client() -> Result<reqwest::Client, FetchError> {
         let redirect = reqwest::redirect::Policy::custom(|attempt| {
             match check_redirect_hop(attempt.previous().len(), attempt.url()) {
                 Ok(()) => attempt.follow(),
-                Err(msg) => attempt.error(msg),
+                Err(err) => attempt.error(err),
             }
         });
         base_client_builder()
@@ -279,6 +302,27 @@ impl HttpFetcher {
     }
 }
 
+/// Validates the status and `Content-Range` of a streamed response.
+/// Only accepts `206 Partial Content` when a `Range` request (`from > 0`) was actually sent.
+fn check_stream_response(
+    status: u16,
+    from: u64,
+    content_range: Option<&str>,
+) -> Result<(), FetchError> {
+    if status != 200 && !(status == 206 && from > 0) {
+        return Err(FetchError::Status(status));
+    }
+    if status == 206 {
+        // The body must start exactly where we asked, or appending would corrupt the file.
+        let expected_prefix = format!("bytes {from}-");
+        let starts_right = content_range.is_some_and(|v| v.starts_with(&expected_prefix));
+        if !starts_right {
+            return Err(FetchError::Network("unexpected byte range".into()));
+        }
+    }
+    Ok(())
+}
+
 impl Streamer for HttpFetcher {
     #[allow(clippy::manual_async_fn)] // the trait spells out the borrowed lifetime
     fn stream<'a>(
@@ -303,29 +347,17 @@ impl Streamer for HttpFetcher {
                     tokio::time::timeout(DOCUMENT_READ_TIMEOUT, request.send())
                         .await
                         .map_err(|_| FetchError::Network("request timed out".into()))?
-                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                        .map_err(map_reqwest_err)?
                 } else {
-                    request
-                        .send()
-                        .await
-                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    request.send().await.map_err(map_reqwest_err)?
                 };
                 policy.check(response.url())?;
                 let status = response.status().as_u16();
-                if status != 200 && status != 206 {
-                    return Err(FetchError::Status(status));
-                }
-                if status == 206 {
-                    // The body must start exactly where we asked, or appending would corrupt the file.
-                    let starts_right = response
-                        .headers()
-                        .get("content-range")
-                        .and_then(|v| v.to_str().ok())
-                        .is_some_and(|v| v.starts_with(&format!("bytes {from}-")));
-                    if !starts_right {
-                        return Err(FetchError::Network("unexpected byte range".into()));
-                    }
-                }
+                let content_range = response
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok());
+                check_stream_response(status, from, content_range)?;
                 let head = StreamHead {
                     status,
                     content_length: response.content_length(),
@@ -385,10 +417,7 @@ impl Transport for HttpFetcher {
             }
             let max_response_bytes = request.max_response_bytes;
             drop(request);
-            let mut response = builder
-                .send()
-                .await
-                .map_err(|e| FetchError::Network(e.without_url().to_string()))?;
+            let mut response = builder.send().await.map_err(map_reqwest_err)?;
             policy.check(response.url())?;
             let status = response.status().as_u16();
             if response
@@ -437,11 +466,9 @@ impl Fetcher for HttpFetcher {
                     tokio::time::timeout(DOCUMENT_READ_TIMEOUT, req.send())
                         .await
                         .map_err(|_| FetchError::Network("request timed out".into()))?
-                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                        .map_err(map_reqwest_err)?
                 } else {
-                    req.send()
-                        .await
-                        .map_err(|e| FetchError::Network(e.without_url().to_string()))?
+                    req.send().await.map_err(map_reqwest_err)?
                 };
                 policy.check(response.url())?;
                 if !response.status().is_success() {
@@ -853,7 +880,7 @@ mod tests {
         assert!(check_redirect_hop(0, &evil).is_err());
         assert_eq!(
             check_redirect_hop(MAX_REDIRECTS, &mojang),
-            Err("too many redirects")
+            Err(RedirectReject::TooManyRedirects)
         );
 
         let fabric_l = fabric.clone();
@@ -861,9 +888,11 @@ mod tests {
         let loader_work = async move {
             tokio::task::yield_now().await;
             assert!(check_redirect_hop(0, &fabric_l).is_ok());
-            assert_eq!(
-                check_redirect_hop(0, &mojang_l),
-                Err("redirect target is not on the allow-list"),
+            assert!(
+                matches!(
+                    check_redirect_hop(0, &mojang_l),
+                    Err(RedirectReject::Blocked(PolicyError::HostNotAllowed(_)))
+                ),
                 "loader policy must never follow redirects to Mojang"
             );
         };
@@ -874,9 +903,31 @@ mod tests {
             tokio::task::yield_now().await;
             assert!(check_redirect_hop(0, &mojang).is_ok());
             assert!(check_redirect_hop(0, &fabric).is_ok());
+            let reject = check_redirect_hop(0, &evil).unwrap_err();
+            assert!(matches!(
+                reject,
+                RedirectReject::Blocked(PolicyError::HostNotAllowed(_))
+            ));
+            #[derive(Debug)]
+            struct Wrapped(RedirectReject);
+            impl std::fmt::Display for Wrapped {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "redirect error")
+                }
+            }
+            impl std::error::Error for Wrapped {
+                fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                    Some(&self.0)
+                }
+            }
+            let wrapped = Wrapped(reject);
+            assert!(matches!(
+                blocked_policy_in_chain(Some(&wrapped)),
+                Some(PolicyError::HostNotAllowed(_))
+            ));
             assert_eq!(
-                check_redirect_hop(0, &evil),
-                Err("redirect target is not on the allow-list")
+                check_redirect_hop(MAX_REDIRECTS, &mojang),
+                Err(RedirectReject::TooManyRedirects)
             );
         };
         let global_policy = DownloadPolicy::new(DEFAULT_ALLOWED_HOSTS);
@@ -942,5 +993,32 @@ mod tests {
             })
             .await;
         assert!(matches!(r, Err(FetchError::TooLarge(32))), "{r:?}");
+    }
+
+    #[test]
+    fn stream_response_validation_rejects_unsolicited_partial_content() {
+        assert!(check_stream_response(200, 0, None).is_ok());
+        assert!(check_stream_response(200, 128, None).is_ok());
+        assert!(matches!(
+            check_stream_response(206, 0, Some("bytes 0-63/128")),
+            Err(FetchError::Status(206))
+        ));
+        assert!(matches!(
+            check_stream_response(206, 0, None),
+            Err(FetchError::Status(206))
+        ));
+        assert!(check_stream_response(206, 64, Some("bytes 64-127/128")).is_ok());
+        assert!(matches!(
+            check_stream_response(206, 64, Some("bytes 0-127/128")),
+            Err(FetchError::Network(_))
+        ));
+        assert!(matches!(
+            check_stream_response(206, 64, None),
+            Err(FetchError::Network(_))
+        ));
+        assert!(matches!(
+            check_stream_response(404, 0, None),
+            Err(FetchError::Status(404))
+        ));
     }
 }

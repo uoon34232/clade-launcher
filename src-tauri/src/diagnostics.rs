@@ -21,7 +21,7 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::accounts::AccountsFile;
 use crate::coded_error::CodedError;
 use crate::instances::{InstanceStore, Profile, SetupState};
-use crate::portable::fsutil::atomic_write;
+use crate::portable::fsutil::{atomic_write, is_link, reject_links_between};
 use crate::portable::PortableRoot;
 use crate::settings::LauncherSettings;
 
@@ -123,6 +123,59 @@ fn is_value_char(c: char) -> bool {
     !(c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '&' | ';' | '}' | ')' | '<' | '>'))
 }
 
+/// Parses a key-value separator (`=`, `:`, or `' '` when `allow_space_sep` is set) and an optional
+/// opening quote, stopping right after that opening quote so multi-word or empty quoted values
+/// are scanned accurately.
+fn parse_secret_sep(after: &str, allow_space_sep: bool) -> (usize, bool, Option<char>) {
+    let mut sep_len = 0;
+    let mut has_sep = false;
+    let mut opening_quote = None;
+    for (idx, c) in after.char_indices() {
+        match c {
+            '=' | ':' => {
+                has_sep = true;
+                sep_len = idx + c.len_utf8();
+            }
+            ' ' => {
+                if allow_space_sep {
+                    has_sep = true;
+                }
+                sep_len = idx + c.len_utf8();
+            }
+            '"' | '\'' => {
+                sep_len = idx + c.len_utf8();
+                if has_sep {
+                    opening_quote = Some(c);
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    (sep_len, has_sep, opening_quote)
+}
+
+/// Byte length of a quoted value in `rest` up to its matching closing `quote` (skipping escaped
+/// characters) or a newline boundary (`\r` / `\n`).
+fn quoted_value_len(rest: &str, quote: char) -> usize {
+    let mut escaped = false;
+    let mut len = 0;
+    for c in rest.chars() {
+        if matches!(c, '\n' | '\r') {
+            break;
+        }
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            break;
+        }
+        len += c.len_utf8();
+    }
+    len
+}
+
 /// Replaces the value that follows each secret-looking key.
 fn redact_key_values(line: &str) -> String {
     let lower = line.to_ascii_lowercase();
@@ -137,17 +190,15 @@ fn redact_key_values(line: &str) -> String {
                         && lower.as_bytes()[i - 1] != b'_';
                 let mut j = i + key.len();
                 let after = &line[j..];
-                let sep = after
-                    .chars()
-                    .take_while(|c| matches!(c, ' ' | '=' | ':' | '"' | '\''))
-                    .count();
-                let has_sep =
-                    after[..sep].contains(['=', ':']) || (SPACE_KEYS.contains(&key) && sep > 0);
+                let (sep, has_sep, opening_quote) =
+                    parse_secret_sep(after, SPACE_KEYS.contains(&key));
                 if before_ok && has_sep {
                     j += sep;
                     // An Authorization header carries `Bearer <token>`: the whole rest of the line.
                     let value_len: usize = if key == "authorization" {
                         line[j..].len()
+                    } else if let Some(quote) = opening_quote {
+                        quoted_value_len(&line[j..], quote)
                     } else if key == "xbl3.0" {
                         line[j..]
                             .chars()
@@ -218,18 +269,16 @@ fn redact_named_secrets(line: &str) -> String {
                 .map(char::len_utf8)
                 .sum();
             let after = &line[i + name_len..];
-            let sep_len = after
-                .chars()
-                .take_while(|c| matches!(c, ' ' | '=' | ':' | '"' | '\''))
-                .map(char::len_utf8)
-                .sum::<usize>();
-            let has_sep = after[..sep_len].contains(['=', ':']);
+            let (sep_len, has_sep, opening_quote) = parse_secret_sep(after, false);
             let value_start = i + name_len + sep_len;
-            let value_len: usize = line[value_start..]
-                .chars()
-                .take_while(|c| is_value_char(*c))
-                .map(char::len_utf8)
-                .sum();
+            let value_len: usize = match opening_quote {
+                Some(quote) => quoted_value_len(&line[value_start..], quote),
+                None => line[value_start..]
+                    .chars()
+                    .take_while(|c| is_value_char(*c))
+                    .map(char::len_utf8)
+                    .sum(),
+            };
             if has_sep && value_len > 0 && is_secret_name(&line[i..i + name_len]) {
                 out.push_str(&line[i..value_start]);
                 out.push_str("<redacted>");
@@ -350,8 +399,10 @@ fn redact_emails(line: &str) -> String {
     let mut rest = line;
     while let Some(at) = rest.find('@') {
         let local_start = rest[..at]
-            .rfind(|c: char| !(c.is_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
-            .map_or(0, |p| p + 1);
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !(c.is_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
+            .map_or(0, |(p, c)| p + c.len_utf8());
         let domain_len: usize = rest[at + 1..]
             .chars()
             .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-'))
@@ -541,10 +592,14 @@ fn replace_ignore_case(text: &str, needle: &str, with: &str) -> String {
 
 // ------------------------------------------------------------------------------------- content
 
-/// The last `max_bytes` of a text file, starting at a line boundary. A missing or unreadable
-/// file is simply absent from the export.
-fn tail_bytes(path: &Path, max_bytes: u64) -> Option<String> {
+/// The last `max_bytes` of a text file inside `root`, starting at a line boundary. A missing,
+/// unreadable, or symlink/junction-redirected file is simply absent from the export.
+fn tail_bytes_in(root: &Path, path: &Path, max_bytes: u64) -> Option<String> {
     if max_bytes == 0 {
+        return None;
+    }
+    reject_links_between(root, path).ok()?;
+    if is_link(path).unwrap_or(true) {
         return None;
     }
     let mut f = fs::File::open(path).ok()?;
@@ -566,25 +621,24 @@ fn tail_bytes(path: &Path, max_bytes: u64) -> Option<String> {
     })
 }
 
-/// The last `LOG_TAIL_BYTES` of a text file, starting at a line boundary. A missing or unreadable
-/// file is simply absent from the export.
-fn tail(path: &Path) -> Option<String> {
-    tail_bytes(path, LOG_TAIL_BYTES)
-}
-
 /// Reads `logs/clade.log`, prepending the tail of `logs/clade.old.log` when `clade.log` is smaller
 /// than [`LOG_TAIL_BYTES`] so a fresh rotation does not discard recent history.
-fn clade_log_tail(logs_dir: &Path) -> Option<String> {
+fn clade_log_tail(root: &PortableRoot) -> Option<String> {
+    let logs_dir = root.logs_dir();
     let cur_path = logs_dir.join("clade.log");
-    let cur_meta_len = fs::metadata(&cur_path).ok().map(|m| m.len());
-    let cur = tail_bytes(&cur_path, LOG_TAIL_BYTES);
+    let cur = tail_bytes_in(root.path(), &cur_path, LOG_TAIL_BYTES);
+    let cur_meta_len = if cur.is_some() {
+        fs::symlink_metadata(&cur_path).ok().map(|m| m.len())
+    } else {
+        None
+    };
     if cur_meta_len.is_some_and(|len| len >= LOG_TAIL_BYTES) {
         return cur;
     }
     let cur_len = cur.as_ref().map_or(0, |s| s.len() as u64);
     let rem = LOG_TAIL_BYTES.saturating_sub(cur_len);
     let old_path = logs_dir.join("clade.old.log");
-    let old = tail_bytes(&old_path, rem).filter(|s| !s.is_empty());
+    let old = tail_bytes_in(root.path(), &old_path, rem).filter(|s| !s.is_empty());
     match (old, cur) {
         (Some(mut o), Some(c)) => {
             if !c.is_empty() {
@@ -609,6 +663,10 @@ fn minecraft_latest_log(root: &PortableRoot, settings: &LauncherSettings) -> Opt
             .join("game")
             .join("logs")
             .join("latest.log");
+        reject_links_between(root.path(), &p).ok()?;
+        if is_link(&p).unwrap_or(true) {
+            return None;
+        }
         p.is_file().then_some(p)
     };
     if let Some(p) = settings
@@ -623,7 +681,7 @@ fn minecraft_latest_log(root: &PortableRoot, settings: &LauncherSettings) -> Opt
         .instances
         .iter()
         .filter_map(|i| latest(i.id.as_str()))
-        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .filter_map(|p| Some((fs::symlink_metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
 }
@@ -696,6 +754,7 @@ pub fn collect(
     facts: &Facts<'_>,
 ) -> Vec<(&'static str, String)> {
     let known = known_identities(root);
+    let scrub = |text: &str| redact_identities(&redact(root.path(), text), &known);
     let mut files: Vec<(&'static str, String)> = vec![
         (
             "launcher-version.txt",
@@ -724,32 +783,20 @@ pub fn collect(
                 facts.webview_version
             ),
         ),
-        (
-            "profile-summary.txt",
-            redact_identities(&redact(root.path(), &profile_summary(root)), &known),
-        ),
+        ("profile-summary.txt", scrub(&profile_summary(root))),
         (
             "settings-redacted.json",
-            // The settings file holds preferences only (no secrets, no paths); it is still passed
-            // through the redactor.
-            redact(
-                root.path(),
-                &serde_json::to_string_pretty(settings).unwrap_or_default(),
-            ),
+            // The settings file holds preferences only (no secrets, no paths), though `last_instance`
+            // can carry a profile id containing a player's name or UUID, so run both redactors.
+            scrub(&serde_json::to_string_pretty(settings).unwrap_or_default()),
         ),
     ];
-    if let Some(t) = clade_log_tail(&root.logs_dir()) {
-        files.push((
-            "logs/clade.log",
-            redact_identities(&redact(root.path(), &t), &known),
-        ));
+    if let Some(t) = clade_log_tail(root) {
+        files.push(("logs/clade.log", scrub(&t)));
     }
     if let Some(p) = minecraft_latest_log(root, settings) {
-        if let Some(t) = tail(&p) {
-            files.push((
-                "logs/minecraft-latest.log",
-                redact_identities(&redact(root.path(), &t), &known),
-            ));
+        if let Some(t) = tail_bytes_in(root.path(), &p, LOG_TAIL_BYTES) {
+            files.push(("logs/minecraft-latest.log", scrub(&t)));
         }
     }
     files
@@ -774,6 +821,7 @@ pub fn export(
 ) -> Result<(Exported, PathBuf), DiagError> {
     let bytes = zip_bytes(&collect(root, settings, facts))?;
     let dir = root.logs_dir().join("diagnostics");
+    reject_links_between(root.path(), &dir)?;
     let name = format!("Clade-Diagnostics-{}.zip", timestamp(facts.now_unix));
     let path = dir.join(&name);
     atomic_write(&path, &bytes)?;
@@ -799,5 +847,140 @@ fn prune(dir: &Path) {
     }
 }
 
+/// The last `LOG_TAIL_BYTES` of a text file, starting at a line boundary. A missing or unreadable
+/// file is simply absent from the export.
+#[cfg(test)]
+fn tail(path: &Path) -> Option<String> {
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(path);
+    tail_bytes_in(base, path, LOG_TAIL_BYTES)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod redaction_regression_tests {
+    use super::*;
+    use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+    use crate::instances::InstanceId;
+
+    #[test]
+    fn quoted_multi_word_secrets_redact_entire_quoted_span() {
+        let root = Path::new("portable-root");
+        let cases = [
+            (
+                r#"passphrase="correct horse battery" other=ok"#,
+                r#"passphrase="<redacted>" other=ok"#,
+                &["correct", "horse", "battery"][..],
+            ),
+            (
+                "passphrase: 'correct horse battery' other=ok",
+                "passphrase: '<redacted>' other=ok",
+                &["correct", "horse", "battery"][..],
+            ),
+            (
+                r#"{"password": "my secret phrase", "ok": true}"#,
+                r#"{"password": "<redacted>", "ok": true}"#,
+                &["my secret phrase", "secret", "phrase"][..],
+            ),
+            (
+                r#"{"dbPassword": "my \"quoted\" secret\\", "a": 1}"#,
+                r#"{"dbPassword": "<redacted>", "a": 1}"#,
+                &["quoted", "secret"][..],
+            ),
+            (
+                "my_secret_key='alpha beta gamma' done=1",
+                "my_secret_key='<redacted>' done=1",
+                &["alpha", "beta", "gamma"][..],
+            ),
+            (
+                r#"bearer "opaque bearer token" next"#,
+                r#"bearer "<redacted>" next"#,
+                &["opaque", "bearer token"][..],
+            ),
+        ];
+        for (input, expected, leaks) in cases {
+            let out = redact(root, input);
+            assert_eq!(out, expected, "input={input}");
+            for leak in leaks {
+                assert!(!out.contains(leak), "{leak} leaked in {out:?}");
+            }
+        }
+
+        // Empty quoted values do not swallow following tokens.
+        assert_eq!(
+            redact(root, r#"password="" next=safe"#),
+            r#"password="" next=safe"#
+        );
+        assert_eq!(
+            redact(root, r#"{"password": "", "safe": 1}"#),
+            r#"{"password": "", "safe": 1}"#
+        );
+
+        // Quoted secret scanning stops at newline boundaries even when unclosed.
+        assert_eq!(
+            redact_key_values("passphrase=\"unclosed secret\nnext=safe"),
+            "passphrase=\"<redacted>\nnext=safe"
+        );
+        assert_eq!(
+            redact_named_secrets("db_password=\"unclosed secret\nnext=safe"),
+            "db_password=\"<redacted>\nnext=safe"
+        );
+    }
+
+    #[test]
+    fn settings_redacted_json_scrubs_known_identity_in_last_instance() {
+        let d = tempfile::tempdir().unwrap();
+        let r = PortableRoot::at(d.path());
+        r.ensure_layout().unwrap();
+
+        let uuid = "00000000-0000-4000-8000-0000000000dd";
+        let mut accounts = AccountsFile::default();
+        accounts.accounts.push(AccountMeta {
+            id: "acc1".into(),
+            username: "FixtureAlex".into(),
+            minecraft_uuid: uuid.into(),
+            added_at: 0,
+            last_used_at: None,
+            status: AccountStatus::Ready,
+        });
+        accounts.save(&r.accounts_file()).unwrap();
+
+        let id = format!("fixturealex-{uuid}");
+        let settings = LauncherSettings {
+            last_instance: Some(InstanceId::new(&id).unwrap()),
+            ..LauncherSettings::default()
+        };
+        let facts = Facts {
+            version: "0.1.0",
+            layout_version: 1,
+            webview: "Bundled",
+            webview_version: "154.0",
+            system_locale: Some("en-US"),
+            total_memory_mb: Some(8_192),
+            free_disk_bytes: Some(10 * 1024 * 1024 * 1024),
+            now_unix: 1_700_000_000,
+        };
+        let collected = collect(&r, &settings, &facts);
+        let settings_json = &collected
+            .iter()
+            .find(|(n, _)| *n == "settings-redacted.json")
+            .unwrap()
+            .1;
+        assert!(
+            !settings_json.to_ascii_lowercase().contains("fixturealex"),
+            "known username leaked in settings-redacted.json: {settings_json}"
+        );
+        assert!(
+            !settings_json.contains(uuid),
+            "known UUID leaked in settings-redacted.json: {settings_json}"
+        );
+        assert!(
+            settings_json.contains("<mc-name>-<mc-uuid>"),
+            "expected redacted identity in settings-redacted.json: {settings_json}"
+        );
+    }
+}

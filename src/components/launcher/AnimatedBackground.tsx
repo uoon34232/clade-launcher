@@ -27,7 +27,7 @@ const FIELDS: Field[] = [
   {
     size: "92vmax",
     position: { left: "4vmax", bottom: "-52vmax" },
-    color: "rgb(228 213 190 / 0.95)",
+    color: "var(--bg-field-1)",
     x: 14,
     y: 9,
     xDur: 30,
@@ -37,7 +37,7 @@ const FIELDS: Field[] = [
   {
     size: "82vmax",
     position: { left: "-30vmax", top: "-40vmax" },
-    color: "rgb(233 196 168 / 0.95)",
+    color: "var(--bg-field-2)",
     x: 40,
     y: 22,
     xDur: 24,
@@ -47,7 +47,7 @@ const FIELDS: Field[] = [
   {
     size: "72vmax",
     position: { right: "-34vmax", top: "-18vmax" },
-    color: "rgb(221 184 172 / 0.85)",
+    color: "var(--bg-field-3)",
     x: 36,
     y: 26,
     xDur: 27,
@@ -58,7 +58,7 @@ const FIELDS: Field[] = [
     // Warm clay accent: sweeps across the whole width, between hero and dock.
     size: "50vmax",
     position: { left: "calc(50% - 25vmax)", top: "6vmax" },
-    color: "rgb(196 122 98 / 0.34)",
+    color: "var(--bg-field-4)",
     x: 46,
     y: 14,
     xDur: 19,
@@ -149,13 +149,17 @@ export function AnimatedBackground({ paused = false }: { paused?: boolean }) {
       <div
         className="absolute inset-x-0 bottom-0 h-[45%]"
         style={{
-          background:
-            "radial-gradient(70% 100% at 50% 100%, rgb(43 38 34 / 0.13), transparent 70%)",
+          background: "var(--bg-vignette)",
         }}
       />
       <div
-        className="absolute inset-0 opacity-[0.07]"
-        style={{ backgroundImage: GRAIN, backgroundSize: "220px 220px" }}
+        className="bg-grain absolute inset-0"
+        style={{
+          backgroundImage: GRAIN,
+          backgroundSize: "220px 220px",
+          opacity: "var(--bg-grain-opacity)",
+          filter: "var(--bg-grain-filter)",
+        }}
       />
     </div>
   );

@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountsApi } from "@/lib/accounts/api";
+import type { AccountsApi, AccountsSnapshot } from "@/lib/accounts/api";
 import { READY_ACCOUNTS, appearanceStubs, recoveryStubs } from "@/test/testAccounts";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
@@ -38,12 +38,14 @@ function makeLaunch() {
       listeners.delete(cb);
     });
   });
+  const emit = (e: LaunchEvent) => listeners.forEach((l) => l(e));
   return {
     launch,
     status,
     openLogs,
     onState,
-    event: (e: LaunchEvent) => act(() => listeners.forEach((l) => l(e))),
+    emit,
+    event: (e: LaunchEvent) => act(() => emit(e)),
   };
 }
 
@@ -83,12 +85,15 @@ function makeProfiles(initial: ProfilesSnapshot) {
   };
 }
 
-function makeAccounts(signedIn = true) {
+function makeAccounts(accountState: boolean | AccountsSnapshot = true) {
   // By default the active account can play, so the dock offers Play / Set up; a refusal then comes
-  // from the (mocked) backend. `signedIn = false` is an empty list: the dock asks to sign in.
-  const none = signedIn
-    ? READY_ACCOUNTS
-    : { accounts: [], active: null, capabilities: { signIn: true, skin: false, cape: false } };
+  // from the (mocked) backend. `false` is an empty list: the dock asks to sign in.
+  const none: AccountsSnapshot =
+    typeof accountState === "boolean"
+      ? accountState
+        ? READY_ACCOUNTS
+        : { accounts: [], active: null, capabilities: { signIn: true, skin: false, cape: false } }
+      : accountState;
   return {
     list: vi.fn<AccountsApi["list"]>(() => Promise.resolve(none)),
     select: vi.fn<AccountsApi["select"]>(() => Promise.resolve(none)),
@@ -112,9 +117,15 @@ function makeAccounts(signedIn = true) {
   };
 }
 
-const flush = async () => act(async () => void (await Promise.resolve()));
+const flush = async () =>
+  act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
 
 beforeEach(() => {
+  setLocale("en");
   globalThis.ResizeObserver ??= class {
     observe() {}
     unobserve() {}
@@ -136,16 +147,24 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-async function setup(profile: ProfileSummary = ready) {
+async function setup(
+  profile: ProfileSummary = ready,
+  options: { signedIn?: boolean; accounts?: AccountsSnapshot } = {},
+) {
   const launch = makeLaunch();
   const profiles = makeProfiles(snap(profile));
-  const accounts = makeAccounts();
+  const accounts = makeAccounts(options.accounts ?? options.signedIn);
   render(
     <StrictMode>
       <LauncherHome api={profiles} accountsClient={accounts} launchClient={launch} />
     </StrictMode>,
   );
   await flush();
+  await waitFor(() => {
+    expect(profiles.list).toHaveBeenCalled();
+    expect(accounts.list).toHaveBeenCalled();
+    expect(launch.onState).toHaveBeenCalled();
+  });
   return { launch, profiles, accounts };
 }
 
@@ -156,6 +175,20 @@ const exit = (kind: LaunchExit["kind"], reason: string): LaunchExit => ({
   reason,
   seconds: 42,
 });
+const mockRefusal = (
+  launch: ReturnType<typeof makeLaunch>,
+  code: string,
+  message: string,
+  accountId: string | null = null,
+) => {
+  // Pre-spawn refusals in Rust (launch_cmd.rs) emit "launching" then "stopped" (exit: null)
+  // before rejecting launch_profile.
+  launch.launch.mockImplementationOnce(() => {
+    launch.emit({ instanceId: "survival", state: "launching" });
+    launch.emit({ instanceId: "survival", state: "stopped", exit: null });
+    return Promise.reject(new LaunchRefused(code, message, accountId));
+  });
+};
 
 describe("playing a ready profile", () => {
   it("goes Play -> Launching… -> Playing -> Play, and ignores duplicate clicks while busy", async () => {
@@ -220,8 +253,22 @@ describe("playing a ready profile", () => {
     expect(button("Play")).toBeTruthy();
   });
 
-  it("a game that never started is reported too, and a clean exit shows nothing", async () => {
+  it("a game that never started is reported too, and a clean exit or null exit shows nothing", async () => {
     const { launch } = await setup();
+    launch.event({
+      instanceId: "survival",
+      state: "stopped",
+      exit: exit("normal", "closed"),
+    });
+    await flush();
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    launch.event({ instanceId: "survival", state: "launching" });
+    launch.event({ instanceId: "survival", state: "stopped", exit: null });
+    await flush();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect((button("Play") as HTMLButtonElement).disabled).toBe(false);
+
     launch.event({
       instanceId: "survival",
       state: "stopped",
@@ -229,12 +276,22 @@ describe("playing a ready profile", () => {
     });
     expect((await screen.findByRole("dialog")).textContent).toContain("right after starting");
   });
+
+  it("with no signed-in accounts the dock asks to sign in first and opens Add account", async () => {
+    const { accounts, launch } = await setup(ready, { signedIn: false });
+    const signInBtn = button("Sign in to continue") as HTMLButtonElement;
+    expect(signInBtn.disabled).toBe(false);
+    fireEvent.click(signInBtn);
+    await waitFor(() => expect(accounts.vaultStatus).toHaveBeenCalled());
+    expect(launch.launch).not.toHaveBeenCalled();
+    expect((await screen.findByRole("dialog")).textContent).toContain("Add account");
+  });
 });
 
 describe("when the launch is refused", () => {
   const refuse = async (code: string, message: string, accountId: string | null = null) => {
     const ctx = await setup();
-    ctx.launch.launch.mockRejectedValueOnce(new LaunchRefused(code, message, accountId));
+    mockRefusal(ctx.launch, code, message, accountId);
     fireEvent.click(button("Play"));
     await screen.findByRole("dialog");
     return ctx;
@@ -254,12 +311,13 @@ describe("when the launch is refused", () => {
     const { accounts } = await refuse(
       "needs_sign_in",
       "Alex needs to sign in again before it can play.",
-      "acc-a",
+      "acc-ready",
     );
     fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
-    await waitFor(() => expect(accounts.vaultStatus).toHaveBeenCalled());
-    // (The account is not in this test's account list, so the dialog opens as a plain sign-in.)
-    expect(screen.getByRole("dialog")).toBeTruthy();
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith("acc-ready"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Sign in again");
+    expect(dialog.textContent).toContain("Sign in as Alex with Microsoft.");
   });
 
   it("a locked account store asks for the passphrase and then plays", async () => {
@@ -267,7 +325,7 @@ describe("when the launch is refused", () => {
     expect(screen.getByRole("dialog").textContent).toContain("Unlock your accounts");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
-    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("doesn't match"));
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("doesn’t match"));
     expect(launch.launch).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText<HTMLInputElement>("Passphrase").value).toBe("");
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "right pass" } });
@@ -276,16 +334,70 @@ describe("when the launch is refused", () => {
     expect(accounts.unlockVault).toHaveBeenLastCalledWith("right pass");
   });
 
+  it("a locked account store can start fresh and then ask to sign in again", async () => {
+    const { accounts } = await refuse("vault_locked", "Unlock your accounts to play.");
+    const resetSnapshot: AccountsSnapshot = {
+      accounts: [{ ...READY_ACCOUNTS.accounts[0], needsSignIn: true }],
+      active: READY_ACCOUNTS.active,
+      capabilities: READY_ACCOUNTS.capabilities,
+    };
+    accounts.resetVault.mockResolvedValueOnce(resetSnapshot);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forgot passphrase?" }));
+    expect((await screen.findByRole("dialog")).textContent).toContain("Start fresh?");
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+
+    await waitFor(() => expect(accounts.resetVault).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "This account needs to sign in again before it can play.",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
+    await waitFor(() => expect(accounts.signIn).toHaveBeenCalledWith("acc-ready"));
+    expect((await screen.findByRole("dialog")).textContent).toContain(
+      "Sign in as Alex with Microsoft.",
+    );
+  });
+
   it("missing or damaged files go straight to repair through the preparation dialog", async () => {
     const { launch, profiles } = await setup();
-    launch.launch.mockRejectedValueOnce(
-      new LaunchRefused("needs_repair", "Part of this profile is missing.", null),
-    );
+    mockRefusal(launch, "needs_repair", "Part of this profile is missing.");
     fireEvent.click(button("Play"));
     await waitFor(() => expect(profiles.prepare).toHaveBeenCalledWith("survival"));
     // The dock shows the repair while the preparation dialog (which hides the dock) is open.
     const repairing = screen.getByRole("button", { name: "Repairing…", hidden: true });
     expect((repairing as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("an already_running refusal transitions to Playing and polls launch status", async () => {
+    const { launch } = await setup();
+    const initialCalls = launch.status.mock.calls.length;
+    expect(initialCalls).toBeGreaterThanOrEqual(1);
+    launch.launch.mockRejectedValueOnce(
+      new LaunchRefused("already_running", "This profile is already starting or running.", null),
+    );
+    launch.status.mockResolvedValueOnce([{ instanceId: "survival", state: "playing" }]);
+
+    fireEvent.click(button("Play"));
+    await waitFor(() => expect(launch.status).toHaveBeenCalledTimes(initialCalls + 1));
+    const playing = button("Playing") as HTMLButtonElement;
+    expect(playing.disabled).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("non-LaunchRefused errors fall back to the unknown launch failure message", async () => {
+    const { launch } = await setup();
+    launch.launch.mockRejectedValueOnce(new Error("internal error detail"));
+
+    fireEvent.click(button("Play"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Can’t start");
+    expect(dialog.textContent).toContain("Minecraft couldn’t be started.");
+    expect(dialog.textContent).not.toContain("internal error detail");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("an offline refresh can be retried, and Mojang's pending approval is shown as its own reason", async () => {
@@ -354,9 +466,7 @@ describe("launch problems in Russian", () => {
   it("refusals are worded from their code, never from the backend's English message", async () => {
     setLocale("ru");
     const { launch } = await setup();
-    launch.launch.mockRejectedValueOnce(
-      new LaunchRefused("approval_pending", "English text that must not be shown", null),
-    );
+    mockRefusal(launch, "approval_pending", "English text that must not be shown");
     fireEvent.click(button("Играть"));
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).toContain("Вход пока недоступен");
@@ -367,7 +477,7 @@ describe("launch problems in Russian", () => {
   it("a locked account store asks for the passphrase in Russian and words a wrong one", async () => {
     setLocale("ru");
     const { launch } = await setup();
-    launch.launch.mockRejectedValueOnce(new LaunchRefused("vault_locked", "x", null));
+    mockRefusal(launch, "vault_locked", "x");
     fireEvent.click(button("Играть"));
     await screen.findByRole("dialog");
     expect(screen.getByRole("dialog").textContent).toContain("Разблокировать аккаунты");
@@ -376,5 +486,33 @@ describe("launch problems in Russian", () => {
     await waitFor(() =>
       expect(screen.getByRole("dialog").textContent).toContain("Парольная фраза не подходит."),
     );
+  });
+
+  it("disables the unlock passphrase input while checking and restores focus on wrong passphrase", async () => {
+    const { launch, accounts } = await setup();
+    let rejectUnlock!: (e: unknown) => void;
+    accounts.unlockVault.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectUnlock = reject;
+        }),
+    );
+    mockRefusal(launch, "vault_locked", "x");
+    fireEvent.click(button("Play"));
+    await screen.findByRole("dialog");
+
+    const pass = screen.getByLabelText<HTMLInputElement>("Passphrase");
+    fireEvent.change(pass, { target: { value: "wrong" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    expect(pass.disabled).toBe(true);
+
+    await act(async () => {
+      rejectUnlock(new BackendError("wrong passphrase", "passphrase_mismatch"));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(pass.disabled).toBe(false);
+      expect(document.activeElement).toBe(pass);
+    });
   });
 });

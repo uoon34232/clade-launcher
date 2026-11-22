@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   Select,
   SelectContent,
@@ -31,6 +31,7 @@ import {
 } from "@/lib/profiles/api";
 import { useUiSettings } from "@/lib/settings/useUiSettings";
 import { playSound } from "@/lib/sound/soundService";
+import { cn } from "@/lib/utils";
 import { Modal, ModalFooter, ModalHeader } from "./Modal";
 import { BUTTON_PRIMARY, BUTTON_QUIET, FIELD, LABEL } from "./modalStyles";
 import { Segmented } from "./Segmented";
@@ -66,13 +67,31 @@ export function CreateProfileDialog({
   api = profilesApi,
 }: Props) {
   const nameRef = useRef<HTMLInputElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  const [session, setSession] = useState(0);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setSubmitting(false);
+    if (open) setSession((s) => s + 1);
+  }
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange} initialFocus={nameRef} closeOnBackdrop={false}>
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      initialFocus={nameRef}
+      locked={submitting}
+      closeOnBackdrop={false}
+    >
       <ProfileForm
+        key={session}
+        open={open}
         nameRef={nameRef}
         existingNames={existingNames}
         api={api}
+        submitting={submitting}
+        setSubmitting={setSubmitting}
         onCancel={() => {
           playSound("click");
           onOpenChange(false);
@@ -87,21 +106,51 @@ export function CreateProfileDialog({
 }
 
 interface FormProps {
+  open: boolean;
   nameRef: RefObject<HTMLInputElement | null>;
   existingNames: readonly string[];
   api: ProfilesApi;
+  submitting: boolean;
+  setSubmitting: (submitting: boolean) => void;
   onCancel: () => void;
   onCreated: (snapshot: ProfilesSnapshot) => void;
 }
 
-function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormProps) {
+function ProfileForm({
+  open,
+  nameRef,
+  existingNames,
+  api,
+  submitting,
+  setSubmitting,
+  onCancel,
+  onCreated,
+}: FormProps) {
   const t = useT();
   const ui = useUiSettings();
   const isAdvanced = ui.uiMode === "advanced";
+  const activeRef = useRef(open);
+  const submitTokenRef = useRef(0);
+  const inFlightSubmitRef = useRef(false);
+  const mcTriggerRef = useRef<HTMLButtonElement>(null);
+  const pendingCatalogFocusRef = useRef(false);
+  useLayoutEffect(() => {
+    activeRef.current = open;
+    if (!open) {
+      inFlightSubmitRef.current = false;
+      submitTokenRef.current += 1;
+    }
+    return () => {
+      activeRef.current = false;
+      inFlightSubmitRef.current = false;
+      submitTokenRef.current += 1;
+    };
+  }, [open]);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [filter, setFilter] = useState<VersionFilter>("releases");
   const [reload, setReload] = useState(0);
+  const [loaderReload, setLoaderReload] = useState(0);
   const [catalogResult, setCatalogResult] = useState<{
     key: number;
     state: Exclude<CatalogState, { status: "loading" }>;
@@ -114,7 +163,6 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     mc: string;
     options: LoaderOption[] | null;
   } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   // "Loading" is derived: a result only counts if it belongs to the current request.
@@ -122,6 +170,15 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     () => (catalogResult?.key === reload ? catalogResult.state : { status: "loading" }),
     [catalogResult, reload],
   );
+
+  useEffect(() => {
+    if (!pendingCatalogFocusRef.current || catalog.status === "loading") return;
+    pendingCatalogFocusRef.current = false;
+    const activeEl = document.activeElement;
+    if (activeEl && activeEl !== document.body && activeEl !== document.documentElement) return;
+    if (catalog.status === "ready") mcTriggerRef.current?.focus();
+    else nameRef.current?.focus();
+  }, [catalog.status, nameRef]);
 
   // The official Minecraft version list (from the backend: live, or the saved copy when offline).
   useEffect(() => {
@@ -183,7 +240,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
     return () => {
       cancelled = true;
     };
-  }, [type, selectedMc, api]);
+  }, [type, selectedMc, loaderReload, api]);
 
   const loaderForMc = loaderResult?.mc === selectedMc ? loaderResult : null; // a result for another version does not count
   const options = loaderForMc?.options ?? [];
@@ -216,7 +273,8 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
   const submit = (e: { preventDefault: () => void }) => {
     e.preventDefault();
     setNameTouched(true);
-    if (!canSubmit || !selectedMc) return;
+    if (!open || !canSubmit || !selectedMc || inFlightSubmitRef.current) return;
+    inFlightSubmitRef.current = true;
     const request: NewProfileRequest = {
       name: name.trim(),
       minecraft: selectedMc,
@@ -229,14 +287,20 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
               loader_version: { mode: "pinned", version: chosenLoaderVersion as string },
             },
     };
+    const token = ++submitTokenRef.current;
     setSubmitting(true);
     setSubmitError(null);
     api.create(request).then(
       (snapshot) => {
+        inFlightSubmitRef.current = false;
+        if (!activeRef.current || submitTokenRef.current !== token) return;
+        setSubmitting(false);
         playSound("primary");
         onCreated(snapshot);
       },
       (err: unknown) => {
+        inFlightSubmitRef.current = false;
+        if (!activeRef.current || submitTokenRef.current !== token) return;
         setSubmitting(false);
         setSubmitError(describeError("profile", err));
       },
@@ -265,6 +329,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
         <input
           ref={nameRef}
           id="profile-name"
+          disabled={submitting}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => setNameTouched(true)}
@@ -294,6 +359,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
           {isAdvanced && (
             <Segmented
               variant="plain"
+              disabled={submitting}
               label={t("create.filterLabel")}
               value={filter}
               onChange={(f) => {
@@ -310,6 +376,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
         {catalog.status === "ready" ? (
           <Select
             value={selectedMc}
+            disabled={submitting || shown.length === 0}
             onValueChange={(v) => {
               if (typeof v === "string") {
                 playSound("select");
@@ -319,20 +386,21 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
             items={shown.map((e) => ({ value: e.id, label: e.id }))}
           >
             <SelectTrigger
+              ref={mcTriggerRef}
               aria-labelledby="mc-version-label"
-              className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3`}
+              className={cn(FIELD, "min-w-0 justify-between py-0 pr-3")}
             >
               <SelectValue placeholder={t("create.choose")} />
             </SelectTrigger>
             <SelectContent
               alignItemWithTrigger={false}
               sideOffset={6}
-              className="max-h-72 rounded-xl p-1"
+              className="max-h-[min(18rem,var(--available-height))] rounded-xl p-1"
             >
               {shown.map((e) => (
                 <SelectItem key={e.id} value={e.id} className="rounded-lg py-1.5">
                   <span className="flex-1">{e.id}</span>
-                  <span className="text-cream/45 pr-4 text-[0.75rem] tabular-nums">
+                  <span className="text-cream/75 pr-4 text-[0.75rem] tabular-nums">
                     {releaseDay(e.releaseTime)}
                   </span>
                 </SelectItem>
@@ -340,7 +408,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
             </SelectContent>
           </Select>
         ) : (
-          <div className={`${FIELD} text-ink-muted flex items-center`} aria-live="polite">
+          <div className={cn(FIELD, "text-ink-muted flex items-center")} aria-live="polite">
             {catalog.status === "loading" ? t("create.loading") : t("create.unavailable")}
           </div>
         )}
@@ -349,8 +417,12 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
             {catalog.message}{" "}
             <button
               type="button"
-              className="focus-visible:ring-clay/45 underline underline-offset-2 outline-none focus-visible:ring-2"
-              onClick={() => setReload((n) => n + 1)}
+              className="focus-visible:ring-ring underline underline-offset-2 outline-hidden focus-visible:ring-2"
+              onClick={() => {
+                playSound("click");
+                pendingCatalogFocusRef.current = true;
+                setReload((n) => n + 1);
+              }}
             >
               {t("common.tryAgain")}
             </button>
@@ -371,6 +443,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
         </span>
         <Segmented
           className="self-start"
+          disabled={submitting}
           label={t("create.typeLabel")}
           value={type}
           onChange={(t) => {
@@ -398,17 +471,34 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
                   className="text-ink-muted text-right text-[0.75rem] leading-4"
                   aria-live="polite"
                 >
-                  {loaderFailed
-                    ? t("create.loaderCheckFailed")
-                    : loadingLoaders
-                      ? t("create.loaderChecking")
-                      : loaderHints.length > 0
-                        ? `${loaderHints.join(". ")}.`
-                        : ""}
+                  {loaderFailed ? (
+                    <span className="text-clay-deep">
+                      <span>{t("create.loaderCheckFailed")}</span>{" "}
+                      <button
+                        type="button"
+                        disabled={submitting}
+                        className="focus-visible:ring-ring underline underline-offset-2 outline-hidden focus-visible:ring-2"
+                        onClick={() => {
+                          playSound("click");
+                          setLoaderResult(null);
+                          setLoaderReload((n) => n + 1);
+                        }}
+                      >
+                        {t("common.tryAgain")}
+                      </button>
+                    </span>
+                  ) : loadingLoaders ? (
+                    t("create.loaderChecking")
+                  ) : loaderHints.length > 0 ? (
+                    `${loaderHints.join(". ")}.`
+                  ) : (
+                    ""
+                  )}
                 </span>
               </div>
               <Segmented
                 className="self-start"
+                disabled={submitting}
                 label={t("create.loaderLabel")}
                 value={loader}
                 onChange={(k) => {
@@ -431,7 +521,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
                 </span>
                 <Select
                   value={chosenLoaderVersion}
-                  disabled={!current || current.status !== "ok"}
+                  disabled={submitting || !current || current.status !== "ok"}
                   onValueChange={(v) => {
                     if (typeof v === "string") {
                       playSound("select");
@@ -448,7 +538,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
                 >
                   <SelectTrigger
                     aria-labelledby="loader-version-label"
-                    className={`${FIELD} min-w-0 justify-between border-0 py-0 pr-3 disabled:opacity-50`}
+                    className={cn(FIELD, "min-w-0 justify-between py-0 pr-3 disabled:opacity-50")}
                   >
                     <SelectValue
                       placeholder={loadingLoaders ? t("create.checking") : t("create.noCompatible")}
@@ -457,12 +547,12 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
                   <SelectContent
                     alignItemWithTrigger={false}
                     sideOffset={6}
-                    className="max-h-60 rounded-xl p-1"
+                    className="max-h-[min(15rem,var(--available-height))] rounded-xl p-1"
                   >
                     {(current?.versions ?? []).map((v) => (
                       <SelectItem key={v.version} value={v.version} className="rounded-lg py-1.5">
                         <span className="flex-1">{v.version}</span>
-                        <span className="text-cream/45 pr-4 text-[0.75rem]">
+                        <span className="text-cream/75 pr-4 text-[0.75rem]">
                           {v.version === current?.recommended
                             ? t("create.channel.recommended")
                             : t(CHANNEL_NOTE[v.channel])}
@@ -489,7 +579,7 @@ function ProfileForm({ nameRef, existingNames, api, onCancel, onCreated }: FormP
       )}
 
       <ModalFooter>
-        <button type="button" onClick={onCancel} className={BUTTON_QUIET}>
+        <button type="button" disabled={submitting} onClick={onCancel} className={BUTTON_QUIET}>
           {t("common.cancel")}
         </button>
         <button type="submit" disabled={!canSubmit} className={BUTTON_PRIMARY}>

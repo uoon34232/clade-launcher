@@ -6,7 +6,7 @@
 //  - Frontend: every npm package whose code or styles end up in the bundled interface, found by reading
 //    what the shipped source imports (not the build tooling) and following those packages'
 //    dependencies in the installed tree. Licence files are read from each installed package. This
-//    includes the two font families (Fraunces, Instrument Sans), whose licence files carry their copyright.
+//    includes the four font families (Fraunces, Instrument Sans, Literata, Onest), whose licence files carry their copyright.
 //  - The bundled WebView2 Fixed Version Runtime, which has its own licence (shipped as a file).
 //
 // What cannot be verified is said so in the output: a package that ships no licence file is listed by
@@ -18,6 +18,7 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -61,7 +62,7 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Licence-like files at the top of a package directory: `[{ file, text }]`. */
 export function readLicenseFiles(dir) {
-  if (!existsSync(dir)) return [];
+  if (!dir || !existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((f) => LICENSE_FILE_RE.test(f) && statSync(join(dir, f)).isFile())
     .filter((f) => !/\.(js|mjs|cjs|ts|json|rs|toml|png|svg|woff2?)$/i.test(f))
@@ -274,8 +275,10 @@ export function groupByLicenseText(packages, sources = []) {
     const files = readLicenseFiles(p.dir);
     if (files.length === 0) {
       // The package ships no file: use a verified upstream text for exactly this crate version, if any.
-      const known = sources.find((src) =>
-        (src.appliesTo ?? []).some((a) => a.crate === p.name && a.version === p.version),
+      const known = sources.find(
+        (src) =>
+          !src.component &&
+          (src.appliesTo ?? []).some((a) => a.crate === p.name && a.version === p.version),
       );
       if (known) add(known.text, p, known.origin);
       else uncovered.push(p);
@@ -289,6 +292,10 @@ export function groupByLicenseText(packages, sources = []) {
   // from another package. MIT and BSD texts name their copyright holder, so they are never borrowed.
   const stillUncovered = [];
   for (const p of uncovered) {
+    if (p.unverifiedComponent) {
+      stillUncovered.push(p);
+      continue;
+    }
     // "A OR B" lets the recipient choose, so any one option with a fixed text is enough.
     const options = p.license.split(/\s+OR\s+|\s*\/\s*/);
     const title = options.map((o) => FIXED_TEXT_LICENSES[o]).find(Boolean);
@@ -347,6 +354,22 @@ function section(title, rust, npm, sources, components) {
   return out;
 }
 
+function fontDisplayName(pkgName) {
+  const slug = pkgName.replace(/^@[^/]+\//, "");
+  const parts = slug.split("-").filter(Boolean);
+  return parts.map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+}
+
+function sectionTitle(fontPackages) {
+  const base = "Rust crates, JavaScript packages and linked components";
+  const names = [...new Set(fontPackages.map((p) => fontDisplayName(p.name)))];
+  if (names.length === 0) return base;
+  if (names.length === 1) return `${base} (including the ${names[0]} font)`;
+  const allButLast = names.slice(0, -1).join(", ");
+  const last = names[names.length - 1];
+  return `${base} (including the ${allButLast} and ${last} fonts)`;
+}
+
 /** Assembles the whole notices file. Pure: everything it needs is passed in. */
 export function renderNotices({
   rust,
@@ -354,7 +377,7 @@ export function renderNotices({
   rustMissing = [],
   npmMissing = [],
   projectVersion,
-  fontPackages,
+  fontPackages = [],
   sources = [],
   components = [],
 }) {
@@ -412,15 +435,7 @@ export function renderNotices({
   );
   out.push("  owners' terms.");
   out.push("");
-  out.push(
-    ...section(
-      "Rust crates, JavaScript packages and linked components (including the Fraunces and Instrument Sans fonts)",
-      rust,
-      npm,
-      sources,
-      components,
-    ),
-  );
+  out.push(...section(sectionTitle(fontPackages), rust, npm, sources, components));
   return `${out.join("\n").trimEnd()}\n`;
 }
 
@@ -447,6 +462,50 @@ function readCargoMetadata(tauriDir) {
   return JSON.parse(raw);
 }
 
+function isCrateBinding(b) {
+  if (!b || typeof b.crate !== "string" || !b.crate) return false;
+  return typeof b.version === "string" && b.version.length > 0;
+}
+
+// Components must bind to exact crate version(s) in `rust` so upgrading the host crate fails --strict.
+function resolveComponent(src, rustByName) {
+  const rawBindings = src.linkedFrom ?? src.appliesTo ?? [];
+  const validBindings = Array.isArray(rawBindings) ? rawBindings.filter(isCrateBinding) : [];
+  const base = {
+    name: src.component,
+    license: src.license ?? "UNKNOWN",
+    repository: src.homepage ?? "",
+  };
+  if (validBindings.length === 0) {
+    return { ...base, version: "(no crate-version binding)", unverifiedComponent: true };
+  }
+  const expectedByCrate = new Map();
+  for (const b of validBindings) {
+    if (!expectedByCrate.has(b.crate)) expectedByCrate.set(b.crate, new Set());
+    expectedByCrate.get(b.crate).add(b.version);
+  }
+  const mismatches = [];
+  for (const [crateName, versions] of expectedByCrate) {
+    const found = rustByName.get(crateName) ?? [];
+    if (found.length === 0) {
+      mismatches.push(`missing ${crateName} ${[...versions].join("/")}`);
+      continue;
+    }
+    const wrong = found.filter((pkg) => !versions.has(pkg.version));
+    if (wrong.length > 0) {
+      mismatches.push(wrong.map((pkg) => `${pkg.name} ${pkg.version}`).join(", "));
+    }
+  }
+  if (mismatches.length === 0) {
+    return { ...base, version: "", source: src };
+  }
+  return {
+    ...base,
+    version: `(bound crate mismatch: ${mismatches.join("; ")})`,
+    unverifiedComponent: true,
+  };
+}
+
 const BUNDLED_HELPERS = ["vite"];
 
 export function generate(root, { cargoMetadata = null, licenseSources = null } = {}) {
@@ -460,6 +519,11 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
   }
   const metadata = cargoMetadata ?? readCargoMetadata(join(root, "src-tauri"));
   const rust = rustRuntimePackages(metadata);
+  const rustByName = new Map();
+  for (const pkgItem of rust) {
+    if (!rustByName.has(pkgItem.name)) rustByName.set(pkgItem.name, []);
+    rustByName.get(pkgItem.name).push(pkgItem);
+  }
   // Small pieces of build tooling that are copied into the interface bundle (Vite's preload helper).
   const { packages: npm, missing } = npmRuntimePackages(root, {
     scripts: roots.scripts,
@@ -470,13 +534,8 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
   // Components that are linked into Clade.exe without being a Rust crate or an npm package of their own.
   const components = sources
     .filter((src) => src.component)
-    .map((src) => ({
-      name: src.component,
-      version: "",
-      license: src.license,
-      repository: src.homepage ?? "",
-      source: src,
-    }));
+    .map((src) => resolveComponent(src, rustByName));
+  const { uncovered } = groupByLicenseText([...rust, ...npm, ...components], sources);
   return {
     text: renderNotices({
       rust,
@@ -491,23 +550,31 @@ export function generate(root, { cargoMetadata = null, licenseSources = null } =
       rust: rust.length,
       npm: npm.length,
       components: components.length,
-      uncovered: groupByLicenseText([...rust, ...npm, ...components], sources).uncovered.length,
+      uncovered: uncovered.length,
     },
-    uncoveredNames: groupByLicenseText([...rust, ...npm, ...components], sources).uncovered.map(
-      (p) => `${p.name} ${p.version}`,
-    ),
+    uncoveredNames: uncovered.map((p) => `${p.name} ${p.version}`.trimEnd()),
     missing,
   };
 }
 
+export function parseOutArg(argv) {
+  const idx = argv.indexOf("--out");
+  if (idx < 0) return null;
+  const out = argv[idx + 1];
+  if (!out || !out.trim() || out.startsWith("-")) return null;
+  return out;
+}
+
 function main(argv) {
-  const out = argv[argv.indexOf("--out") + 1];
-  if (argv.indexOf("--out") < 0 || !out) {
+  const out = parseOutArg(argv);
+  if (!out) {
     console.error("usage: generate-notices.mjs --out <file> [--strict]");
     process.exit(2);
   }
   const { text, counts, missing, uncoveredNames } = generate(resolve("."));
-  writeFileSync(resolve(out), text, "utf8");
+  const outPath = resolve(out);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, text, "utf8");
   console.log(
     `notices: ${counts.rust} Rust crates, ${counts.npm} JavaScript packages, ${counts.components} linked components, ${counts.uncovered} without a licence text`,
   );

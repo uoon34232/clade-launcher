@@ -271,13 +271,19 @@ mod win10_acl {
             ));
         }
 
-        // SAFETY: `dacl` is null or valid within `_sd_guard`, and both SIDs are valid within their
-        // `LocalMem` guards.
-        let already_granted = !dacl.is_null()
-            && unsafe {
-                dacl_grants_inheritable_rx(dacl, sid_app_pkg.0)
-                    && dacl_grants_inheritable_rx(dacl, sid_restricted_pkg.0)
-            };
+        // A NULL DACL grants unrestricted access to everyone (including AppContainer renderers).
+        // Passing NULL to `SetEntriesInAclW` would replace it with a minimal 2-ACE DACL that locks
+        // out the user and Administrators, so leave an explicit NULL DACL untouched.
+        if dacl.is_null() {
+            return Ok(false);
+        }
+
+        // SAFETY: `dacl` is non-null and valid within `_sd_guard`, and both SIDs are valid within
+        // their `LocalMem` guards.
+        let already_granted = unsafe {
+            dacl_grants_inheritable_rx(dacl, sid_app_pkg.0)
+                && dacl_grants_inheritable_rx(dacl, sid_restricted_pkg.0)
+        };
         if already_granted {
             return Ok(false);
         }

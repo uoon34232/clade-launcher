@@ -69,6 +69,19 @@ describe("phrase pool", () => {
       expect(BASE_PHRASES.map((ph) => ph.id)).toEqual(IDS);
     }
   });
+
+  it("interpolates params into the localized phrase text", () => {
+    const withParams: Phrase = {
+      id: "played-sample",
+      key: "hero.played",
+      params: { time: "2h 15m" },
+    };
+    setLocale("en");
+    expect(phraseText(withParams)).toBe("Played 2h 15m");
+    setLocale("ru");
+    expect(phraseText(withParams)).toBe("В игре 2h 15m");
+    setLocale("en");
+  });
 });
 
 describe("pickPhrase", () => {
@@ -83,8 +96,13 @@ describe("pickPhrase", () => {
 
   it("can reach every other phrase and handles rng edge values", () => {
     const reached = new Set<string>();
-    for (let i = 0; i < 1000; i++) reached.add(pickPhrase(BASE_PHRASES, "welcome-back").id);
-    expect(reached.size).toBe(BASE_PHRASES.length - 1);
+    const otherCount = BASE_PHRASES.length - 1;
+    for (let i = 0; i < otherCount; i++) {
+      const picked = pickPhrase(BASE_PHRASES, "welcome-back", () => (i + 0.5) / otherCount);
+      expect(picked.id).not.toBe("welcome-back");
+      reached.add(picked.id);
+    }
+    expect(reached.size).toBe(otherCount);
     expect(() => pickPhrase(BASE_PHRASES, undefined, () => 0.999999999)).not.toThrow();
     expect(() => pickPhrase(BASE_PHRASES, undefined, () => 0)).not.toThrow();
   });

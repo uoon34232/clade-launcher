@@ -315,10 +315,8 @@ fn a_damaged_account_list_stops_everything_before_any_file_moves() {
     fs::write(w.accounts_file(), b"{ not json").unwrap();
     let (vault, bak) = (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap());
     assert_eq!(w.reset(), Err(ResetError::Storage));
-    assert_eq!(
-        (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap()),
-        (vault, bak)
-    );
+    assert_eq!(fs::read(w.vault()).unwrap(), vault);
+    assert_eq!(fs::read(w.bak()).unwrap(), bak);
     assert!(!w.data().join(RETIRED_DIR).exists());
     assert_eq!(
         fs::read(w.accounts_file()).unwrap(),
@@ -397,10 +395,8 @@ fn a_failed_rename_leaves_the_active_vault_usable_and_puts_the_backup_back() {
         .unwrap();
     assert_eq!(w.reset(), Err(ResetError::ResetFailed));
     drop(held);
-    assert_eq!(
-        (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap()),
-        (vault, bak)
-    );
+    assert_eq!(fs::read(w.vault()).unwrap(), vault);
+    assert_eq!(fs::read(w.bak()).unwrap(), bak);
     assert!(
         w.retired().is_empty(),
         "the empty retirement folder is gone again"
@@ -718,10 +714,8 @@ fn a_failed_vault_rename_puts_the_backup_back_and_reports_failure_on_any_system(
     // call 1 moves the backup, call 2 (the vault) fails, call 3 puts the backup back
     let result = retire_with(&files, &w.data().join(RETIRED_DIR), NOW, &failing_on(&[2]));
     assert_eq!(result, Err(ResetError::ResetFailed));
-    assert_eq!(
-        (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap()),
-        (vault, bak)
-    );
+    assert_eq!(fs::read(w.vault()).unwrap(), vault);
+    assert_eq!(fs::read(w.bak()).unwrap(), bak);
     assert!(
         w.retired().is_empty(),
         "the folder it made is empty again, so it is gone"
@@ -773,21 +767,85 @@ fn when_the_rollback_fails_too_the_credentials_are_kept_in_the_archive_and_a_ret
     assert!(w.list().accounts.iter().all(is_unknown_reauth));
 }
 
-#[test]
-fn a_create_that_began_before_start_fresh_cannot_install_its_vault_afterwards() {
+async fn poll_once<F: std::future::Future>(mut fut: std::pin::Pin<&mut F>) -> Option<F::Output> {
+    std::future::poll_fn(|cx| match std::future::Future::poll(fut.as_mut(), cx) {
+        std::task::Poll::Pending => std::task::Poll::Ready(None),
+        std::task::Poll::Ready(out) => std::task::Poll::Ready(Some(out)),
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_create_that_began_before_start_fresh_cannot_install_its_vault_afterwards() {
     let w = world();
-    let started = w.auth.epoch.load(Ordering::SeqCst);
-    // an unlock first: Start fresh archives the vault, then a create begins and completes before the
-    // epoch the *first* operation saw is compared
+    // Missing vault.bin, while stale vault.bin.bak and Ready accounts still give reset() work to do.
+    fs::remove_file(w.vault()).unwrap();
+
+    let mut create = std::pin::pin!(crate::auth::create_vault_with(&w.auth, NEW_PASS.into()));
+    assert!(
+        poll_once(create.as_mut()).await.is_none(),
+        "create_vault_with should suspend on key derivation after capturing epoch"
+    );
+
+    // Start fresh runs while create is deriving the key: archives .bak, bumps epoch, marks accounts.
     w.reset().unwrap();
-    let created = Vault::create_with(&w.vault(), NEW_PASS, FAST).unwrap();
-    let err = w.auth.install_vault(created, started, |_| ()).unwrap_err();
+    assert!(!w.vault().exists() && !w.bak().exists());
+    assert_eq!(w.retired().len(), 1);
+    assert!(w.list().accounts.iter().all(is_unknown_reauth));
+
+    // finish_create_vault must reject the stale epoch before writing vault.bin to disk.
+    let err = create.await.unwrap_err();
     assert_eq!(err.code, "vault_missing");
     assert!(lock(&w.auth.vault).is_none(), "nothing was installed");
-    // and a create that saw the current epoch is installed
-    let current = w.auth.epoch.load(Ordering::SeqCst);
-    let again = Vault::unlock(&w.vault(), NEW_PASS).unwrap();
-    w.auth.install_vault(again, current, |_| ()).unwrap();
+    assert!(
+        !w.vault().exists(),
+        "rejected create must not leave an orphaned vault.bin on disk"
+    );
+
+    // A create that begins after Start fresh sees the current epoch, persists, and installs.
+    crate::auth::create_vault_with(&w.auth, NEW_PASS.into())
+        .await
+        .unwrap();
+    assert!(lock(&w.auth.vault).is_some());
+    assert!(w.vault().is_file());
+    assert!(Vault::unlock(&w.vault(), NEW_PASS).is_ok());
+}
+
+#[tokio::test]
+async fn an_unlock_vault_with_that_began_before_start_fresh_is_rejected_without_installing() {
+    let w = world();
+    // Use production KDF parameters so Vault::unlock stays on the blocking pool across poll_once.
+    fs::remove_file(w.vault()).unwrap();
+    Vault::create(&w.vault(), PASS).unwrap();
+
+    let mut unlock = std::pin::pin!(crate::auth::unlock_vault_with(
+        &w.auth,
+        &w.accounts,
+        PASS.into(),
+    ));
+    assert!(
+        poll_once(unlock.as_mut()).await.is_none(),
+        "unlock_vault_with should suspend on key derivation after capturing epoch"
+    );
+
+    w.reset().unwrap();
+    assert!(!w.vault().exists() && !w.bak().exists());
+    assert_eq!(w.retired().len(), 1);
+    assert!(w.list().accounts.iter().all(is_unknown_reauth));
+
+    let err = unlock.await.unwrap_err();
+    assert_eq!(err.code, "vault_missing");
+    assert!(lock(&w.auth.vault).is_none(), "nothing was installed");
+    assert!(
+        !w.vault().exists(),
+        "rejected unlock must not restore or write vault.bin"
+    );
+
+    // An unlock for a newly created vault after Start fresh sees the current epoch and succeeds.
+    Vault::create_with(&w.vault(), NEW_PASS, FAST).unwrap();
+    crate::auth::unlock_vault_with(&w.auth, &w.accounts, NEW_PASS.into())
+        .await
+        .unwrap();
     assert!(lock(&w.auth.vault).is_some());
 }
 
@@ -878,6 +936,7 @@ fn reparse_points_on_retired_vaults_or_credential_paths_are_refused() {
     let (vault, bak) = (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap());
     let outside = w.dir.path().join("outside");
     fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("sentinel.txt"), b"untouched").unwrap();
 
     let retired_link = w.data().join(RETIRED_DIR);
     assert!(
@@ -890,13 +949,11 @@ fn reparse_points_on_retired_vaults_or_credential_paths_are_refused() {
     assert_eq!(w.reset(), Err(ResetError::ResetFailed));
     assert_eq!(
         fs::read_dir(&outside).unwrap().count(),
-        0,
+        1,
         "nothing was redirected outside data/"
     );
-    assert_eq!(
-        (fs::read(w.vault()).unwrap(), fs::read(w.bak()).unwrap()),
-        (vault, bak)
-    );
+    assert_eq!(fs::read(w.vault()).unwrap(), vault);
+    assert_eq!(fs::read(w.bak()).unwrap(), bak);
     assert!(w
         .list()
         .accounts
@@ -911,9 +968,53 @@ fn reparse_points_on_retired_vaults_or_credential_paths_are_refused() {
         Err(ResetError::ResetFailed)
     );
     remove_dir_link(&data_link);
-
-    // Once the link on retired-vaults is removed, recovery succeeds normally.
     remove_dir_link(&retired_link);
+
+    // Also refuse reparse points placed directly at any credential file path.
+    let tmp_path = w.data().join("vault.bin.0123456789ab.tmp");
+    let bak_path = w.bak();
+    let vault_path = w.vault();
+    for (cred_path, original) in [
+        (tmp_path.as_path(), None),
+        (bak_path.as_path(), Some(bak.as_slice())),
+        (vault_path.as_path(), Some(vault.as_slice())),
+    ] {
+        if original.is_some() {
+            fs::remove_file(cred_path).unwrap();
+        }
+        assert!(
+            make_dir_link(&outside, cred_path),
+            "could not create directory link/junction at {}",
+            cred_path.display()
+        );
+        assert!(crate::portable::fsutil::is_link(cred_path).unwrap());
+        assert_eq!(credential_files(&w.vault()), Err(ResetError::ResetFailed));
+        assert_eq!(w.reset(), Err(ResetError::ResetFailed));
+        assert_eq!(
+            fs::read(outside.join("sentinel.txt")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            1,
+            "nothing was written into or moved from the link target"
+        );
+        assert!(w.retired().is_empty());
+        assert!(w
+            .list()
+            .accounts
+            .iter()
+            .any(|a| matches!(a.status, AccountStatus::Ready)));
+
+        remove_dir_link(cred_path);
+        if let Some(bytes) = original {
+            fs::write(cred_path, bytes).unwrap();
+        }
+    }
+
+    // Once all links are removed, recovery succeeds normally.
     w.reset().unwrap();
     assert_eq!(w.retired().len(), 1);
+    assert_eq!(fs::read(w.retired()[0].join("vault.bin")).unwrap(), vault);
+    assert_eq!(fs::read(w.retired()[0].join("vault.bin.bak")).unwrap(), bak);
 }

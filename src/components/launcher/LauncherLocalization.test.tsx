@@ -27,6 +27,7 @@ vi.mock("@/lib/sound/soundService", () => ({
 }));
 
 import { LauncherHome } from "./LauncherHome";
+import { PlayButton } from "./PlayButton";
 
 const profile = (over: Partial<ProfileSummary> = {}): ProfileSummary => ({
   id: "survival",
@@ -162,15 +163,20 @@ async function renderHome(
     selected: "survival",
     totalPlaytimeSeconds: 27 * 3600 + 42 * 60,
   },
+  options: {
+    accounts?: AccountsSnapshot;
+    setup?: (ctx: ReturnType<typeof apis>) => void;
+  } = {},
 ) {
-  const { profiles, acc, launch } = apis(snapshot);
+  const ctx = apis(snapshot, options.accounts);
+  options.setup?.(ctx);
   render(
     <StrictMode>
-      <LauncherHome api={profiles} accountsClient={acc} launchClient={launch} />
+      <LauncherHome api={ctx.profiles} accountsClient={ctx.acc} launchClient={ctx.launch} />
     </StrictMode>,
   );
   await flush();
-  return { profiles, acc, launch };
+  return ctx;
 }
 
 const dock = () => screen.getByRole("navigation", { name: "Clade" });
@@ -193,21 +199,57 @@ describe("the home screen in Russian", () => {
     expect(document.documentElement.lang).toBe("ru");
   });
 
-  it("words the other dock states in Russian", async () => {
-    setLocale("ru");
-    await renderHome({
-      profiles: [profile({ ready: false })],
-      selected: "survival",
-      totalPlaytimeSeconds: 0,
+  describe("words the other dock states in Russian", () => {
+    it("shows setup for an unprepared profile", async () => {
+      setLocale("ru");
+      await renderHome({
+        profiles: [profile({ ready: false })],
+        selected: "survival",
+        totalPlaytimeSeconds: 0,
+      });
+      expect(within(dock()).getByRole("button", { name: "Подготовить" })).toBeTruthy();
     });
-    expect(within(dock()).getByRole("button", { name: "Подготовить" })).toBeTruthy();
-    cleanup();
-    const ctx = apis({ profiles: [profile()], selected: "survival", totalPlaytimeSeconds: 0 });
-    ctx.launch.launch.mockImplementation(() => new Promise(() => undefined));
-    render(<LauncherHome api={ctx.profiles} accountsClient={ctx.acc} launchClient={ctx.launch} />);
-    await flush();
-    fireEvent.click(within(dock()).getByRole("button", { name: "Играть" }));
-    expect(within(dock()).getByRole("button", { name: "Запуск…" })).toBeTruthy();
+
+    it("shows launching while a launch is in flight", async () => {
+      setLocale("ru");
+      await renderHome(undefined, {
+        setup: (ctx) => {
+          ctx.launch.launch.mockImplementation(() => new Promise(() => undefined));
+        },
+      });
+      fireEvent.click(within(dock()).getByRole("button", { name: "Играть" }));
+      expect(within(dock()).getByRole("button", { name: "Запуск…" })).toBeTruthy();
+    });
+
+    it("shows sign-in when the active account needs to sign in again", async () => {
+      setLocale("ru");
+      await renderHome(undefined, {
+        accounts: { ...ACCOUNTS, active: "b" },
+      });
+      expect(within(dock()).getByRole("button", { name: "Войти для продолжения" })).toBeTruthy();
+    });
+
+    it("shows playing while the selected profile is running", async () => {
+      setLocale("ru");
+      await renderHome(undefined, {
+        setup: (ctx) => {
+          ctx.launch.status.mockResolvedValue([{ instanceId: "survival", state: "playing" }]);
+        },
+      });
+      expect(within(dock()).getByRole("button", { name: "В игре" })).toBeTruthy();
+    });
+
+    it("shows repairing while a ready profile is being repaired", () => {
+      setLocale("ru");
+      render(
+        <StrictMode>
+          <PlayButton state="repairing" />
+        </StrictMode>,
+      );
+      const btn = screen.getByRole<HTMLButtonElement>("button", { name: "Восстановление…" });
+      expect(btn.disabled).toBe(true);
+      expect(btn.getAttribute("aria-busy")).toBe("true");
+    });
   });
 
   it("opens the account menu, the profile menu and Create profile in Russian", async () => {
@@ -321,29 +363,129 @@ describe("switching the language live", () => {
     act(() => setLocale("ru"));
     expect(stops()).toEqual(english);
   });
+
+  it("reverts the Settings radio selection and copy to English when set_language rejects", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    invoke.mockImplementation((cmd) => {
+      if (cmd === "set_language") return Promise.reject(new Error("read-only stick"));
+      return Promise.resolve(null);
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await openSettings();
+      const radios = () =>
+        within(
+          within(dialog()).getByRole("radiogroup", { name: /^(Language|Язык)$/ }),
+        ).getAllByRole("radio");
+
+      expect(within(dialog()).getByText("Settings")).toBeTruthy();
+      expect(radios().map((r) => r.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+
+      fireEvent.click(within(dialog()).getByRole("radio", { name: "Русский" }));
+      expect(getLocale()).toBe("ru");
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith("set_language", { language: "ru" });
+        expect(getLocale()).toBe("en");
+        expect(within(dialog()).getByText("Settings")).toBeTruthy();
+      });
+      expect(radios().map((r) => r.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+      expect(document.documentElement.lang).toBe("en");
+      expect(screen.getByText("Played 27h 42m")).toBeTruthy();
+    } finally {
+      warnSpy.mockRestore();
+      invoke.mockReset();
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
+  });
 });
 
 describe("persistence and the first-run default", () => {
   it("saves an explicit choice through the settings service and it wins on the next start", async () => {
-    await chooseLanguage("ru");
-    expect(getLocale()).toBe("ru");
-    // A "restart": the backend returns what was saved; an English Windows no longer matters.
-    const restarted = await loadUiSettings();
-    expect(restarted.language).toBe("ru");
-    expect(resolveLocale(restarted.language, "en-US")).toBe("ru");
-    await chooseLanguage("en");
-    expect(resolveLocale((await loadUiSettings()).language, "ru-RU")).toBe("en");
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    let savedLanguage: string | null = null;
+    invoke.mockImplementation((cmd, args) => {
+      if (cmd === "set_language") {
+        savedLanguage = (args?.language as string) ?? null;
+        return Promise.resolve(null);
+      }
+      if (cmd === "get_ui_settings") {
+        return Promise.resolve({ language: savedLanguage, systemLocale: "en-US" });
+      }
+      return Promise.resolve(null);
+    });
+    try {
+      await chooseLanguage("ru");
+      expect(invoke).toHaveBeenCalledWith("set_language", { language: "ru" });
+      expect(getLocale()).toBe("ru");
+      // A "restart": the backend returns what was saved; an English Windows no longer matters.
+      const restarted = await loadUiSettings();
+      expect(invoke).toHaveBeenCalledWith("get_ui_settings", undefined);
+      expect(restarted.language).toBe("ru");
+      expect(resolveLocale(restarted.language, "en-US")).toBe("ru");
+      await chooseLanguage("en");
+      expect(invoke).toHaveBeenCalledWith("set_language", { language: "en" });
+      expect(resolveLocale((await loadUiSettings()).language, "ru-RU")).toBe("en");
+    } finally {
+      invoke.mockReset();
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
   });
 
   it("undoes the switch if it cannot be saved, so the screen never disagrees with the file", async () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     invoke.mockRejectedValueOnce(new Error("read-only stick"));
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await chooseLanguage("ru");
       expect(invoke).toHaveBeenCalledWith("set_language", { language: "ru" });
       expect(getLocale()).toBe("en");
     } finally {
+      warnSpy.mockRestore();
+      invoke.mockReset();
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("ignores stale UI updates when an earlier save resolves ok while a newer switch is pending, and rolls back to the confirmed locale on failure", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending: Array<{ resolve: () => void; reject: (e: unknown) => void }> = [];
+    invoke.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          pending.push({ resolve, reject });
+        }),
+    );
+    try {
+      const p1 = chooseLanguage("ru");
+      expect(getLocale()).toBe("ru");
+      const p2 = chooseLanguage("en");
+      expect(getLocale()).toBe("en");
+
+      // Token 1 resolves ok first while token 2 is still in flight: UI stays on "en".
+      pending[0]?.resolve();
+      await p1;
+      expect(getLocale()).toBe("en");
+
+      // Token 2 then succeeds cleanly.
+      pending[1]?.resolve();
+      await p2;
+      expect(getLocale()).toBe("en");
+
+      // Next race: token 3 ("ru") confirms first, then token 4 ("en") fails -> rolls back to "ru".
+      const p3 = chooseLanguage("ru");
+      const p4 = chooseLanguage("en");
+      pending[2]?.resolve();
+      await p3;
+      expect(getLocale()).toBe("en");
+
+      pending[3]?.reject(new Error("read-only stick"));
+      await p4;
+      expect(getLocale()).toBe("ru");
+    } finally {
+      warnSpy.mockRestore();
+      invoke.mockReset();
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
     }
   });

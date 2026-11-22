@@ -1,13 +1,45 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { DEFAULT_CONFIG, SURVIVAL } from "./support/fixtures";
 import { expect, test } from "./support/test";
-import { accountTrigger, settingsButton, text, textRu } from "./support/ui";
+import { accountTrigger, profileTrigger, settingsButton, text, textRu } from "./support/ui";
+
+const supportStatus = (dialog: ReturnType<Page["getByRole"]>) => dialog.getByRole("status").first();
+const updateStatus = (dialog: ReturnType<Page["getByRole"]>) => dialog.getByRole("status").last();
 
 const openSettings = async (page: Page) => {
   await settingsButton(page).click();
   const dialog = page.getByRole("dialog", { name: text("settings.title") });
   await expect(dialog).toBeVisible();
   return dialog;
+};
+
+const assertDialogFits = async (dialog: Locator) => {
+  expect(
+    await dialog.evaluate((el) => ({
+      vertical: el.scrollHeight <= el.clientHeight + 1,
+      horizontal: el.scrollWidth <= el.clientWidth + 1,
+    })),
+  ).toEqual({ vertical: true, horizontal: true });
+};
+
+const dockSettled = async (page: Page): Promise<void> => {
+  await page.waitForFunction(() => {
+    const el = document.querySelector(".launcher-dock-wrap");
+    if (!el) return false;
+    return (
+      el.getAnimations({ subtree: true }).filter((a) => a.playState === "running").length === 0
+    );
+  });
+};
+
+const menuSettled = async (page: Page): Promise<void> => {
+  await page.waitForFunction(() => {
+    const el = document.querySelector('[data-slot="dropdown-menu-content"]');
+    if (!el) return false;
+    return (
+      el.getAnimations({ subtree: true }).filter((a) => a.playState === "running").length === 0
+    );
+  });
 };
 
 test.describe("simple and advanced mode", () => {
@@ -135,6 +167,19 @@ test.describe("settings sections", () => {
     ).toBeVisible();
     await expect(dialog.getByRole("button", { name: textRu("settings.reset") })).toBeVisible();
   });
+
+  test("reverts the UI language when set_language fails", async ({ page, backend, openApp }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    await backend.failNext("set_language", "unsupported_language");
+    await dialog.getByRole("radio", { name: "Русский" }).click();
+
+    await expect(page.getByRole("dialog", { name: text("settings.title") })).toBeVisible();
+    await expect(dialog.getByRole("radio", { name: "English" })).toBeChecked();
+    await expect(dialog.getByRole("radio", { name: "Русский" })).not.toBeChecked();
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    expect((await backend.state()).ui.language).toBe("en");
+  });
 });
 
 test.describe("reduced motion", () => {
@@ -252,14 +297,33 @@ test.describe("memory", () => {
   test("a value the backend refuses is explained, in words", async ({ page, backend, openApp }) => {
     await openApp();
     const dialog = await openSettings(page);
+    const group = dialog.getByRole("radiogroup", { name: text("settings.memory") });
     await backend.failNext("set_memory", "invalid_memory", { min: 1024, max: 12288 });
-    await dialog
-      .getByRole("radiogroup", { name: text("settings.memory") })
-      .getByRole("radio", { name: text("settings.memory.custom") })
-      .click();
+    await group.getByRole("radio", { name: text("settings.memory.custom") }).click();
     await expect(dialog.getByRole("alert")).toHaveText(
       text("error.settings.invalid_memory", { min: "1 GB", max: "12 GB" }),
     );
+
+    // A valid save afterwards clears the error, and a rejected slider adjustment reports and recovers too.
+    await group.getByRole("radio", { name: text("settings.memory.custom") }).click();
+    const slider = dialog.getByRole("slider", { name: text("settings.memory.slider") });
+    await expect(slider).toBeVisible();
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    await expect.poll(async () => (await backend.state()).ui.memoryMb).toBe(4096);
+
+    await backend.failNext("set_memory", "invalid_memory", { min: 1024, max: 12288 });
+    await slider.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(dialog.getByRole("alert")).toHaveText(
+      text("error.settings.invalid_memory", { min: "1 GB", max: "12 GB" }),
+    );
+    await expect(slider).toHaveAttribute("aria-valuetext", "4 GB");
+    expect((await backend.state()).ui.memoryMb).toBe(4096);
+
+    await page.keyboard.press("ArrowRight");
+    await expect(slider).toHaveAttribute("aria-valuetext", "4.3 GB");
+    await expect.poll(async () => (await backend.state()).ui.memoryMb).toBe(4352);
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
   });
 });
 
@@ -292,6 +356,7 @@ test.describe("memory saved above what a smaller computer allows", () => {
 
   test("clamps the displayed slider value and label to this computer's safe range", async ({
     page,
+    backend,
     openApp,
   }) => {
     await openApp();
@@ -299,6 +364,8 @@ test.describe("memory saved above what a smaller computer allows", () => {
     const slider = dialog.getByRole("slider", { name: text("settings.memory.slider") });
     await expect(slider).toHaveAttribute("aria-valuetext", "6 GB");
     await expect(dialog.getByText("6 GB", { exact: true })).toBeVisible();
+    // Portable-stick invariant: clamping on display must never overwrite the saved setting.
+    expect((await backend.state()).ui.memoryMb).toBe(16384);
   });
 });
 
@@ -377,7 +444,7 @@ test.describe("support actions", () => {
     const dialog = await openSettings(page);
     await expect(dialog.getByText(text("settings.diagnosticsNote"))).toBeVisible();
     await dialog.getByRole("button", { name: text("settings.exportDiagnostics") }).click();
-    await expect(dialog.getByRole("status")).toHaveText(
+    await expect(supportStatus(dialog)).toHaveText(
       text("settings.diagnosticsDone", { name: "Clade-Diagnostics-20261004-120000.zip" }),
     );
     expect(await backend.calls("export_diagnostics")).toHaveLength(1);
@@ -393,7 +460,7 @@ test.describe("support actions", () => {
     await dialog.getByRole("button", { name: text("settings.exportDiagnostics") }).click();
     await expect(dialog.getByRole("alert")).toHaveText(text("error.settings.diagnostics_failed"));
     await dialog.getByRole("button", { name: text("settings.exportDiagnostics") }).click();
-    await expect(dialog.getByRole("status")).toContainText("Clade-Diagnostics-");
+    await expect(supportStatus(dialog)).toContainText("Clade-Diagnostics-");
     await expect(dialog.getByRole("alert")).toHaveCount(0);
   });
 });
@@ -427,7 +494,13 @@ test.describe("reset settings", () => {
   }) => {
     await openApp();
     const dialog = await openSettings(page);
-    // change a few things first
+    // change a few things first (adjust volume before disabling sound)
+    const volume = dialog.getByRole("slider", { name: text("settings.volume") });
+    await volume.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(volume).toHaveAttribute("aria-valuetext", "55%");
+    await expect.poll(async () => (await backend.state()).ui.soundVolume).toBe(0.55);
+
     await dialog.getByRole("switch", { name: text("settings.sound") }).click();
     await dialog
       .getByRole("radiogroup", { name: text("settings.motion") })
@@ -441,10 +514,19 @@ test.describe("reset settings", () => {
       .getByRole("radiogroup", { name: text("settings.onLaunch") })
       .getByRole("radio", { name: text("settings.onLaunch.keep") })
       .click();
-    await expect.poll(async () => (await backend.state()).ui.onLaunch).toBe("keep_open");
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.onExit") })
+      .getByRole("radio", { name: text("settings.onExit.hidden") })
+      .click();
+    await dialog.getByRole("radio", { name: "Русский" }).click();
+    const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+    await expect(ruDialog).toBeVisible();
+    await expect.poll(async () => (await backend.state()).ui.language).toBe("ru");
+    await expect.poll(async () => (await backend.state()).ui.onExit).toBe("stay_hidden");
 
-    await dialog.getByRole("button", { name: text("settings.reset") }).click();
-    await dialog.getByRole("button", { name: text("settings.resetDo") }).click();
+    await ruDialog.getByRole("button", { name: textRu("settings.reset") }).click();
+    await ruDialog.getByRole("button", { name: textRu("settings.resetDo") }).click();
+    await expect(dialog).toBeVisible();
     await expect(dialog.getByText(text("settings.resetConfirm"))).toHaveCount(0);
 
     await expect(
@@ -452,20 +534,29 @@ test.describe("reset settings", () => {
         .getByRole("radiogroup", { name: text("settings.mode") })
         .getByRole("radio", { name: text("settings.mode.simple") }),
     ).toBeChecked();
+    await expect(dialog.getByRole("radio", { name: "English" })).toBeChecked();
     await expect(dialog.getByRole("switch", { name: text("settings.sound") })).toBeChecked();
+    await expect(dialog.getByRole("slider", { name: text("settings.volume") })).toHaveAttribute(
+      "aria-valuetext",
+      "50%",
+    );
     await expect(dialog.getByRole("heading", { name: text("settings.minecraft") })).toHaveCount(0);
     await expect(dialog.getByRole("heading", { name: text("settings.behavior") })).toHaveCount(0);
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
     await expect(page.locator("html")).toHaveAttribute("data-motion", "system");
     await expect(page.locator("html")).toHaveAttribute("data-glass", "on");
     const ui = (await backend.state()).ui;
     expect([
       ui.uiMode,
       ui.soundEnabled,
+      ui.soundVolume,
+      ui.language,
       ui.reducedMotion,
       ui.transparency,
       ui.memoryMb,
       ui.onLaunch,
-    ]).toEqual(["simple", true, "system", "system", null, "embed"]);
+      ui.onExit,
+    ]).toEqual(["simple", true, 0.5, null, "system", "system", null, "embed", "show"]);
     // the introduction stays seen, and the change touched nothing but the settings
     expect(ui.onboardingDone).toBe(true);
     expect(await backend.calls("reset_settings")).toHaveLength(1);
@@ -478,6 +569,31 @@ test.describe("reset settings", () => {
     const state = await backend.state();
     expect(state.profiles).toHaveLength(3);
     expect(state.accounts).toHaveLength(2);
+  });
+
+  test("reports an error and preserves settings when reset_settings fails", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openSettings(page);
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.onExit") })
+      .getByRole("radio", { name: text("settings.onExit.hidden") })
+      .click();
+    await expect.poll(async () => (await backend.state()).ui.onExit).toBe("stay_hidden");
+
+    await backend.failNext("reset_settings", "storage");
+    await dialog.getByRole("button", { name: text("settings.reset") }).click();
+    await expect(dialog.getByText(text("settings.resetConfirm"))).toBeVisible();
+    await dialog.getByRole("button", { name: text("settings.resetDo") }).click();
+
+    await expect(dialog.getByText(text("settings.resetConfirm"))).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: text("settings.reset") })).toBeFocused();
+    await expect(dialog.getByRole("alert")).toHaveText(text("error.common.storage"));
+    expect((await backend.state()).ui.onExit).toBe("stay_hidden");
   });
 });
 
@@ -592,10 +708,11 @@ test.describe("transparency effects", () => {
       .poll(() =>
         page.evaluate(() => {
           const m = getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!);
-          return [m.backdropFilter, m.backgroundColor];
+          const o = getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')!);
+          return [m.backdropFilter, m.backgroundColor, o.backdropFilter];
         }),
       )
-      .toEqual(["none", "rgb(246, 240, 230)"]);
+      .toEqual(["none", "rgb(246, 240, 230)", "none"]);
 
     await g.getByRole("radio", { name: text("settings.transparency.on") }).click();
     await expect(html(page)).toHaveAttribute("data-glass", "on");
@@ -605,6 +722,15 @@ test.describe("transparency effects", () => {
     }));
     expect(on.dockFilter).toBe("none"); // the blur is the window material's, never a CSS filter (it costs GPU)
     expect(on.pageBase).toMatch(/^rgba\(243, 237, 227, 0\.\d+\)$/);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const m = getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!);
+          const o = getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')!);
+          return [m.backdropFilter, o.backdropFilter];
+        }),
+      )
+      .toEqual(["none", expect.stringMatching(/^blur\(\d+px\)$/)]);
 
     await g.getByRole("radio", { name: text("settings.transparency.system") }).click();
     await expect(html(page)).toHaveAttribute("data-glass", "on");
@@ -656,6 +782,51 @@ test.describe("transparency effects", () => {
     await expect(html(page)).toHaveAttribute("data-glass", "on");
     expect((await backend.state()).ui.transparency).toBe("system");
   });
+
+  test("reacts dynamically to live glass-status-changed events including non-live fallback", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    await expect(html(page)).toHaveAttribute("data-glass-live", "true");
+    await openSettings(page);
+
+    await backend.emit("glass-status-changed", { active: true, live: false });
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    await expect(html(page)).toHaveAttribute("data-glass-live", "false");
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          pageBase: getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+          overlayFilter: getComputedStyle(document.querySelector('[data-slot="dialog-overlay"]')!)
+            .backdropFilter,
+          modalBg: getComputedStyle(document.querySelector('[data-slot="dialog-content"]')!)
+            .backgroundColor,
+        })),
+      )
+      .toEqual({
+        pageBase: "rgba(243, 237, 227, 0.94)",
+        overlayFilter: "none",
+        modalBg: "rgba(246, 240, 230, 0.96)",
+      });
+
+    await backend.emit("glass-status-changed", { active: false, live: false });
+    await expect(html(page)).toHaveAttribute("data-glass", "off");
+    await expect(html(page)).not.toHaveAttribute("data-glass-live", /.*/);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+        ),
+      )
+      .toBe("rgb(243, 237, 227)");
+
+    await backend.emit("glass-status-changed", { active: true, live: true });
+    await expect(html(page)).toHaveAttribute("data-glass", "on");
+    await expect(html(page)).toHaveAttribute("data-glass-live", "true");
+  });
 });
 
 test.describe("transparency effects when Windows has them off", () => {
@@ -703,11 +874,25 @@ test.describe("transparency effects with Windows High Contrast", () => {
 });
 
 test.describe("the account menu material", () => {
+  test.use({ backendConfig: { ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" } } });
+
   const menuStyle = (page: Page) =>
     page.evaluate(() => {
       const m = getComputedStyle(document.querySelector('[data-slot="dropdown-menu-content"]')!);
       return { bg: m.backgroundColor, filter: m.backdropFilter };
     });
+
+  const disableTransparencyInSettings = async (page: Page) => {
+    const dialog = await openSettings(page);
+    await dialog
+      .getByRole("radiogroup", { name: text("settings.transparency") })
+      .getByRole("radio", { name: text("settings.transparency.off") })
+      .click();
+    await expect(page.locator("html")).toHaveAttribute("data-glass", "off");
+    await expect(page.locator("html")).not.toHaveAttribute("data-glass-live", /.*/);
+    await dialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(dialog).toHaveCount(0);
+  };
 
   test("is translucent smoked glass with glass on, with no CSS blur, and fully opaque graphite when off", async ({
     page,
@@ -722,11 +907,8 @@ test.describe("the account menu material", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
 
-    // Off: the same menu is the classic opaque graphite
-    await page.evaluate(() => {
-      document.documentElement.dataset.glass = "off";
-      delete document.documentElement.dataset.glassLive;
-    });
+    // Off via Settings (set_transparency -> glass-status-changed -> applyGlass): opaque graphite
+    await disableTransparencyInSettings(page);
     await accountTrigger(page).click();
     await expect(page.getByRole("menu")).toBeVisible();
     await expect.poll(() => menuStyle(page)).toEqual({ bg: "rgb(47, 42, 38)", filter: "none" });
@@ -734,7 +916,7 @@ test.describe("the account menu material", () => {
 
   test("the profile menu uses the same material", async ({ page, openApp }) => {
     await openApp();
-    const trigger = page.getByRole("navigation", { name: "Clade" }).getByRole("button").nth(1);
+    const trigger = profileTrigger(page);
     await trigger.click();
     await expect(page.getByRole("menu")).toBeVisible();
     const on = await menuStyle(page);
@@ -742,10 +924,8 @@ test.describe("the account menu material", () => {
     expect(on.filter).toBe("none");
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
-    await page.evaluate(() => {
-      document.documentElement.dataset.glass = "off";
-      delete document.documentElement.dataset.glassLive;
-    });
+
+    await disableTransparencyInSettings(page);
     await trigger.click();
     await expect(page.getByRole("menu")).toBeVisible();
     await expect.poll(() => menuStyle(page)).toEqual({ bg: "rgb(47, 42, 38)", filter: "none" });
@@ -760,9 +940,9 @@ test.describe("dock menus keep their rectangle", () => {
   };
   const near = (a: number, b: number) => Math.abs(a - b) <= 0.5;
 
-  for (const [name, index] of [
-    ["Account", 0],
-    ["Profile", 1],
+  for (const [name, getTrigger] of [
+    ["Account", accountTrigger],
+    ["Profile", profileTrigger],
   ] as const) {
     test(`the ${name} menu does not move or resize while the pointer moves over it`, async ({
       page,
@@ -770,23 +950,20 @@ test.describe("dock menus keep their rectangle", () => {
     }) => {
       await openApp();
       // the dock rises into place when the window opens; wait for it, or the menu would follow it
-      await page.waitForTimeout(1800);
-      const trigger = page
-        .getByRole("navigation", { name: "Clade" })
-        .getByRole("button")
-        .nth(index);
+      await dockSettled(page);
+      const trigger = getTrigger(page);
       await trigger.hover();
       await trigger.click();
       await expect(page.getByRole("menu")).toBeVisible();
       // let the opening animation finish, then take the rectangle the menu opened with
-      await page.waitForTimeout(500);
+      await menuSettled(page);
       const opened = await box(page);
 
       const items = page.locator('[data-slot="dropdown-menu-content"] [role^="menuitem"]');
       const targets = [items.first(), items.last(), items.first(), items.last()];
       for (const t of targets) {
         await t.hover();
-        await page.waitForTimeout(250);
+        await menuSettled(page);
         const now = await box(page);
         for (const k of ["x", "y", "width", "height"] as const)
           expect(near(now[k], opened[k]), name + " " + k + ": " + opened[k] + " -> " + now[k]).toBe(
@@ -795,7 +972,7 @@ test.describe("dock menus keep their rectangle", () => {
       }
       // and over the empty padding of the menu itself
       await page.mouse.move(opened.x + 3, opened.y + 3);
-      await page.waitForTimeout(250);
+      await menuSettled(page);
       const edge = await box(page);
       for (const k of ["x", "y", "width", "height"] as const)
         expect(near(edge[k], opened[k]), name + " " + k + " at the edge").toBe(true);
@@ -817,11 +994,11 @@ test.describe("the profile menu with many profiles", () => {
   }) => {
     await page.setViewportSize({ width: 960, height: 600 });
     await openApp();
-    await page.waitForTimeout(1800); // the dock rises into place first
-    await page.getByRole("navigation", { name: "Clade" }).getByRole("button").nth(1).click();
+    await dockSettled(page); // the dock rises into place first
+    await profileTrigger(page).click();
     const menu = page.locator('[data-slot="dropdown-menu-content"]');
     await expect(menu).toBeVisible();
-    await page.waitForTimeout(400);
+    await menuSettled(page);
     const m = await menu.boundingBox();
     if (!m) throw new Error("no menu");
     expect(m.y).toBeGreaterThanOrEqual(0);
@@ -905,33 +1082,43 @@ test.describe("clearing archived vaults", () => {
       await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
       expect(await backend.calls("clear_retired_vaults")).toHaveLength(0);
 
-      // Check Simple mode and Russian layout fit (including open confirmation) as well.
+      // Check Simple mode layout fit (including open confirmation) in English and Russian, then Russian Advanced.
       await dialog
         .getByRole("radiogroup", { name: text("settings.mode") })
         .getByRole("radio", { name: text("settings.mode.simple") })
         .click();
       await expect(clearBtn).toBeVisible();
-      await dialog
-        .getByRole("radiogroup", { name: text("settings.mode") })
-        .getByRole("radio", { name: text("settings.mode.advanced") })
-        .click();
+      await assertDialogFits(dialog);
+      await clearBtn.click();
+      await expect(dialog.getByText(/Delete 2 archived vaults\?/)).toBeVisible();
+      await assertDialogFits(dialog);
+      await dialog.getByRole("button", { name: text("settings.clearRetiredVaultsKeep") }).click();
+
       await dialog.getByRole("radio", { name: "Русский" }).click();
       const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
       const ruClearBtn = ruDialog.getByRole("button", { name: "Удалить архивные хранилища (2)" });
       await expect(ruClearBtn).toBeVisible();
-      expect(
-        await ruDialog.evaluate((el) => ({
-          vertical: el.scrollHeight <= el.clientHeight + 1,
-          horizontal: el.scrollWidth <= el.clientWidth + 1,
-        })),
-      ).toEqual({ vertical: true, horizontal: true });
+      await assertDialogFits(ruDialog);
       await ruClearBtn.click();
-      expect(
-        await ruDialog.evaluate((el) => ({
-          vertical: el.scrollHeight <= el.clientHeight + 1,
-          horizontal: el.scrollWidth <= el.clientWidth + 1,
-        })),
-      ).toEqual({ vertical: true, horizontal: true });
+      await expect(
+        ruDialog.getByText(textRu("settings.clearRetiredVaultsConfirm", { count: 2 })),
+      ).toBeVisible();
+      await assertDialogFits(ruDialog);
+      await ruDialog
+        .getByRole("button", { name: textRu("settings.clearRetiredVaultsKeep") })
+        .click();
+
+      await ruDialog
+        .getByRole("radiogroup", { name: textRu("settings.mode") })
+        .getByRole("radio", { name: textRu("settings.mode.advanced") })
+        .click();
+      await expect(ruClearBtn).toBeVisible();
+      await assertDialogFits(ruDialog);
+      await ruClearBtn.click();
+      await expect(
+        ruDialog.getByText(textRu("settings.clearRetiredVaultsConfirm", { count: 2 })),
+      ).toBeVisible();
+      await assertDialogFits(ruDialog);
       await ruDialog
         .getByRole("button", { name: textRu("settings.clearRetiredVaultsKeep") })
         .click();
@@ -948,7 +1135,7 @@ test.describe("clearing archived vaults", () => {
 
       await clearBtn.click();
       await dialog.getByRole("button", { name: text("settings.clearRetiredVaultsDo") }).click();
-      await expect(dialog.getByRole("status")).toHaveText("Deleted 2 archived vaults.");
+      await expect(supportStatus(dialog)).toHaveText("Deleted 2 archived vaults.");
       await expect(dialog.getByRole("alert")).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: /Clear archived vaults/ })).toHaveCount(0);
       expect((await backend.state()).retiredVaults).toBe(0);
@@ -968,7 +1155,7 @@ test.describe("manual update check", () => {
 
     expect(await backend.calls("check_for_updates")).toHaveLength(0);
     await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
-    await expect(dialog.getByRole("status")).toHaveText(text("settings.updatesUpToDate"));
+    await expect(updateStatus(dialog)).toHaveText(text("settings.updatesUpToDate"));
     await expect(
       dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }),
     ).toBeVisible();
@@ -1021,7 +1208,7 @@ test.describe("manual update check", () => {
       ).toEqual({ vertical: true, horizontal: true });
 
       await ruDialog.getByRole("button", { name: textRu("settings.checkUpdatesAgain") }).click();
-      await expect(ruDialog.getByRole("status")).toHaveText(
+      await expect(updateStatus(ruDialog)).toHaveText(
         textRu("settings.updateAvailable", { version: "v0.2.0" }),
       );
       await expect(
@@ -1035,7 +1222,7 @@ test.describe("manual update check", () => {
       ).toEqual({ vertical: true, horizontal: true });
 
       await ruDialog.getByRole("radio", { name: "English" }).click();
-      await expect(dialog.getByRole("status")).toHaveText(
+      await expect(updateStatus(dialog)).toHaveText(
         text("settings.updateAvailable", { version: "v0.2.0" }),
       );
       expect(
@@ -1049,6 +1236,413 @@ test.describe("manual update check", () => {
       await expect
         .poll(async () => (await backend.calls("open_release_page")).map((c) => c.args))
         .toEqual([{ tag: "v0.2.0" }]);
+    });
+
+    test("shows an error and recovers when opening the release page fails", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openSettings(page);
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await expect(
+        dialog.getByRole("button", { name: text("settings.openRelease") }),
+      ).toBeVisible();
+
+      await backend.failNext("open_release_page", "browser_unavailable");
+      await dialog.getByRole("button", { name: text("settings.openRelease") }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.browser_unavailable"),
+      );
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }).click();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+    });
+
+    test("shows indeterminate progress when total download size is unknown", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.updateProgress({
+        stage: "downloading",
+        version: "v0.2.0",
+        bytesDone: 0,
+        bytesTotal: 0,
+      });
+
+      await expect(
+        dialog.getByText(text("settings.updatingDownloadingUnknown"), { exact: true }),
+      ).toBeVisible();
+      const progressbar = dialog.getByRole("progressbar", {
+        name: text("settings.updateProgress"),
+      });
+      await expect(progressbar).toBeVisible();
+      await expect(progressbar).not.toHaveAttribute("aria-valuenow", /.*/);
+      await expect(progressbar.locator(".indeterminate-bar")).toBeVisible();
+      await assertDialogFits(dialog);
+
+      await dialog.getByRole("button", { name: text("settings.cancelUpdate") }).click();
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+    });
+
+    test("handles install_update failures, unlocks the dialog, and recovers via Check again", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openSettings(page);
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeDisabled();
+
+      // Verification failure mid-install unlocks the dialog and offers Check again.
+      await backend.failUpdate("update_verify_failed");
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.update_verify_failed"),
+      );
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      await dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }).click();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+
+      // Disk-space failure from install_update formats sizes and recovers via Check again.
+      await backend.failNext("install_update", "not_enough_space", {
+        requiredBytes: 400 * 1024 * 1024,
+        availableBytes: 100 * 1024 * 1024,
+      });
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.not_enough_space", { required: "400 MB", available: "100 MB" }),
+      );
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      await dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }).click();
+
+      // Running-game refusal unlocks and reports clearly, and Escape can dismiss the dialog again.
+      await backend.failNext("install_update", "update_game_running");
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.update_game_running"),
+      );
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    });
+
+    test("handles apply_staged_update failures, keeping ready state for transient blocks and erroring on verify failure", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openSettings(page);
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.finishUpdate();
+      const restartBtn = dialog.getByRole("button", { name: text("settings.restartToUpdate") });
+      await expect(restartBtn).toBeVisible();
+
+      for (const code of [
+        "update_game_running",
+        "update_prepare_running",
+        "update_install_failed",
+      ] as const) {
+        await backend.failNext("apply_staged_update", code);
+        await restartBtn.click();
+        await expect(dialog.getByRole("alert")).toHaveText(text(`error.settings.${code}`));
+        await expect(restartBtn).toBeVisible();
+        await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      }
+
+      await backend.failNext("apply_staged_update", "update_verify_failed");
+      await restartBtn.click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.settings.update_verify_failed"),
+      );
+      await expect(restartBtn).toHaveCount(0);
+      await expect(
+        dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }),
+      ).toBeVisible();
+      await dialog.getByRole("button", { name: text("settings.checkUpdatesAgain") }).click();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+    });
+
+    test("installs portable update in-app with progress, cancel, persistence, and restart handoff in EN and RU at 960x600", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      const assertNoOverflow = async (d: typeof dialog) => {
+        expect(
+          await d.evaluate((el) => ({
+            vertical: el.scrollHeight <= el.clientHeight + 1,
+            horizontal: el.scrollWidth <= el.clientWidth + 1,
+          })),
+        ).toEqual({ vertical: true, horizontal: true });
+      };
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await expect(updateStatus(dialog)).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: text("settings.openRelease") }),
+      ).toBeVisible();
+      await assertNoOverflow(dialog);
+
+      // Start in-app update: shows download progress, locks dialog against Escape, allows Cancel.
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.updateProgress({
+        stage: "downloading",
+        version: "v0.2.0",
+        bytesDone: 45,
+        bytesTotal: 100,
+      });
+      await expect(
+        dialog.getByText(text("settings.updatingDownloading", { percent: 45 })),
+      ).toBeVisible();
+      await expect(updateStatus(dialog)).toHaveText(text("settings.updatingDownloadingUnknown"));
+      await expect(dialog.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "45");
+      await assertNoOverflow(dialog);
+
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+
+      await dialog.getByRole("button", { name: text("settings.cancelUpdate") }).click();
+      await expect(updateStatus(dialog)).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+
+      // Re-run to verify -> unpack -> ready, then verify RU layout + persistence across reopen.
+      await dialog.getByRole("button", { name: text("settings.installUpdate") }).click();
+      await backend.updateProgress({
+        stage: "verifying",
+        version: "v0.2.0",
+        bytesDone: 100,
+        bytesTotal: 100,
+      });
+      await expect(updateStatus(dialog)).toHaveText(text("settings.updatingVerifying"));
+
+      await backend.updateProgress({
+        stage: "extracting",
+        version: "v0.2.0",
+        bytesDone: 0,
+        bytesTotal: 0,
+      });
+      await expect(updateStatus(dialog)).toHaveText(text("settings.updatingExtracting"));
+      await expect(
+        dialog.getByRole("button", { name: text("settings.cancelUpdate") }),
+      ).toBeDisabled();
+
+      await backend.finishUpdate();
+      await expect(updateStatus(dialog)).toHaveText(text("settings.updateReady"));
+      await expect(
+        dialog.getByRole("button", { name: text("settings.restartToUpdate") }),
+      ).toBeVisible();
+      await assertNoOverflow(dialog);
+
+      await dialog.getByRole("radio", { name: "Русский" }).click();
+      const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+      await expect(updateStatus(ruDialog)).toHaveText(textRu("settings.updateReady"));
+      await expect(
+        ruDialog.getByRole("button", { name: textRu("settings.restartToUpdate") }),
+      ).toBeVisible();
+      await assertNoOverflow(ruDialog);
+
+      await ruDialog.getByRole("button", { name: textRu("common.done") }).click();
+      await expect(ruDialog).toBeHidden();
+
+      await page.getByRole("button", { name: textRu("dock.settings") }).click();
+      await expect(ruDialog).toBeVisible();
+      await expect(updateStatus(ruDialog)).toHaveText(textRu("settings.updateReady"));
+      expect(await backend.calls("check_for_updates")).toHaveLength(1);
+
+      await ruDialog.getByRole("button", { name: textRu("settings.restartToUpdate") }).click();
+      await expect(updateStatus(ruDialog)).toHaveText(textRu("settings.updatingRestarting"));
+      expect(await backend.calls("apply_staged_update")).toHaveLength(1);
+    });
+  });
+
+  test.describe("when a newer release has no portable package", () => {
+    test.use({
+      backendConfig: {
+        ...DEFAULT_CONFIG,
+        latestRelease: "v0.2.0",
+        latestReleaseInstallable: false,
+        ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      },
+    });
+
+    test("hides the Update button and leaves only Open release at 960x600", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await page.setViewportSize({ width: 960, height: 600 });
+      await openApp();
+      const dialog = await openSettings(page);
+
+      await dialog.getByRole("button", { name: text("settings.checkUpdates") }).click();
+      await expect(updateStatus(dialog)).toHaveText(
+        text("settings.updateAvailable", { version: "v0.2.0" }),
+      );
+      await expect(
+        dialog.getByRole("button", { name: text("settings.installUpdate") }),
+      ).toHaveCount(0);
+      await expect(
+        dialog.getByRole("button", { name: text("settings.openRelease") }),
+      ).toBeVisible();
+      await assertDialogFits(dialog);
+
+      await dialog.getByRole("button", { name: text("settings.openRelease") }).click();
+      await expect
+        .poll(async () => (await backend.calls("open_release_page")).map((c) => c.args))
+        .toEqual([{ tag: "v0.2.0" }]);
+    });
+  });
+});
+
+test.describe("colour theme (Graphite Paper dark)", () => {
+  test("switches live in Simple mode across EN and RU, follows Windows unless overridden, fits 960x600, and resets cleanly", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await page.emulateMedia({ colorScheme: "light" });
+    await openApp();
+
+    const html = page.locator("html");
+    await expect(html).toHaveAttribute("data-theme", "light");
+    await expect(html).toHaveAttribute("data-theme-mode", "system");
+
+    const dialog = await openSettings(page);
+    await assertDialogFits(dialog);
+    const group = dialog.getByRole("radiogroup", { name: text("settings.theme") });
+    await expect(group.getByRole("radio", { name: text("settings.theme.system") })).toBeChecked();
+
+    // Live OS dark mode updates Follow Windows immediately.
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(html).toHaveAttribute("data-theme", "dark");
+
+    // Explicit Light ignores OS dark mode.
+    await group.getByRole("radio", { name: text("settings.theme.light") }).click();
+    await expect(html).toHaveAttribute("data-theme", "light");
+    await expect(html).toHaveAttribute("data-theme-mode", "light");
+    await expect.poll(async () => (await backend.state()).ui.theme).toBe("light");
+
+    // Explicit Dark switches page, modal, and glass-off surface colors to warm Graphite Paper.
+    await page.emulateMedia({ colorScheme: "light" });
+    await group.getByRole("radio", { name: text("settings.theme.dark") }).click();
+    await expect(html).toHaveAttribute("data-theme", "dark");
+    await expect(html).toHaveAttribute("data-theme-mode", "dark");
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          page: getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+          modal: getComputedStyle(document.querySelector(".glass-modal")!).backgroundColor,
+        })),
+      )
+      .toEqual({
+        page: "rgba(28, 25, 23, 0.78)",
+        modal: "rgba(36, 32, 28, 0.94)",
+      });
+
+    // Russian labels + Advanced mode in dark theme still fit 960x600 with zero overflow.
+    await dialog.getByRole("radio", { name: "Русский" }).click();
+    const ruDialog = page.getByRole("dialog", { name: textRu("settings.title") });
+    const ruGroup = ruDialog.getByRole("radiogroup", { name: textRu("settings.theme") });
+    await expect(ruGroup.getByRole("radio", { name: textRu("settings.theme.dark") })).toBeChecked();
+    await assertDialogFits(ruDialog);
+
+    await ruDialog
+      .getByRole("radiogroup", { name: textRu("settings.mode") })
+      .getByRole("radio", { name: textRu("settings.mode.advanced") })
+      .click();
+    await assertDialogFits(ruDialog);
+
+    // Turning Transparency off while dark renders opaque #1c1917 page and #24201c modal.
+    await ruDialog
+      .getByRole("radiogroup", { name: textRu("settings.transparency") })
+      .getByRole("radio", { name: textRu("settings.transparency.off") })
+      .click();
+    await expect(html).toHaveAttribute("data-glass", "off");
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          page: getComputedStyle(document.querySelector(".page-base")!).backgroundColor,
+          modal: getComputedStyle(document.querySelector(".glass-modal")!).backgroundColor,
+        })),
+      )
+      .toEqual({
+        page: "rgb(28, 25, 23)",
+        modal: "rgb(36, 32, 28)",
+      });
+
+    // Reset returns theme to system (resolved light since OS colorScheme is light).
+    await ruDialog.getByRole("button", { name: textRu("settings.reset") }).click();
+    await ruDialog.getByRole("button", { name: textRu("settings.resetDo") }).click();
+    const enDialog = page.getByRole("dialog", { name: text("settings.title") });
+    await expect(html).toHaveAttribute("data-theme", "light");
+    await expect(html).toHaveAttribute("data-theme-mode", "system");
+    await expect(
+      enDialog
+        .getByRole("radiogroup", { name: text("settings.theme") })
+        .getByRole("radio", { name: text("settings.theme.system") }),
+    ).toBeChecked();
+  });
+
+  test.describe("dark theme saved at startup", () => {
+    test.use({
+      backendConfig: {
+        ui: { ...DEFAULT_CONFIG.ui, theme: "dark" },
+      },
+    });
+
+    test("renders Graphite Paper from first paint and keeps dock menus crisp", async ({
+      page,
+      openApp,
+    }) => {
+      await openApp();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+      await expect(page.locator("html")).toHaveAttribute("data-theme-mode", "dark");
+      await accountTrigger(page).click();
+      await expect(page.getByRole("menu")).toBeVisible();
+      const menuBg = await page.evaluate(
+        () =>
+          getComputedStyle(document.querySelector('[data-slot="dropdown-menu-content"]')!)
+            .backgroundColor,
+      );
+      expect(menuBg).toMatch(/^rgba?\(44, 39, 34/);
     });
   });
 });

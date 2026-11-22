@@ -29,8 +29,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -39,7 +39,9 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::portable::fsutil::{atomic_write, read_bounded};
+use crate::portable::fsutil::{
+    atomic_write, is_link, move_new_no_replace, read_bounded, remove_file_with_retry,
+};
 
 const MAGIC: &[u8; 8] = b"LNCHVLT\0";
 const FORMAT_VERSION: u8 = 1;
@@ -289,22 +291,63 @@ fn bak_path(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-fn write_encrypted(
-    path: &Path,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathPresence {
+    Absent,
+    Present,
+}
+
+fn probe_non_link(path: &Path) -> io::Result<PathPresence> {
+    match is_link(path) {
+        Ok(true) => Err(io::Error::other("refusing to write vault through a link")),
+        Ok(false) => Ok(PathPresence::Present),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(PathPresence::Absent),
+        Err(e) => Err(e),
+    }
+}
+
+struct CountingWriter(usize);
+
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.checked_add(buf.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "serialized vault size overflow",
+            )
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encrypt_payload(
     kdf: KdfParams,
     salt: &[u8; SALT_LEN],
     key: &[u8; KEY_LEN],
     secrets: &VaultSecrets,
-    overwrite_bak: bool,
-) -> Result<(), VaultError> {
+) -> Result<Vec<u8>, VaultError> {
     let header = Header {
         kdf,
         salt: *salt,
         nonce: random::<NONCE_LEN>()?,
     };
     let header_bytes = header.encode();
-    let mut plaintext = Zeroizing::new(Vec::with_capacity(1024));
-    serde_json::to_writer(&mut *plaintext, secrets)?;
+    // Measure exact serialized size first so the plaintext buffer never reallocates (which would
+    // leave unzeroized copies of tokens on the heap).
+    let mut counter = CountingWriter(0);
+    serde_json::to_writer(&mut counter, secrets)?;
+    let mut plaintext = Zeroizing::new(vec![0u8; counter.0]);
+    {
+        let mut cursor: &mut [u8] = &mut plaintext;
+        serde_json::to_writer(&mut cursor, secrets)?;
+        if !cursor.is_empty() {
+            return Err(VaultError::Crypto);
+        }
+    }
     let ct = cipher(key)?
         .encrypt(
             &XNonce::try_from(&header.nonce[..]).map_err(|_| VaultError::Crypto)?,
@@ -317,17 +360,91 @@ fn write_encrypted(
     let mut out = Vec::with_capacity(HEADER_LEN + ct.len());
     out.extend_from_slice(&header_bytes);
     out.extend_from_slice(&ct);
+    Ok(out)
+}
 
+fn atomic_write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("path has no file name"))?;
+    let _ = probe_non_link(parent)?;
+    fs::create_dir_all(parent)?;
+    if probe_non_link(parent)? != PathPresence::Present {
+        return Err(io::Error::other(
+            "vault parent directory could not be verified",
+        ));
+    }
+    if probe_non_link(path)? == PathPresence::Present {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "vault file already exists",
+        ));
+    }
+
+    let mut tmp_name = file_name.to_os_string();
+    let mut nonce = [0u8; 6];
+    getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+    tmp_name.push(format!(".{}.tmp", hex::encode(nonce)));
+    let tmp = parent.join(tmp_name);
+
+    let result = (|| {
+        let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        move_new_no_replace(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = remove_file_with_retry(&tmp);
+    }
+    result
+}
+
+fn write_encrypted(
+    path: &Path,
+    kdf: KdfParams,
+    salt: &[u8; SALT_LEN],
+    key: &[u8; KEY_LEN],
+    secrets: &VaultSecrets,
+    overwrite_bak: bool,
+) -> Result<(), VaultError> {
+    let out = encrypt_payload(kdf, salt, key, secrets)?;
     let bak = bak_path(path);
+    let path_presence = probe_non_link(path)?;
+    let bak_presence = probe_non_link(&bak)?;
+    if let Some(parent) = path.parent() {
+        let _ = probe_non_link(parent)?;
+    }
+
     // Keep one previous generation in case the new file is damaged by a yanked stick, unless
-    // revoking credentials or rotating the passphrase (where `.bak` is overwritten instead).
-    if !overwrite_bak && path.exists() {
-        let _ = fs::copy(path, &bak);
+    // revoking credentials or rotating the passphrase (where `.bak` is overwritten or removed
+    // before committing `path` so in-memory state and `vault.bin` never diverge on failure).
+    if overwrite_bak {
+        if bak_presence == PathPresence::Present {
+            if let Err(write_err) = atomic_write(&bak, &out) {
+                if let Err(remove_err) = remove_file_with_retry(&bak) {
+                    tracing::warn!(
+                        error = %remove_err,
+                        "could not remove stale backup vault after overwrite failure"
+                    );
+                    return Err(VaultError::Io(write_err));
+                }
+            }
+        }
+    } else if path_presence == PathPresence::Present {
+        match fs::read(path) {
+            Ok(prev) => {
+                if let Err(e) = atomic_write(&bak, &prev) {
+                    tracing::warn!(error = %e, "could not update backup vault");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not read previous vault for backup"),
+        }
     }
     atomic_write(path, &out)?;
-    if overwrite_bak && bak.exists() {
-        let _ = atomic_write(&bak, &out);
-    }
     Ok(())
 }
 
@@ -347,8 +464,10 @@ impl Vault {
     ) -> Result<Self, VaultError> {
         check_passphrase(passphrase)?;
         kdf.validate()?;
-        if path.exists() {
-            return Err(VaultError::AlreadyExists);
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(VaultError::AlreadyExists),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(VaultError::Io(e)),
         }
         let salt = random::<SALT_LEN>()?;
         let key = kdf.derive(passphrase.as_bytes(), &salt)?;
@@ -365,17 +484,17 @@ impl Vault {
     }
 
     pub fn persist_new(&self) -> Result<(), VaultError> {
-        if self.path.exists() {
+        if probe_non_link(&self.path)? == PathPresence::Present {
             return Err(VaultError::AlreadyExists);
         }
-        write_encrypted(
-            &self.path,
-            self.kdf,
-            &self.salt,
-            &self.key,
-            &self.secrets,
-            false,
-        )
+        let out = encrypt_payload(self.kdf, &self.salt, &self.key, &self.secrets)?;
+        atomic_write_new(&self.path, &out).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                VaultError::AlreadyExists
+            } else {
+                VaultError::Io(e)
+            }
+        })
     }
 
     pub fn create(path: &Path, passphrase: &str) -> Result<Self, VaultError> {
@@ -448,7 +567,10 @@ impl Vault {
 
     pub fn remove_account(&mut self, id: &str) -> Result<(), VaultError> {
         let mut staged = self.secrets.clone();
-        staged.accounts.remove(id);
+        if let Some((mut removed_id, mut removed_secrets)) = staged.accounts.remove_entry(id) {
+            removed_id.zeroize();
+            removed_secrets.zeroize();
+        }
         write_encrypted(&self.path, self.kdf, &self.salt, &self.key, &staged, true)?;
         self.secrets = staged;
         Ok(())
@@ -886,5 +1008,133 @@ mod tests {
     fn debug_output_never_contains_secrets() {
         let s = secrets("LEAKY");
         assert!(!format!("{s:?}").contains("LEAKY"));
+    }
+
+    #[test]
+    fn write_encrypted_backs_up_atomically_and_propagates_overwrite_bak_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.bin");
+        let bak = bak_path(&p);
+        let mut v = Vault::create_with(&p, PW, FAST).unwrap();
+        v.set_account("a", secrets("first")).unwrap();
+        let orig_gen = v.generation();
+        assert!(bak.is_file(), "normal save creates atomic .bak backup");
+        assert!(Vault::unlock(&bak, PW).is_ok());
+
+        // Replace `.bak` with a non-empty directory so neither atomic overwrite nor `remove_file`
+        // can clear it when rotating credentials (`overwrite_bak = true`).
+        fs::remove_file(&bak).unwrap();
+        fs::create_dir(&bak).unwrap();
+        fs::write(bak.join("pinned"), b"block-remove").unwrap();
+
+        let err = v.change_passphrase("new stronger passphrase");
+        assert!(
+            matches!(err, Err(VaultError::Io(_))),
+            "overwrite_bak failure must be reported when stale backup cannot be removed: {err:?}"
+        );
+        // Disk and in-memory state must remain synchronized on the original key/salt.
+        assert_eq!(v.generation(), orig_gen);
+        assert!(matches!(
+            Vault::unlock(&p, "new stronger passphrase"),
+            Err(VaultError::Authentication)
+        ));
+        let on_disk = Vault::unlock(&p, PW).unwrap();
+        assert_eq!(on_disk.generation(), orig_gen);
+        assert_eq!(
+            on_disk.account("a").unwrap().ms_refresh_token.as_deref(),
+            Some("first")
+        );
+
+        let err = v.remove_account("a");
+        assert!(
+            matches!(err, Err(VaultError::Io(_))),
+            "overwrite_bak failure must be reported on account removal too: {err:?}"
+        );
+        assert_eq!(
+            v.account("a").unwrap().ms_refresh_token.as_deref(),
+            Some("first")
+        );
+        // A subsequent normal save still encrypts with the unchanged key and unlocks with `PW`.
+        v.set_account("b", secrets("second")).unwrap();
+        let after_save = Vault::unlock(&p, PW).unwrap();
+        assert_eq!(after_save.generation(), orig_gen);
+        assert_eq!(
+            after_save.account("a").unwrap().ms_refresh_token.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            after_save.account("b").unwrap().ms_refresh_token.as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn readonly_stale_bak_is_cleared_on_remove_account() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.bin");
+        let bak = bak_path(&p);
+        let mut v = Vault::create_with(&p, PW, FAST).unwrap();
+        v.set_account("a", secrets("REMOVED-SECRET")).unwrap();
+        v.set_account("b", secrets("KEPT-SECRET")).unwrap();
+
+        let mut perms = fs::metadata(&bak).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&bak, perms).unwrap();
+
+        v.remove_account("a").unwrap();
+        if bak.exists() {
+            let bak_vault = Vault::unlock(&bak, PW).unwrap();
+            assert!(bak_vault.account("a").is_none());
+        }
+        let unlocked = Vault::unlock(&p, PW).unwrap();
+        assert!(unlocked.account("a").is_none());
+        assert_eq!(
+            unlocked.account("b").unwrap().ms_refresh_token.as_deref(),
+            Some("KEPT-SECRET")
+        );
+    }
+
+    #[test]
+    fn large_multi_account_payload_roundtrips_without_reallocation() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.bin");
+        let mut v = Vault::create_with(&p, PW, FAST).unwrap();
+        let long_refresh = "R".repeat(2048);
+        let long_access = "A".repeat(2048);
+        v.set_account(
+            "acc-large",
+            AccountSecrets {
+                ms_refresh_token: Some(long_refresh.clone()),
+                minecraft_access_token: Some(long_access.clone()),
+                minecraft_token_expires_at: Some(1_900_000_000),
+            },
+        )
+        .unwrap();
+        let unlocked = Vault::unlock(&p, PW).unwrap();
+        let acc = unlocked.account("acc-large").unwrap();
+        assert_eq!(acc.ms_refresh_token.as_deref(), Some(long_refresh.as_str()));
+        assert_eq!(
+            acc.minecraft_access_token.as_deref(),
+            Some(long_access.as_str())
+        );
+    }
+
+    #[test]
+    fn atomic_write_new_refuses_existing_target_and_cleans_temp() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.bin");
+        fs::write(&p, b"existing").unwrap();
+        let err = atomic_write_new(&p, b"replacement").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"existing");
+
+        // Also exercise `move_new_no_replace` directly on a staged file so no-replace semantics
+        // are proven even when the target appears after pre-checks.
+        let staged = d.path().join("vault.bin.0123456789ab.tmp");
+        fs::write(&staged, b"staged").unwrap();
+        let err = move_new_no_replace(&staged, &p).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"existing");
+        assert!(staged.is_file());
     }
 }

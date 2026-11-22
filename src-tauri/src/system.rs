@@ -62,19 +62,22 @@ pub fn transparency_effects_enabled() -> Option<bool> {
     use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
     use windows::UI::ViewManagement::UISettings;
     // WinRT needs an initialised thread; a short-lived one keeps this independent of the caller's.
-    std::thread::spawn(|| {
-        // SAFETY: paired with the RoUninitialize below on the same thread.
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.ok()?;
-        let value = UISettings::new()
-            .and_then(|u| u.AdvancedEffectsEnabled())
-            .ok();
-        // SAFETY: balances the successful RoInitialize above.
-        unsafe { RoUninitialize() };
-        value
-    })
-    .join()
-    .ok()
-    .flatten()
+    std::thread::Builder::new()
+        .name("transparency-probe".into())
+        .spawn(|| {
+            // SAFETY: paired with the RoUninitialize below on the same thread.
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.ok()?;
+            let value = UISettings::new()
+                .and_then(|u| u.AdvancedEffectsEnabled())
+                .ok();
+            // SAFETY: balances the successful RoInitialize above.
+            unsafe { RoUninitialize() };
+            value
+        })
+        .ok()?
+        .join()
+        .ok()
+        .flatten()
 }
 
 /// Whether Windows High Contrast is on (glass is never used then).
@@ -154,18 +157,23 @@ pub(crate) fn to_verbatim_win32(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(OsString::from_wide(&out))
 }
 
+fn existing_verbatim_dir(path: &Path) -> Option<std::path::PathBuf> {
+    // Resolve to an extended-length verbatim path first so paths > MAX_PATH (260 chars) work,
+    // then walk up to a folder that exists (the target may be a file or not created yet).
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let verbatim = to_verbatim_win32(&abs);
+    let mut dir: &Path = &verbatim;
+    while !dir.is_dir() {
+        dir = dir.parent()?;
+    }
+    Some(dir.to_path_buf())
+}
+
 /// Free space, in bytes, available to this user on the drive that holds `path`.
 pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    // Resolve to an extended-length verbatim path first so paths > MAX_PATH (260 chars) work,
-    // then walk up to a folder that exists (the target may not have been created yet).
-    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let verbatim = to_verbatim_win32(&abs);
-    let mut dir: &Path = &verbatim;
-    while !dir.exists() {
-        dir = dir.parent()?;
-    }
+    let dir = existing_verbatim_dir(path)?;
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut free = 0u64;
     // SAFETY: `wide` is NUL-terminated and outlives the call; the out pointer is valid; the two
@@ -208,12 +216,7 @@ pub fn volume_supports_acls(path: &Path) -> Option<bool> {
 
     const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 
-    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let verbatim = to_verbatim_win32(&abs);
-    let mut dir: &Path = &verbatim;
-    while !dir.exists() {
-        dir = dir.parent()?;
-    }
+    let dir = existing_verbatim_dir(path)?;
     let dir_wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut vol_buf = vec![0u16; dir.as_os_str().len().max(260) + 16];
     // SAFETY: `dir_wide` is NUL-terminated and valid; `vol_buf` is writable for `vol_buf.len()`
@@ -235,7 +238,7 @@ pub fn volume_supports_acls(path: &Path) -> Option<bool> {
         v.push(0);
         v
     } else {
-        let fallback = volume_root_win32(dir)?;
+        let fallback = volume_root_win32(&dir)?;
         fallback.as_os_str().encode_wide().chain(Some(0)).collect()
     };
 
@@ -339,9 +342,9 @@ pub fn launch_memory_mb(
 /// Bytes needed beyond the download itself: staging, extraction and a safety margin.
 pub fn space_needed(download_bytes: u64, runs_loader_installer: bool) -> u64 {
     download_bytes
-        + download_bytes / 10
-        + 384 * MIB
-        + if runs_loader_installer { 768 * MIB } else { 0 }
+        .saturating_add(download_bytes / 10)
+        .saturating_add(384 * MIB)
+        .saturating_add(if runs_loader_installer { 768 * MIB } else { 0 })
 }
 
 pub fn human(bytes: u64) -> String {
@@ -477,6 +480,9 @@ mod tests {
     fn space_estimates_leave_headroom_and_read_like_a_person_would() {
         assert!(space_needed(1000 * MIB, false) > 1000 * MIB + 384 * MIB);
         assert!(space_needed(1000 * MIB, true) > space_needed(1000 * MIB, false));
+        assert_eq!(space_needed(u64::MAX, false), u64::MAX);
+        assert_eq!(space_needed(u64::MAX, true), u64::MAX);
+        assert_eq!(space_needed(16_769_767_339_735_956_000, true), u64::MAX);
         assert_eq!(human(300 * MIB), "300 MB");
         assert_eq!(human(3 * 1024 * MIB), "3.0 GB");
     }
@@ -499,6 +505,10 @@ mod tests {
         let free = free_disk_bytes(d.path()).expect("free space of the temp drive");
         assert!(free > 0);
         assert!(free_disk_bytes(&d.path().join("not/yet/created")).is_some());
+        let existing_file = d.path().join("existing-file.txt");
+        std::fs::write(&existing_file, b"ok").unwrap();
+        assert!(free_disk_bytes(&existing_file).is_some());
+        assert_eq!(volume_supports_acls(&existing_file), Some(true));
 
         let seg = "a".repeat(55);
         let mut deep = d.path().to_path_buf();

@@ -104,7 +104,7 @@ fn modern_vanilla() -> Value {
                 "--accessToken", "${auth_access_token}", "--clientId", "${clientid}", "--xuid", "${auth_xuid}",
                 "--userType", "${user_type}", "--versionType", "${version_type}",
                 {"rules": [{"action": "allow", "features": {"is_demo_user": true}}], "value": "--demo"},
-                {"rules": [{"action": "allow", "features": {"has_custom_resolution": true}}], "value": ["--width", "${resolution_width}"]}],
+                {"rules": [{"action": "allow", "features": {"has_custom_resolution": true}}], "value": ["--width", "${resolution_width}", "--height", "${resolution_height}"]}],
             "jvm": [
                 {"rules": [{"action": "allow", "os": {"name": "osx"}}], "value": ["-XstartOnFirstThread"]},
                 {"rules": [{"action": "allow", "os": {"name": "windows"}}], "value": "-XX:HeapDumpPath=MojangTricks.heapdump"},
@@ -229,7 +229,13 @@ fn modern_vanilla_gets_the_metadata_arguments_in_the_right_order() {
 
     // Rules: Windows x64 only; no macOS flag, no 32-bit flag, no demo mode, no custom resolution.
     assert!(a.contains(&"-XX:HeapDumpPath=MojangTricks.heapdump".to_string()));
-    for never in ["-XstartOnFirstThread", "-Xss1M", "--demo", "--width"] {
+    for never in [
+        "-XstartOnFirstThread",
+        "-Xss1M",
+        "--demo",
+        "--width",
+        "--height",
+    ] {
         assert!(!a.iter().any(|x| x == never), "{never}");
     }
     assert!(a.contains(&"-Dminecraft.launcher.brand=Clade".to_string()));
@@ -290,10 +296,19 @@ fn modern_vanilla_gets_the_metadata_arguments_in_the_right_order() {
         "-Dlog4j.configurationFile={}",
         log_cfg.to_str().unwrap()
     )));
+    let inst_id = &InstanceStore::new(&e.root).list().unwrap().instances[0].id;
+    assert!(a.contains(&format!(
+        "-Djava.io.tmpdir={}",
+        e.root
+            .game_tmp_dir()
+            .join(inst_id.as_str())
+            .to_str()
+            .unwrap()
+    )));
     assert!(a.contains(&format!(
         "-Duser.home={}",
         InstanceStore::new(&e.root)
-            .dirs(&InstanceStore::new(&e.root).list().unwrap().instances[0].id)
+            .dirs(inst_id)
             .home_dir()
             .to_str()
             .unwrap()
@@ -349,7 +364,24 @@ fn a_pre_1_13_version_uses_minecraft_arguments_and_the_default_jvm_arguments() {
         "id": "1.12.2", "type": "release", "mainClass": "net.minecraft.client.main.Main", "assets": "1.12",
         "assetIndex": asset_ref("1.12"), "downloads": {"client": client()},
         "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --versionType ${version_type}",
-        "libraries": [lib("com.mojang:authlib:1.5.25", "com/mojang/authlib/1.5.25/authlib-1.5.25.jar"), lib("com.mojang:netty:1.8.8", "com/mojang/netty/1.8.8/netty-1.8.8.jar")]
+        "libraries": [
+            lib("com.mojang:authlib:1.5.25", "com/mojang/authlib/1.5.25/authlib-1.5.25.jar"),
+            lib("com.mojang:netty:1.8.8", "com/mojang/netty/1.8.8/netty-1.8.8.jar"),
+            {
+                "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+                "natives": {"windows": "natives-windows"},
+                "downloads": {
+                    "classifiers": {
+                        "natives-windows": {
+                            "path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+                            "sha1": H,
+                            "size": 1,
+                            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar"
+                        }
+                    }
+                }
+            }
+        ]
     });
     install(
         &e.root,
@@ -361,6 +393,14 @@ fn a_pre_1_13_version_uses_minecraft_arguments_and_the_default_jvm_arguments() {
         ],
         Some(("1.12", json!({"objects": {}}))),
     );
+    let resolved = resolve(&e.root, "1.12.2").unwrap();
+    assert!(
+        resolved
+            .libraries
+            .iter()
+            .any(|l| matches!(l.role, Role::Native { .. }) && l.name.contains("lwjgl-platform")),
+        "historical natives map + classifiers resolve as Role::Native"
+    );
     let cmd = build_for(&e, "1.12.2", 8, 2048, &[]).unwrap();
     let a = &cmd.args;
     for needed in ["-Djava.library.path", "-Dminecraft.launcher.brand=Clade"] {
@@ -369,7 +409,11 @@ fn a_pre_1_13_version_uses_minecraft_arguments_and_the_default_jvm_arguments() {
             "default JVM argument {needed}"
         );
     }
-    assert_eq!(classpath(a).len(), 3);
+    let cp = classpath(a);
+    assert_eq!(cp.len(), 3);
+    assert!(!cp
+        .iter()
+        .any(|p| p.contains("lwjgl-platform") || p.contains("natives-windows")));
     assert_eq!(after(a, "--username"), "Steve_01");
     assert_eq!(after(a, "--accessToken"), TOKEN);
     assert_eq!(after(a, "--assetIndex"), "1.12");
@@ -589,6 +633,80 @@ fn a_loop_in_the_inheritance_chain_and_a_missing_parent_are_refused() {
         &json!({"id": "c", "inheritsFrom": "nowhere", "libraries": []}),
     );
     assert!(matches!(resolve(&e.root, "c"), Err(LaunchError::MissingVersion(m)) if m == "nowhere"));
+
+    // Non-cyclic inheritance chain: 5 levels (MAX_CHAIN) is allowed, 6 levels is refused.
+    write_version(
+        &e.root,
+        "chain-4",
+        &json!({
+            "id": "chain-4", "type": "release", "mainClass": "m.Main",
+            "downloads": {"client": client()}, "minecraftArguments": "--username ${auth_player_name}",
+            "libraries": []
+        }),
+    );
+    for (child, parent) in [
+        ("chain-3", "chain-4"),
+        ("chain-2", "chain-3"),
+        ("chain-1", "chain-2"),
+        ("chain-0", "chain-1"),
+        ("chain-over", "chain-0"),
+    ] {
+        write_version(
+            &e.root,
+            child,
+            &json!({"id": child, "inheritsFrom": parent, "libraries": []}),
+        );
+    }
+    assert!(resolve(&e.root, "chain-0").is_ok());
+    assert!(matches!(
+        resolve(&e.root, "chain-over"),
+        Err(LaunchError::BadVersion(m)) if m.contains("too deep")
+    ));
+}
+
+#[test]
+fn incomplete_version_metadata_is_refused() {
+    let e = env();
+    write_version(
+        &e.root,
+        "no-client",
+        &json!({
+            "id": "no-client", "type": "release", "mainClass": "m.Main",
+            "minecraftArguments": "--username ${auth_player_name}", "libraries": []
+        }),
+    );
+    assert!(matches!(
+        resolve(&e.root, "no-client"),
+        Err(LaunchError::Incomplete(m)) if m.contains("client")
+    ));
+
+    write_version(
+        &e.root,
+        "no-main",
+        &json!({
+            "id": "no-main", "type": "release", "downloads": {"client": client()},
+            "minecraftArguments": "--username ${auth_player_name}", "libraries": []
+        }),
+    );
+    assert!(matches!(
+        resolve(&e.root, "no-main"),
+        Err(LaunchError::Incomplete(m)) if m.contains("main class")
+    ));
+
+    write_version(
+        &e.root,
+        "no-game-args",
+        &json!({
+            "id": "no-game-args", "type": "release", "mainClass": "m.Main",
+            "downloads": {"client": client()},
+            "arguments": {"jvm": ["-cp", "${classpath}"], "game": []},
+            "libraries": []
+        }),
+    );
+    assert!(matches!(
+        resolve(&e.root, "no-game-args"),
+        Err(LaunchError::Incomplete(m)) if m.contains("game arguments")
+    ));
 }
 
 // ================================================================================ safety
@@ -607,6 +725,21 @@ fn missing_files_stop_the_launch_with_a_clear_reason() {
     assert!(
         matches!(&err, LaunchError::MissingFile(m) if m.contains("lwjgl")),
         "{err:?}"
+    );
+
+    let e = env();
+    install(
+        &e.root,
+        "1.21.4",
+        &modern_vanilla(),
+        &[],
+        Some(("19", modern_index())),
+    );
+    fs::remove_file(e.root.minecraft_dir().join("versions/1.21.4/1.21.4.jar")).unwrap();
+    let multi = build_for(&e, "1.21.4", 21, 2048, &[]).unwrap_err();
+    assert!(
+        matches!(&multi, LaunchError::MissingFile(m) if m == "com.google.code.gson:gson:2.11.0 and 2 more"),
+        "{multi:?}"
     );
 
     let e = env();
@@ -634,6 +767,27 @@ fn missing_files_stop_the_launch_with_a_clear_reason() {
     assert!(matches!(
         build_for(&e, "1.21.4", 21, 2048, &[]),
         Err(LaunchError::MissingFile(_))
+    ));
+
+    let e = env();
+    install(
+        &e.root,
+        "1.21.4",
+        &modern_vanilla(),
+        &VANILLA_LIBS,
+        Some(("19", modern_index())),
+    );
+    let idx_path = e.root.assets_dir().join("indexes/19.json");
+    fs::remove_file(&idx_path).unwrap();
+    assert!(matches!(
+        build_for(&e, "1.21.4", 21, 2048, &[]),
+        Err(LaunchError::MissingFile(m)) if m == "the asset index"
+    ));
+
+    fs::write(&idx_path, b"{not valid json").unwrap();
+    assert!(matches!(
+        build_for(&e, "1.21.4", 21, 2048, &[]),
+        Err(LaunchError::BadVersion(_))
     ));
 }
 
@@ -677,6 +831,27 @@ fn the_token_never_appears_in_the_loggable_forms_of_the_command() {
     );
     let cmd = build_for(&e, "1.6.4", 8, 2048, &[]).unwrap();
     assert!(!cmd.redacted(&e.root).contains(TOKEN));
+
+    // Logging argument templates only receive `${path}` and never expand credential placeholders.
+    let e = env();
+    let mut v_log = modern_vanilla();
+    v_log["logging"]["client"]["argument"] =
+        json!("-Dlog4j.configurationFile=${path} -Dleak=${auth_access_token}:${auth_session}");
+    install(
+        &e.root,
+        "1.21.4",
+        &v_log,
+        &VANILLA_LIBS,
+        Some(("19", modern_index())),
+    );
+    let cmd = build_for(&e, "1.21.4", 21, 2048, &[]).unwrap();
+    let log_arg = cmd
+        .args
+        .iter()
+        .find(|a| a.starts_with("-Dlog4j.configurationFile="))
+        .unwrap();
+    assert!(log_arg.ends_with(" -Dleak=:"));
+    assert!(!log_arg.contains(TOKEN));
 }
 
 #[test]
@@ -702,6 +877,7 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
     for k in [
         "TEMP",
         "TMP",
+        "TMPDIR",
         "USERPROFILE",
         "HOME",
         "APPDATA",
@@ -737,6 +913,21 @@ fn the_process_environment_is_clean_and_confined_to_the_clade_folder() {
     let process = cmd.to_process();
     assert_eq!(process.get_program(), cmd.program.as_os_str());
     assert_eq!(process.get_current_dir(), Some(cmd.cwd.as_path()));
+    let proc_args: Vec<String> = process
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(proc_args, cmd.args);
+    let proc_env: BTreeMap<String, String> = process
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.expect("env value").to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(proc_env, cmd.env);
 }
 
 #[test]
@@ -874,6 +1065,23 @@ fn semicolons_in_the_clade_folder_or_temp_path_are_refused() {
             extra_jvm_args: &[],
             sys: &sys,
             temp_dir: &bad_temp,
+        }),
+        Err(LaunchError::UnsupportedFolderPath)
+    ));
+
+    let bad_dirs = InstanceStore::new(&bad_env.root).dirs(&inst.id);
+    assert!(matches!(
+        build(&BuildInput {
+            root: &clean.root,
+            dirs: &bad_dirs,
+            resolved: &resolved,
+            java: &java,
+            identity: &identity(),
+            memory_mb: 2048,
+            resolution: None,
+            extra_jvm_args: &[],
+            sys: &sys,
+            temp_dir: &clean.root.game_tmp_dir().join(inst.id.as_str()),
         }),
         Err(LaunchError::UnsupportedFolderPath)
     ));
@@ -1089,6 +1297,156 @@ fn huge_classpaths_compact_to_relative_paths_and_spill_to_a_secret_free_argfile_
     ));
 }
 
+#[test]
+fn argfile_spill_refuses_non_ascii_tokens_and_links_and_enforces_hard_limit_on_java_9_plus() {
+    // 1) Non-ASCII classpath refuses argfile spill (ANSI codepage hazard) and hits TooLong on Java 21.
+    let e_non_ascii = env();
+    let mut non_ascii_vals = vec![lib(
+        "org.example:umlaut:1.0",
+        "org/example/\u{00fc}mlaut/1.0/\u{00fc}mlaut-1.0.jar",
+    )];
+    let mut non_ascii_paths =
+        vec!["org/example/\u{00fc}mlaut/1.0/\u{00fc}mlaut-1.0.jar".to_owned()];
+    for idx in 1..450 {
+        let rel = format!(
+            "org/example/heavy_pack_component_{idx:03}/2.4.{idx}/heavy_pack_component_{idx:03}-2.4.{idx}.jar"
+        );
+        non_ascii_vals.push(lib(
+            &format!("org.example:heavy_pack_component_{idx:03}:2.4.{idx}"),
+            &rel,
+        ));
+        non_ascii_paths.push(rel);
+    }
+    let non_ascii_refs: Vec<&str> = non_ascii_paths.iter().map(String::as_str).collect();
+    let mut v_non_ascii = modern_vanilla();
+    v_non_ascii["libraries"] = Value::Array(non_ascii_vals);
+    install(
+        &e_non_ascii.root,
+        "1.21.4",
+        &v_non_ascii,
+        &non_ascii_refs,
+        Some(("19", modern_index())),
+    );
+    assert!(matches!(
+        build_for(&e_non_ascii, "1.21.4", 21, 4096, &[]),
+        Err(LaunchError::TooLong)
+    ));
+    let non_ascii_inst = &InstanceStore::new(&e_non_ascii.root)
+        .list()
+        .unwrap()
+        .instances[0]
+        .id;
+    assert!(!InstanceStore::new(&e_non_ascii.root)
+        .dirs(non_ascii_inst)
+        .root()
+        .join(".clade-jvm.args")
+        .exists());
+
+    // Shared 450-ASCII-lib environment for token, link, and extra_jvm_args tests.
+    let e_huge = env();
+    let mut huge_vals = Vec::new();
+    let mut huge_paths = Vec::new();
+    for idx in 0..450 {
+        let rel = format!(
+            "org/example/heavy_pack_component_{idx:03}/2.4.{idx}/heavy_pack_component_{idx:03}-2.4.{idx}.jar"
+        );
+        huge_vals.push(lib(
+            &format!("org.example:heavy_pack_component_{idx:03}:2.4.{idx}"),
+            &rel,
+        ));
+        huge_paths.push(rel);
+    }
+    let huge_refs: Vec<&str> = huge_paths.iter().map(String::as_str).collect();
+    let mut v450 = modern_vanilla();
+    v450["libraries"] = Value::Array(huge_vals);
+    install(
+        &e_huge.root,
+        "1.21.4",
+        &v450,
+        &huge_refs,
+        Some(("19", modern_index())),
+    );
+
+    let store = InstanceStore::new(&e_huge.root);
+    let resolved = resolve(&e_huge.root, "1.21.4").unwrap();
+    let java21 = java_for(&e_huge.root, 21);
+    let sys = SystemEnv::from_process();
+
+    // 2) Classpath containing the access token refuses argfile spill and hits TooLong on Java 21.
+    let tok_inst = store
+        .create(NewInstance::vanilla("TokenInCp", "1.21.4").unwrap(), 1)
+        .unwrap();
+    let tok_dirs = store.dirs(&tok_inst.id);
+    let tok_temp = e_huge.root.game_tmp_dir().join(tok_inst.id.as_str());
+    assert!(matches!(
+        build(&BuildInput {
+            root: &e_huge.root,
+            dirs: &tok_dirs,
+            resolved: &resolved,
+            java: &java21,
+            identity: &Identity {
+                uuid: UUID.into(),
+                name: "Steve_01".into(),
+                access_token: Secret::new("heavy_pack_component_001".into()),
+            },
+            memory_mb: 4096,
+            resolution: None,
+            extra_jvm_args: &[],
+            sys: &sys,
+            temp_dir: &tok_temp,
+        }),
+        Err(LaunchError::TooLong)
+    ));
+    assert!(!tok_dirs.root().join(".clade-jvm.args").exists());
+
+    // 3) Extra JVM args past 30,000 UTF-16 chars still hit TooLong on Java 21 even after argfile spill.
+    let pad_arg = format!("-Dpad={}", "x".repeat(494));
+    let long_extra: Vec<String> = vec![pad_arg; 64];
+    assert!(matches!(
+        build_for(&e_huge, "1.21.4", 21, 4096, &long_extra),
+        Err(LaunchError::TooLong)
+    ));
+
+    // 4) A link/junction at `.clade-jvm.args` is rejected by `reject_links_between`.
+    #[cfg(windows)]
+    {
+        let link_inst = store
+            .create(NewInstance::vanilla("LinkedArgfile", "1.21.4").unwrap(), 2)
+            .unwrap();
+        let link_dirs = store.dirs(&link_inst.id);
+        let link_temp = e_huge.root.game_tmp_dir().join(link_inst.id.as_str());
+        let outside = e_huge._dir.path().join("outside-argfile-target");
+        fs::create_dir(&outside).unwrap();
+        let argfile_link = link_dirs.root().join(".clade-jvm.args");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&argfile_link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(matches!(
+            build(&BuildInput {
+                root: &e_huge.root,
+                dirs: &link_dirs,
+                resolved: &resolved,
+                java: &java21,
+                identity: &identity(),
+                memory_mb: 4096,
+                resolution: None,
+                extra_jvm_args: &[],
+                sys: &sys,
+                temp_dir: &link_temp,
+            }),
+            Err(LaunchError::BadVersion(_))
+        ));
+    }
+}
+
 // ================================================================================ the real thing (by hand)
 
 /// Run by hand against a Clade folder whose profiles were prepared by the real app:
@@ -1160,10 +1518,9 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
             "== {} ({}) java {} cp entries {}",
             inst.name, resolved.launch_id, java.id, cp_count
         );
-        println!(
-            "   {}",
-            &cmd.redacted(&root)[..cmd.redacted(&root).len().min(260)]
-        );
+        let shown = cmd.redacted(&root);
+        let preview: String = shown.chars().take(260).collect();
+        println!("   {preview}");
 
         let mut child = tokio::process::Command::from(cmd.to_process());
         child
@@ -1191,24 +1548,42 @@ async fn live_real_profiles_build_commands_and_the_real_jvm_accepts_them() {
             });
         }
         drop(tx);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
+        let liveness_at = tokio::time::sleep_until(started + std::time::Duration::from_secs(8));
+        tokio::pin!(liveness_at);
+        let timeout_at = tokio::time::sleep_until(started + std::time::Duration::from_secs(40));
+        tokio::pin!(timeout_at);
+        let mut liveness_pending = resolved.logging.is_none();
+        let mut rx_open = true;
         let mut seen: Vec<String> = Vec::new();
         let mut verdict = None;
-        while started.elapsed() < std::time::Duration::from_secs(40) {
+        loop {
             tokio::select! {
-                line = rx.recv() => match line {
+                line = rx.recv(), if rx_open => match line {
                     Some(l) => {
                         let ok = l.contains("Setting user") || l.contains("Backend library");
                         seen.push(l);
                         if ok { verdict = Some("minecraft reached its main startup"); break; }
                     }
-                    None => break,
+                    None => rx_open = false,
                 },
-                status = child.wait() => { verdict = Some(if status.map(|s| s.success()).unwrap_or(false) { "exited cleanly" } else { "EXITED EARLY" }); break; }
-                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                    // Versions that print nothing (the oldest) just have to stay alive for a while.
-                    if resolved.logging.is_none() && started.elapsed() > std::time::Duration::from_secs(8) && child.try_wait().ok().flatten().is_none() { verdict = Some("alive after 8 s (no log markers in this version)"); break; }
+                status = child.wait() => {
+                    verdict = Some(if status.map(|s| s.success()).unwrap_or(false) {
+                        "exited cleanly"
+                    } else {
+                        "EXITED EARLY"
+                    });
+                    break;
                 }
+                () = &mut liveness_at, if liveness_pending => {
+                    liveness_pending = false;
+                    // Versions that print nothing (the oldest) just have to stay alive for a while.
+                    if child.try_wait().ok().flatten().is_none() {
+                        verdict = Some("alive after 8 s (no log markers in this version)");
+                        break;
+                    }
+                }
+                () = &mut timeout_at => break,
             }
         }
         let verdict = verdict.unwrap_or("timed out waiting for startup");
@@ -1271,4 +1646,81 @@ fn custom_resolution_activates_mojang_feature_rule_and_substitutes_dimensions() 
     assert_eq!(after(&cmd.args, "--width"), "1280");
     assert_eq!(after(&cmd.args, "--height"), "720");
     assert!(cmd.args.contains(&"-XX:+UseStringDeduplication".to_owned()));
+}
+
+#[test]
+fn custom_resolution_falls_back_when_version_metadata_omits_resolution_flags() {
+    let e = env();
+    let legacy = json!({
+        "id": "1.12.2", "type": "release", "mainClass": "net.minecraft.client.main.Main", "assets": "1.12",
+        "assetIndex": asset_ref("1.12"), "downloads": {"client": client()},
+        "minecraftArguments": "--username ${auth_player_name} --version ${version_name}",
+        "libraries": []
+    });
+    install(
+        &e.root,
+        "1.12.2",
+        &legacy,
+        &[],
+        Some(("1.12", json!({"objects": {}}))),
+    );
+
+    let mut width_only = modern_vanilla();
+    width_only["id"] = json!("1.21.4-width-only");
+    width_only["arguments"]["game"] = json!([
+        "--username",
+        "${auth_player_name}",
+        {"rules": [{"action": "allow", "features": {"has_custom_resolution": true}}], "value": ["--width", "${resolution_width}"]}
+    ]);
+    install(
+        &e.root,
+        "1.21.4-width-only",
+        &width_only,
+        &VANILLA_LIBS,
+        Some(("19", modern_index())),
+    );
+
+    let store = InstanceStore::new(&e.root);
+    let inst = store
+        .create(NewInstance::vanilla("LegacyWindowed", "1.12.2").unwrap(), 1)
+        .unwrap();
+    let dirs = store.dirs(&inst.id);
+    let sys = SystemEnv::from_process();
+    let temp = e.root.game_tmp_dir().join(inst.id.as_str());
+    let res = Some(crate::instances::Resolution {
+        width: 1280,
+        height: 720,
+    });
+
+    let legacy_cmd = build(&BuildInput {
+        root: &e.root,
+        dirs: &dirs,
+        resolved: &resolve(&e.root, "1.12.2").unwrap(),
+        java: &java_for(&e.root, 8),
+        identity: &identity(),
+        memory_mb: 2048,
+        resolution: res,
+        extra_jvm_args: &[],
+        sys: &sys,
+        temp_dir: &temp,
+    })
+    .unwrap();
+    assert_eq!(after(&legacy_cmd.args, "--width"), "1280");
+    assert_eq!(after(&legacy_cmd.args, "--height"), "720");
+
+    let width_only_cmd = build(&BuildInput {
+        root: &e.root,
+        dirs: &dirs,
+        resolved: &resolve(&e.root, "1.21.4-width-only").unwrap(),
+        java: &java_for(&e.root, 21),
+        identity: &identity(),
+        memory_mb: 4096,
+        resolution: res,
+        extra_jvm_args: &[],
+        sys: &sys,
+        temp_dir: &temp,
+    })
+    .unwrap();
+    assert_eq!(after(&width_only_cmd.args, "--width"), "1280");
+    assert_eq!(after(&width_only_cmd.args, "--height"), "720");
 }

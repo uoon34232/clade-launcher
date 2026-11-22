@@ -26,7 +26,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::instances::{InstanceDirs, Resolution};
@@ -47,6 +46,7 @@ const MAX_COMMAND_CHARS: usize = 28_000;
 /// Windows refuses a `CreateProcessW` command line longer than 32,767 `WCHAR`s; keep safety margin.
 const HARD_MAX_COMMAND_CHARS: usize = 30_000;
 const MAX_VERSION_JSON_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CHAIN: usize = 5;
 
 #[derive(Debug, thiserror::Error)]
@@ -373,12 +373,20 @@ fn asset_layout(root: &PortableRoot, r: &Resolved) -> Result<AssetLayout, Launch
     let Some(ai) = &r.asset_index else {
         return Ok(AssetLayout::Hashed);
     };
-    let bytes = fs::read(
-        root.assets_dir()
-            .join("indexes")
-            .join(format!("{}.json", ai.id)),
-    )
-    .map_err(|_| LaunchError::MissingFile("the asset index".into()))?;
+    let index_path = root
+        .assets_dir()
+        .join("indexes")
+        .join(format!("{}.json", ai.id));
+    crate::portable::fsutil::reject_links_between(root.path(), &index_path)
+        .map_err(|e| LaunchError::BadVersion(e.to_string()))?;
+    let bytes =
+        crate::portable::fsutil::read_bounded(&index_path, MAX_INDEX_BYTES).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                LaunchError::MissingFile("the asset index".into())
+            } else {
+                LaunchError::BadVersion(e.to_string())
+            }
+        })?;
     let index = parse_asset_index(&bytes)?;
     Ok(if index.map_to_resources {
         AssetLayout::InGameDir
@@ -513,6 +521,28 @@ fn maybe_spill_classpath_argfile(
     Ok(())
 }
 
+/// Drops temporary credential copies in template variables on every return path.
+struct ZeroizingVars<'a>(BTreeMap<&'a str, String>);
+
+impl Drop for ZeroizingVars<'_> {
+    fn drop(&mut self) {
+        for val in self.0.values_mut() {
+            zeroize::Zeroize::zeroize(val);
+        }
+    }
+}
+
+/// Drops built argument buffers (which may contain substituted credentials) on early error paths.
+struct ZeroizingArgs(Vec<String>);
+
+impl Drop for ZeroizingArgs {
+    fn drop(&mut self) {
+        for a in &mut self.0 {
+            zeroize::Zeroize::zeroize(a);
+        }
+    }
+}
+
 pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
     if utf8(i.root.path())?.contains(';')
         || utf8(i.dirs.root())?.contains(';')
@@ -573,44 +603,20 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         }
     }
 
-    let uuid = i.identity.uuid.replace('-', "").to_ascii_lowercase();
-    let mut token = zeroize::Zeroizing::new(i.identity.access_token.expose().to_owned());
-    let mut vars: BTreeMap<&str, String> = BTreeMap::new();
-    for (k, v) in [
-        ("auth_player_name", i.identity.name.clone()),
-        ("auth_uuid", uuid.clone()),
-        ("auth_access_token", (*token).clone()),
-        ("auth_session", format!("token:{}:{}", *token, uuid)),
-        ("user_type", "msa".to_owned()),
-        ("user_properties", "{}".to_owned()),
-        // Optional telemetry identifiers the game accepts empty.
-        ("clientid", String::new()),
-        ("auth_xuid", String::new()),
-        ("version_name", r.base_id.clone()),
-        ("version_type", r.version_type.clone()),
-        ("game_directory", utf8(&game_dir)?),
-        ("assets_root", utf8(&assets_root)?),
-        ("game_assets", utf8(&game_assets)?),
-        (
-            "assets_index_name",
-            r.asset_index
-                .as_ref()
-                .map(|a| a.id.clone())
-                .unwrap_or_default(),
-        ),
-        ("natives_directory", utf8(&i.dirs.natives_dir())?),
-        ("launcher_name", LAUNCHER_NAME.to_owned()),
-        ("launcher_version", env!("CARGO_PKG_VERSION").to_owned()),
-        ("classpath", cp.join(";")),
-        ("classpath_separator", ";".to_owned()),
-        ("library_directory", utf8(&libdir)?),
-    ] {
-        vars.insert(k, v);
-    }
-    if let Some(res) = i.resolution {
-        vars.insert("resolution_width", res.width.to_string());
-        vars.insert("resolution_height", res.height.to_string());
-    }
+    // Perform all fallible path conversions and template validation before exposing credentials.
+    let home = i.dirs.home_dir();
+    let game_dir_utf8 = utf8(&game_dir)?;
+    let assets_root_utf8 = utf8(&assets_root)?;
+    let game_assets_utf8 = utf8(&game_assets)?;
+    let natives_dir_utf8 = utf8(&i.dirs.natives_dir())?;
+    let libdir_utf8 = utf8(&libdir)?;
+    let temp_dir_utf8 = utf8(i.temp_dir)?;
+    let home_utf8 = utf8(&home)?;
+    let log_path_utf8 = log_path.as_deref().map(utf8).transpose()?;
+    let sys_root = utf8(&i.sys.system_root)?;
+    let appdata_utf8 = utf8(&home.join("AppData").join("Roaming"))?;
+    let localappdata_utf8 = utf8(&home.join("AppData").join("Local"))?;
+
     let features = LaunchFeatures {
         has_custom_resolution: i.resolution.is_some(),
     };
@@ -656,27 +662,65 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         }
     }
 
+    let uuid = i.identity.uuid.replace('-', "").to_ascii_lowercase();
+    let mut token = zeroize::Zeroizing::new(i.identity.access_token.expose().to_owned());
+    let mut vars = ZeroizingVars(BTreeMap::new());
+    for (k, v) in [
+        ("auth_player_name", i.identity.name.clone()),
+        ("auth_uuid", uuid.clone()),
+        ("auth_access_token", (*token).clone()),
+        ("auth_session", format!("token:{}:{}", *token, uuid)),
+        ("user_type", "msa".to_owned()),
+        ("user_properties", "{}".to_owned()),
+        // Optional telemetry identifiers the game accepts empty.
+        ("clientid", String::new()),
+        ("auth_xuid", String::new()),
+        ("version_name", r.base_id.clone()),
+        ("version_type", r.version_type.clone()),
+        ("game_directory", game_dir_utf8),
+        ("assets_root", assets_root_utf8),
+        ("game_assets", game_assets_utf8),
+        (
+            "assets_index_name",
+            r.asset_index
+                .as_ref()
+                .map(|a| a.id.clone())
+                .unwrap_or_default(),
+        ),
+        ("natives_directory", natives_dir_utf8),
+        ("launcher_name", LAUNCHER_NAME.to_owned()),
+        ("launcher_version", env!("CARGO_PKG_VERSION").to_owned()),
+        ("classpath", cp.join(";")),
+        ("classpath_separator", ";".to_owned()),
+        ("library_directory", libdir_utf8),
+    ] {
+        vars.0.insert(k, v);
+    }
+    if let Some(res) = i.resolution {
+        vars.0.insert("resolution_width", res.width.to_string());
+        vars.0.insert("resolution_height", res.height.to_string());
+    }
+
     let mut unknown = Vec::new();
-    let home = i.dirs.home_dir();
-    let mut args: Vec<String> = vec![
+    let mut args = ZeroizingArgs(vec![
         format!("-Xmx{}M", i.memory_mb),
         "-Dfile.encoding=UTF-8".into(),
         "-Dsun.stdout.encoding=UTF-8".into(),
         "-Dsun.stderr.encoding=UTF-8".into(),
-    ];
+    ]);
     if i.java.java_major >= 19 {
-        args.push("-Dstdout.encoding=UTF-8".into());
-        args.push("-Dstderr.encoding=UTF-8".into());
+        args.0.push("-Dstdout.encoding=UTF-8".into());
+        args.0.push("-Dstderr.encoding=UTF-8".into());
     }
-    args.push("-Dlog4j2.formatMsgNoLookups=true".into());
+    args.0.push("-Dlog4j2.formatMsgNoLookups=true".into());
     if i.java.java_major <= 8 {
-        args.push("-XX:-CreateMinidumpOnCrash".into());
+        args.0.push("-XX:-CreateMinidumpOnCrash".into());
     } else {
-        args.push("-XX:-CreateCoredumpOnCrash".into());
+        args.0.push("-XX:-CreateCoredumpOnCrash".into());
     }
     let region_mb = if i.memory_mb <= 2048 { 16 } else { 32 };
     let direct_mb = (i.memory_mb / 2).clamp(512, 2048);
-    args.extend([
+    args.0.extend([
         "-XX:+UnlockExperimentalVMOptions".into(),
         "-XX:+UseG1GC".into(),
         "-XX:G1NewSizePercent=20".into(),
@@ -686,63 +730,55 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         format!("-XX:MaxDirectMemorySize={direct_mb}M"),
     ]);
     if i.java.java_major >= 12 {
-        args.push("-XX:G1PeriodicGCInterval=60000".into());
+        args.0.push("-XX:G1PeriodicGCInterval=60000".into());
     }
     if i.java.java_major <= 8
         && !jvm_template
             .iter()
             .any(|a| a.starts_with("-XX:HeapDumpPath="))
     {
-        args.push(
+        args.0.push(
             "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
                 .into(),
         );
     }
-    args.push(format!("-Djava.io.tmpdir={}", utf8(i.temp_dir)?));
-    args.push(format!("-Duser.home={}", utf8(&home)?));
-    args.extend(
+    args.0.push(format!("-Djava.io.tmpdir={temp_dir_utf8}"));
+    args.0.push(format!("-Duser.home={home_utf8}"));
+    args.0.extend(
         jvm_template
             .iter()
-            .map(|a| substitute(a, &vars, &mut unknown)),
+            .map(|a| substitute(a, &vars.0, &mut unknown)),
     );
-    if let (Some(template), Some(p)) = (
+    if let (Some(template), Some(path_str)) = (
         r.logging.as_ref().and_then(|l| l.argument.as_deref()),
-        &log_path,
+        log_path_utf8,
     ) {
-        // `${path}` is the saved logging configuration.
-        let mut v = vars.clone();
-        v.insert("path", utf8(p)?);
-        args.push(substitute(template, &v, &mut unknown));
-        for val in v.values_mut() {
-            zeroize::Zeroize::zeroize(val);
-        }
+        // `${path}` is the saved logging configuration; never expose credential placeholders here.
+        let log_vars = BTreeMap::from([("path", path_str)]);
+        args.0.push(substitute(template, &log_vars, &mut unknown));
     }
-    args.extend(i.extra_jvm_args.iter().cloned());
-    let main_idx = args.len();
-    args.push(r.main_class.clone());
-    args.extend(
+    args.0.extend(i.extra_jvm_args.iter().cloned());
+    let main_idx = args.0.len();
+    args.0.push(r.main_class.clone());
+    args.0.extend(
         game_template
             .iter()
-            .map(|a| substitute(a, &vars, &mut unknown)),
+            .map(|a| substitute(a, &vars.0, &mut unknown)),
     );
-    for val in vars.values_mut() {
-        zeroize::Zeroize::zeroize(val);
-    }
+    drop(vars);
 
-    if utf16_command_line_len(&i.java.exe, &args) > COMPACT_CP_CHARS {
-        compact_classpath_relative(&mut args[..main_idx], i.root.path(), &game_dir)?;
+    if utf16_command_line_len(&i.java.exe, &args.0) > COMPACT_CP_CHARS {
+        compact_classpath_relative(&mut args.0[..main_idx], i.root.path(), &game_dir)?;
     }
-    if utf16_command_line_len(&i.java.exe, &args) > MAX_COMMAND_CHARS && i.java.java_major >= 9 {
-        maybe_spill_classpath_argfile(&mut args, main_idx, i.root.path(), i.dirs.root(), &token)?;
+    if utf16_command_line_len(&i.java.exe, &args.0) > MAX_COMMAND_CHARS && i.java.java_major >= 9 {
+        maybe_spill_classpath_argfile(&mut args.0, main_idx, i.root.path(), i.dirs.root(), &token)?;
     }
-    if utf16_command_line_len(&i.java.exe, &args) > HARD_MAX_COMMAND_CHARS {
-        for a in &mut args {
-            zeroize::Zeroize::zeroize(a);
-        }
+    if utf16_command_line_len(&i.java.exe, &args.0) > HARD_MAX_COMMAND_CHARS {
         return Err(LaunchError::TooLong);
     }
 
-    let (sys_root, tmp, userprofile) = (utf8(&i.sys.system_root)?, utf8(i.temp_dir)?, utf8(&home)?);
+    let tmp = temp_dir_utf8;
+    let userprofile = home_utf8;
     let sys_drive = if sys_root
         .as_bytes()
         .first()
@@ -769,15 +805,15 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
         ("TMPDIR", tmp),
         ("USERPROFILE", userprofile.clone()),
         ("HOME", userprofile),
-        ("APPDATA", utf8(&home.join("AppData").join("Roaming"))?),
-        ("LOCALAPPDATA", utf8(&home.join("AppData").join("Local"))?),
+        ("APPDATA", appdata_utf8),
+        ("LOCALAPPDATA", localappdata_utf8),
     ] {
         env.insert(k.to_owned(), v);
     }
 
     Ok(GameCommand {
         program: i.java.exe.clone(),
-        args,
+        args: std::mem::take(&mut args.0),
         cwd: game_dir,
         env,
         secrets: vec![std::mem::take(&mut *token)],
@@ -785,4 +821,174 @@ pub fn build(i: &BuildInput<'_>) -> Result<GameCommand, LaunchError> {
 }
 
 #[cfg(test)]
+use std::fs;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::instances::{InstanceStore, NewInstance};
+    use crate::mc_meta::{AssetIndexRef, Download, JavaRequirement};
+    use serde_json::json;
+
+    #[test]
+    fn asset_layout_uses_bounded_reads_and_rejects_links_and_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(dir.path().join("Clade"));
+        root.ensure_layout().unwrap();
+
+        let dummy_dl = Download {
+            url: url::Url::parse("https://piston-meta.mojang.com/19.json").unwrap(),
+            sha1: "0123456789abcdef0123456789abcdef01234567".into(),
+            size: 1,
+        };
+        let mut resolved = Resolved {
+            launch_id: "1.21.4".into(),
+            base_id: "1.21.4".into(),
+            main_class: "net.minecraft.client.main.Main".into(),
+            jvm: Vec::new(),
+            game: vec![
+                Arg::Plain("--username".into()),
+                Arg::Plain("${auth_player_name}".into()),
+            ],
+            legacy_args: None,
+            libraries: Vec::new(),
+            asset_index: Some(AssetIndexRef {
+                id: "missing".into(),
+                download: dummy_dl,
+                assets_name: "19".into(),
+            }),
+            logging: None,
+            java: JavaRequirement {
+                component: "java-runtime-delta".into(),
+                major: 21,
+            },
+            version_type: "release".into(),
+        };
+
+        assert!(matches!(
+            asset_layout(&root, &resolved),
+            Err(LaunchError::MissingFile(_))
+        ));
+
+        let indexes_dir = root.assets_dir().join("indexes");
+        fs::create_dir_all(&indexes_dir).unwrap();
+        let oversized = indexes_dir.join("oversized.json");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_INDEX_BYTES + 1)
+            .unwrap();
+        resolved.asset_index.as_mut().unwrap().id = "oversized".into();
+        assert!(matches!(
+            asset_layout(&root, &resolved),
+            Err(LaunchError::BadVersion(_))
+        ));
+
+        resolved.asset_index.as_mut().unwrap().id = "../outside".into();
+        assert!(matches!(
+            asset_layout(&root, &resolved),
+            Err(LaunchError::BadVersion(_))
+        ));
+    }
+
+    #[test]
+    fn logging_argument_template_does_not_receive_credential_placeholders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(dir.path().join("Clade"));
+        root.ensure_layout().unwrap();
+
+        let h = "0123456789abcdef0123456789abcdef01234567";
+        let secret_token = "TEST-ONLY-LOG-ISOLATION-TOKEN-12345";
+        let version_json = json!({
+            "id": "1.21.4",
+            "type": "release",
+            "mainClass": "net.minecraft.client.main.Main",
+            "assets": "19",
+            "assetIndex": {"id": "19", "sha1": h, "size": 1, "totalSize": 1, "url": "https://piston-meta.mojang.com/19.json"},
+            "downloads": {"client": {"sha1": h, "size": 1, "url": "https://piston-data.mojang.com/c.jar"}},
+            "javaVersion": {"component": "java-runtime-delta", "majorVersion": 21},
+            "logging": {"client": {
+                "argument": "-Dlog4j.configurationFile=${path} -Dleak=${auth_access_token}:${auth_session}",
+                "type": "log4j2-xml",
+                "file": {"id": "client-1.21.2.xml", "sha1": h, "size": 1, "url": "https://piston-data.mojang.com/x.xml"}
+            }},
+            "libraries": [],
+            "arguments": {
+                "game": ["--username", "${auth_player_name}", "--accessToken", "${auth_access_token}"],
+                "jvm": ["-cp", "${classpath}"]
+            }
+        });
+
+        let vfile = version_file(&root, "1.21.4");
+        fs::create_dir_all(vfile.parent().unwrap()).unwrap();
+        fs::write(&vfile, version_json.to_string()).unwrap();
+
+        let client_jar = root
+            .minecraft_dir()
+            .join("versions")
+            .join("1.21.4")
+            .join("1.21.4.jar");
+        fs::write(&client_jar, b"x").unwrap();
+
+        let idx_file = root.assets_dir().join("indexes").join("19.json");
+        fs::create_dir_all(idx_file.parent().unwrap()).unwrap();
+        fs::write(&idx_file, json!({"objects": {}}).to_string()).unwrap();
+
+        let log_cfg = root
+            .assets_dir()
+            .join("log_configs")
+            .join("client-1.21.2.xml");
+        fs::create_dir_all(log_cfg.parent().unwrap()).unwrap();
+        fs::write(&log_cfg, b"<Configuration/>").unwrap();
+
+        let store = InstanceStore::new(&root);
+        let inst = store
+            .create(NewInstance::vanilla("LogIsolation", "1.21.4").unwrap(), 1)
+            .unwrap();
+        let dirs = store.dirs(&inst.id);
+        let resolved = resolve(&root, "1.21.4").unwrap();
+        let java_home = root
+            .java_runtimes_dir()
+            .join("java-runtime-delta--21.0.7--windows-x64");
+        let java = ManagedJava {
+            id: "java-runtime-delta--21.0.7--windows-x64".into(),
+            java_major: 21,
+            exe: java_home.join("bin").join("java.exe"),
+            home: java_home,
+        };
+        let sys = SystemEnv::from_process();
+        let temp = root.game_tmp_dir().join(inst.id.as_str());
+
+        let cmd = build(&BuildInput {
+            root: &root,
+            dirs: &dirs,
+            resolved: &resolved,
+            java: &java,
+            identity: &Identity {
+                uuid: "00000000-0000-4000-8000-00000000a001".into(),
+                name: "Steve_01".into(),
+                access_token: Secret::new(secret_token.into()),
+            },
+            memory_mb: 2048,
+            resolution: None,
+            extra_jvm_args: &[],
+            sys: &sys,
+            temp_dir: &temp,
+        })
+        .unwrap();
+
+        let log_arg = cmd
+            .args
+            .iter()
+            .find(|a| a.starts_with("-Dlog4j.configurationFile="))
+            .expect("logging arg present");
+        assert!(log_arg.contains(log_cfg.to_str().unwrap()));
+        assert!(log_arg.ends_with(" -Dleak=:"));
+        assert!(!log_arg.contains(secret_token));
+        assert!(!log_arg.contains("token:"));
+
+        let tok_idx = cmd.args.iter().position(|a| a == "--accessToken").unwrap();
+        assert_eq!(cmd.args[tok_idx + 1], secret_token);
+    }
+}

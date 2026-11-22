@@ -87,6 +87,10 @@ impl PrepareState {
         *running = Some((id.clone(), cancel.clone()));
         Ok(())
     }
+
+    pub fn is_busy(&self) -> bool {
+        lock(&self.running).is_some()
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

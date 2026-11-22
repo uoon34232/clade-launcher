@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import type { CatalogEntry, ProfileSummary } from "@/lib/profiles/api";
 import {
+  MAX_NAME_CHARS,
   buildLabel,
   defaultVersion,
   filterVersions,
   formatBytes,
-  formatGigabytes,
   formatPlaytime,
   itemsText,
   profileDetail,
@@ -108,15 +108,26 @@ describe("validateName", () => {
   it("accepts reasonable names and trims", () => {
     expect(validateName("  Survival  ", [])).toBeNull();
     expect(validateName("Ünïcode ✨ world", [])).toBeNull();
+    expect(MAX_NAME_CHARS).toBe(64);
+    expect(validateName("x".repeat(MAX_NAME_CHARS), [])).toBeNull();
+    expect(validateName(`  ${"x".repeat(MAX_NAME_CHARS)}  `, [])).toBeNull();
+    // Surrogate pairs count as a single Unicode codepoint, matching Rust `chars().count()`.
+    expect(validateName("🌍".repeat(MAX_NAME_CHARS), [])).toBeNull();
   });
 
   it("rejects empty, long, control-character and duplicate names (ignoring case)", () => {
     expect(validateName("   ", [])).toBe("validate.nameEmpty");
-    expect(validateName("x".repeat(65), [])).toBe("validate.nameLong");
+    expect(validateName("x".repeat(MAX_NAME_CHARS + 1), [])).toBe("validate.nameLong");
+    expect(validateName("🌍".repeat(MAX_NAME_CHARS + 1), [])).toBe("validate.nameLong");
+    expect(validateName("a\u0000b", [])).toBe("validate.nameControl");
     expect(validateName("a\u0007b", [])).toBe("validate.nameControl");
+    expect(validateName("a\u001fb", [])).toBe("validate.nameControl");
+    expect(validateName("a\u007fb", [])).toBe("validate.nameControl");
     expect(validateName("survival", ["Survival"])).toBe("validate.nameDuplicate");
     expect(validateName("  SURVIVAL ", ["Survival"])).toBe("validate.nameDuplicate");
-    expect(validateName("Creative", ["Survival"])).toBeNull();
+    expect(validateName("Survival", ["  survival  "])).toBe("validate.nameDuplicate");
+    expect(validateName("  SURVIVAL ", ["  survival\t"])).toBe("validate.nameDuplicate");
+    expect(validateName("Creative", ["   ", "  Survival "])).toBeNull();
   });
 });
 
@@ -144,6 +155,21 @@ describe("small helpers", () => {
     expect(staleNote(Date.UTC(2025, 0, 15, 12) / 1000, now)).toContain("2025");
     expect(staleNote(0)).toMatch(/saved version list/);
   });
+
+  it("strips the trailing dot from Russian short months in staleNote", () => {
+    const now = Date.UTC(2026, 9, 4);
+    setLocale("ru");
+    const sameYear = staleNote(Date.UTC(2026, 9, 3) / 1000, now);
+    expect(sameYear).toBe("Нет сети: используется список версий от 3 окт.");
+    expect(sameYear).not.toContain("..");
+
+    const priorYear = staleNote(Date.UTC(2025, 0, 15, 12) / 1000, now);
+    expect(priorYear).toContain("2025");
+    expect(priorYear).toMatch(/\.$/);
+    expect(priorYear).not.toContain("..");
+
+    expect(staleNote(0)).toBe("Нет сети: используется сохранённый список версий.");
+  });
 });
 
 describe("preparation text", () => {
@@ -157,7 +183,12 @@ describe("preparation text", () => {
     expect(itemsText(0, 0)).toBeNull();
   });
 
-  it("caches Intl.NumberFormat and Intl.DateTimeFormat instances across progress ticks and locales", () => {
+  it("caches Intl.NumberFormat and Intl.DateTimeFormat instances across progress ticks and locales", async () => {
+    // Isolate a cold module registry so prior tests never pre-warm the formatter Maps.
+    vi.resetModules();
+    const { setLocale: setFreshLocale } = await import("@/lib/i18n");
+    const ui = await import("./profileUi");
+
     const OriginalNumberFormat = Intl.NumberFormat;
     const OriginalDateTimeFormat = Intl.DateTimeFormat;
     let nfCalls = 0;
@@ -175,26 +206,46 @@ describe("preparation text", () => {
       return new OriginalDateTimeFormat(...args);
     });
 
-    // Cold cache for (en, 0..1) and (ru, 0..1) + (ru, 1..1) + (ru, date).
-    expect(formatGigabytes(4096)).toBe("4 GB");
-    expect(formatGigabytes(4608)).toBe("4.5 GB");
-    for (let i = 0; i < 20; i++) {
-      formatGigabytes(2048 + i * 512);
-      formatBytes((1.1 + i * 0.1) * 1024 * 1024 * 1024);
-    }
-    expect(nfCalls).toBe(1); // formatBytes(en) was already cached above; formatGigabytes(en) constructed once
-
-    setLocale("ru");
-    expect(formatGigabytes(4608)).toBe("4,5 ГБ");
-    expect(formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1,4 ГБ");
     const now = Date.UTC(2026, 9, 4);
-    for (let i = 0; i < 10; i++) {
-      formatGigabytes(4096);
-      formatBytes(2.2 * 1024 * 1024 * 1024);
-      staleNote(Date.UTC(2026, 9, 3) / 1000, now);
+
+    // Cold cache for English: constructs (en-GB, 0..1), (en-GB, 1..1), and (en-GB, md).
+    expect(ui.formatGigabytes(4096)).toBe("4 GB");
+    expect(ui.formatGigabytes(4608)).toBe("4.5 GB");
+    expect(ui.formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1.4 GB");
+    expect(ui.staleNote(Date.UTC(2026, 9, 3) / 1000, now)).toBe(
+      "Offline: using the version list from 3 Oct.",
+    );
+    for (let i = 0; i < 20; i++) {
+      ui.formatGigabytes(2048 + i * 512);
+      ui.formatBytes((1.1 + i * 0.1) * 1024 * 1024 * 1024);
+      ui.staleNote(Date.UTC(2026, 9, 3) / 1000, now);
     }
-    // Only 2 more NumberFormat constructions for Russian (0..1 and 1..1) and 1 DateTimeFormat for Russian (md).
-    expect(nfCalls).toBe(3);
+    expect(nfCalls).toBe(2);
     expect(dfCalls).toBe(1);
+
+    // Switch to Russian: constructs (ru-RU, 0..1), (ru-RU, 1..1), and (ru-RU, md).
+    setFreshLocale("ru");
+    expect(ui.formatGigabytes(4608)).toBe("4,5 ГБ");
+    expect(ui.formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1,4 ГБ");
+    const ruNote = ui.staleNote(Date.UTC(2026, 9, 3) / 1000, now);
+    expect(ruNote).toBe("Нет сети: используется список версий от 3 окт.");
+    expect(ruNote).not.toContain("..");
+    for (let i = 0; i < 10; i++) {
+      ui.formatGigabytes(4096);
+      ui.formatBytes(2.2 * 1024 * 1024 * 1024);
+      expect(ui.staleNote(Date.UTC(2026, 9, 3) / 1000, now)).toBe(ruNote);
+    }
+    expect(nfCalls).toBe(4);
+    expect(dfCalls).toBe(2);
+
+    // Switching back reuses the cached English formatters without extra constructions.
+    setFreshLocale("en");
+    expect(ui.formatGigabytes(4096)).toBe("4 GB");
+    expect(ui.formatBytes(1.4 * 1024 * 1024 * 1024)).toBe("1.4 GB");
+    expect(ui.staleNote(Date.UTC(2026, 9, 3) / 1000, now)).toBe(
+      "Offline: using the version list from 3 Oct.",
+    );
+    expect(nfCalls).toBe(4);
+    expect(dfCalls).toBe(2);
   });
 });
