@@ -4,7 +4,7 @@ This document is the operating procedure for producing a portable Windows releas
 tooling does, what a person must supply, how to abort, and what still has to be verified by hand. It is not
 user documentation.
 
-The first public build is a **Preview**: an unsigned portable ZIP. Nothing in this pipeline publishes
+Current public builds are **Preview** releases (`0.x`): unsigned portable ZIPs. Nothing in this pipeline publishes
 anything by itself. A tag creates a **draft** GitHub release; a person reviews it and publishes it, or deletes it.
 
 ## 1. Release model
@@ -127,7 +127,7 @@ Design notes:
   `src-tauri/tauri.conf.json` and the `clade-launcher` entry of `src-tauri/Cargo.lock`
   (`node scripts/release/check-versions.mjs`, also run by normal CI).
 - A release tag is `vX.Y.Z`, optionally followed by `-preview`, `-preview.N` or `-rc.N`. The `X.Y.Z` of the tag must
-  equal the version in the files. The first release is expected to be `v0.1.0-preview` for version `0.1.0`
+  equal the version in the files (`0.1.0` was the first preview; `0.2.0` is the current preview)
   (the executable's version resource is numeric, so the suffix lives only in the tag).
 - A tagged release also requires a non-empty `## [X.Y.Z]` section in `CHANGELOG.md`; that section becomes the
   release notes.
@@ -165,12 +165,13 @@ package is not code-signed.
 
 All of it is in `scripts/release/` (Node, no extra dependencies) and covered by tests that need no network.
 
-- **Allowlist validation** (`validate-package.mjs`): fails closed. Only the five top-level files, `licenses/*.txt|md`
-  and `runtimes/webview2/**` are accepted. It rejects `.git`, `.github`, `src`, `src-tauri`, `node_modules`, `target`,
-  test output, screenshots, `CLAUDE.md`, `.env`, logs, keys, backups, `.pdb`, nested ZIPs, `data/`, `instances/`,
-  `logs/`, `cache/`, `minecraft/`, `libraries/`, `assets/`, worlds, `vault.bin`, `accounts.json`, `settings.json`,
-  playtime files and anything else that is not named. It requires `Clade.exe`, `README.txt`, `LICENSE`,
-  `THIRD-PARTY-NOTICES.txt`, the WebView2 licence and `msedgewebview2.exe`.
+- **Allowlist validation** (`validate-package.mjs`): fails closed. Only the four top-level files (`Clade.exe`,
+  `README.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt`), `licenses/*.txt|md` and `runtimes/webview2/**` are accepted. It
+  rejects `.git`, `.github`, `src`, `src-tauri`, `node_modules`, `target`, test output, screenshots, `CLAUDE.md`, `.env`,
+  logs, keys, backups, `.pdb`, nested ZIPs, `data/`, `instances/`, `logs/`, `cache/`, `minecraft/`, `libraries/`,
+  `assets/`, worlds, `vault.bin`, `accounts.json`, `settings.json`, playtime files and anything else that is not named.
+  It requires `Clade.exe`, `README.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt`, the WebView2 licence
+  (`licenses/WebView2-Fixed-Version-License.txt`) and `msedgewebview2.exe`.
 - **Content scans**: the shipped text files must contain no developer path and nothing that looks like a token or key.
   `Clade.exe` is read, never modified, and must not contain this machine's profile, source or Cargo folders (the build
   remaps those out), must carry the expected version, and must embed the release Content Security Policy.
@@ -191,7 +192,7 @@ Without the approved WebView2 pin you can still exercise everything except the r
 ```powershell
 pnpm install --frozen-lockfile
 ./scripts/package-portable.ps1 -WithoutWebView2 -OutDir dist-portable
-./scripts/smoke-test-package.ps1 -Zip dist-portable/Clade-Launcher-Portable-NO-WEBVIEW2.zip -ExpectedVersion 0.1.0 -WithoutWebView2
+./scripts/smoke-test-package.ps1 -Zip dist-portable/Clade-Launcher-Portable-NO-WEBVIEW2.zip -ExpectedVersion 0.2.0 -WithoutWebView2
 ```
 
 That produces `Clade-Launcher-Portable-NO-WEBVIEW2.zip`: a differently named development package that uses the

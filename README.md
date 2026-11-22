@@ -60,13 +60,13 @@ Clade speaks English and Russian. Change the language in Settings and the whole 
 
 Clade is in active pre-release development.
 
-Implemented today: creating, renaming and duplicating profiles, switching Minecraft or loader versions in place, Simple and Advanced interface modes, per-profile memory, window size and allowlisted JVM flags, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game (framed inside Clade, with Clade kept open, or with Clade hidden), removing a profile without deleting its files and restoring removed profiles in one click, surfacing unreadable profile folders as warnings without touching their files, clearing archived sign-in vaults with confirmation, manual update checking and in-app portable updating in Settings, and the English and Russian interface.
+Implemented today: creating, renaming and duplicating profiles, switching Minecraft or loader versions in place, Simple and Advanced interface modes, warm Light and Dark ("Graphite Paper") themes (`Follow Windows`, `Light`, `Dark`), per-profile memory, window size and allowlisted JVM flags, opening a profile's `game/` folder, preparing Minecraft, Java and loaders, checking and repairing files, Microsoft sign-in with your Minecraft skin as your avatar, changing your skin and capes, launching the game (framed inside Clade, with Clade kept open, or with Clade hidden), removing a profile without deleting its files and restoring removed profiles in one click, surfacing unreadable profile folders as warnings without touching their files, clearing archived sign-in vaults with confirmation, manual update checking and in-app portable updating in Settings, and the English and Russian interface.
 
 Sign-in, Java provisioning, launching and zero-footprint portability have been verified with a real Microsoft/Minecraft account on Windows 11 x64, covering Vanilla (modern and 1.12.2), Fabric, Forge, NeoForge and Quilt. The Windows executable is not code-signed yet, so Windows may warn about it, and there is no stable `1.0` release yet.
 
 ## Download
 
-Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.1.0-preview.4`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.1.0-preview.4)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
+Download **`Clade-Launcher-Portable.zip`** from **[GitHub Releases](https://github.com/uoon34232/clade-launcher/releases)** (current pre-release: [`v0.2.0`](https://github.com/uoon34232/clade-launcher/releases/tag/v0.2.0)), extract the `Clade-Launcher` folder to any normal folder or USB drive, and run `Clade.exe`.
 
 To verify the download in PowerShell against the `.sha256` file published next to the ZIP:
 

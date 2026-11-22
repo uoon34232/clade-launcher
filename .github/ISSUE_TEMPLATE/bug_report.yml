@@ -12,8 +12,8 @@ body:
     id: clade-version
     attributes:
       label: Clade version
-      description: Shown in the file name of the ZIP you downloaded, or in README.txt inside it.
-      placeholder: "0.1.0"
+      description: Shown in README.txt inside Clade-Launcher-Portable.zip (or the extracted folder), in Clade Settings, or in Clade.exe file properties.
+      placeholder: "0.2.0"
     validations:
       required: true
   - type: input
