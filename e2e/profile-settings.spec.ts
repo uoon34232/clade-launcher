@@ -549,10 +549,13 @@ test.describe("profile settings: Advanced mode", () => {
     await page.getByRole("option", { name: /^24w50a/ }).click();
 
     await filters.getByRole("radio", { name: text("create.filter.historical") }).click();
-    await vanillaDialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    const mcCombo = vanillaDialog.getByRole("combobox", { name: text("create.mcVersion") });
+    await mcCombo.click();
+    await expect(mcCombo).toHaveAttribute("aria-expanded", "true");
     await expect(page.getByRole("option", { name: /^b1\.7\.3/ })).toBeVisible();
     await expect(page.getByRole("option", { name: /^a1\.2\.6/ })).toBeVisible();
     await page.keyboard.press("Escape");
+    await expect(mcCombo).toHaveAttribute("aria-expanded", "false");
 
     await filters.getByRole("radio", { name: text("create.filter.snapshots") }).click();
     await vanillaDialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();

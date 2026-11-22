@@ -1198,4 +1198,41 @@ describe("Profile settings and unreadable notice in Russian", () => {
     });
     await waitFor(() => expect(d.queryByRole("button", { name: "Save version" })).toBeNull());
   });
+
+  it("steps cleanly on ArrowDown when SelectTrigger receives navigation before popup rAF focus settles", async () => {
+    setup(snap([profile({ minecraft: "1.21.5" })]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+    fireEvent.click(d.getByRole("button", { name: "Change version…" }));
+
+    const combo = await d.findByRole("combobox", { name: "Minecraft version" });
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
+    try {
+      await act(async () => {
+        combo.focus();
+        fireEvent.keyDown(combo, { key: "Enter" });
+        fireEvent.click(combo, { detail: 0 });
+        await Promise.resolve();
+      });
+      const listbox = screen.getByRole("listbox");
+      expect(document.activeElement).toBe(combo);
+
+      fireEvent.keyDown(combo, { key: "ArrowDown" });
+      await waitFor(() => {
+        const targetOption = within(listbox).getByRole("option", { name: /^1\.21\.4/ });
+        expect(targetOption.hasAttribute("data-highlighted")).toBe(true);
+        expect(document.activeElement).toBe(targetOption);
+      });
+
+      fireEvent.click(document.activeElement as HTMLElement, { detail: 0 });
+      await waitFor(() => {
+        expect(screen.queryByRole("listbox")).toBeNull();
+        expect(combo.textContent).toContain("1.21.4");
+      });
+    } finally {
+      rafSpy.mockRestore();
+    }
+  });
 });

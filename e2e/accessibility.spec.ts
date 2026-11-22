@@ -388,6 +388,7 @@ test.describe("keyboard operation", () => {
     await expect(page.getByRole("listbox")).toBeVisible();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("option", { name: /^1\.20\.1/ })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(versionCombo).toContainText("1.20.1");
     await expect(versionCombo).toBeFocused();
@@ -484,6 +485,7 @@ test.describe("keyboard operation", () => {
 
     await page.keyboard.press("Enter");
     const reopenMenu = page.getByRole("menu");
+    await expect(reopenMenu.getByRole("menuitemradio", { name: /^FixtureAlex/ })).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
@@ -587,6 +589,7 @@ test.describe("remaining modal keyboard flows", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("listbox")).toBeVisible();
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("option", { name: /^1\.21\.1/ })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(versionCombo).toContainText("1.21.1");
 

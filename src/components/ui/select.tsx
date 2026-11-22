@@ -29,14 +29,46 @@ function SelectTrigger({
   className,
   size = "default",
   children,
+  onKeyDown,
   ...props
 }: SelectPrimitive.Trigger.Props & {
   size?: "sm" | "default";
 }) {
+  const handleKeyDown: SelectPrimitive.Trigger.Props["onKeyDown"] = (event) => {
+    onKeyDown?.(event);
+    if (event.defaultPrevented) return;
+    // Base UI focuses the active option on the next animation frame after opening. If ArrowDown/ArrowUp
+    // arrives before that rAF fires, floating-ui's useListNavigation checks activeElement === currentTarget
+    // and resets activeIndex to min/max instead of stepping from the selected item. Focusing the active
+    // option before Base UI's trigger handler runs preserves single-step keyboard navigation.
+    if (
+      (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+      event.currentTarget.getAttribute("aria-expanded") === "true" &&
+      document.activeElement === event.currentTarget
+    ) {
+      const listId = event.currentTarget.getAttribute("aria-controls");
+      const listbox = listId ? document.getElementById(listId) : null;
+      if (listbox) {
+        const activeOption =
+          listbox.querySelector<HTMLElement>(
+            '[role="option"][data-highlighted]:not([data-disabled]):not([aria-disabled="true"])',
+          ) ??
+          listbox.querySelector<HTMLElement>(
+            '[role="option"][tabindex="0"]:not([data-disabled]):not([aria-disabled="true"])',
+          ) ??
+          listbox.querySelector<HTMLElement>(
+            '[role="option"][aria-selected="true"]:not([data-disabled]):not([aria-disabled="true"])',
+          );
+        activeOption?.focus({ preventScroll: true });
+      }
+    }
+  };
+
   return (
     <SelectPrimitive.Trigger
       data-slot="select-trigger"
       data-size={size}
+      onKeyDown={handleKeyDown}
       className={cn(
         "border-input focus-visible:border-ring focus-visible:ring-ring aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-placeholder:text-muted-foreground dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 flex h-8 w-fit min-w-0 items-center justify-between gap-1.5 rounded-lg border bg-transparent py-2 pr-2 pl-2.5 text-sm whitespace-nowrap outline-hidden transition-colors select-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:ring-3 data-[size=sm]:h-7 data-[size=sm]:rounded-[min(var(--radius-md),10px)] *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:truncate [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className,
