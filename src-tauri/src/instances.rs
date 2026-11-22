@@ -325,11 +325,11 @@ pub struct RetainedInstance {
 fn validate_retained_folder(folder: &str) -> Result<(), InstanceError> {
     let ok = !folder.is_empty()
         && folder.len() <= 128
-        && folder != "."
-        && folder != ".."
+        && !folder.starts_with('.')
         && folder
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && RelPath::new(folder).is_ok_and(|r| r.components().count() == 1);
     if ok {
         Ok(())
     } else {
@@ -647,7 +647,9 @@ impl<'a> InstanceStore<'a> {
     pub fn create(&self, new: NewInstance, now: i64) -> Result<Instance, InstanceError> {
         let name = validate_name(&new.name)?;
         validate_jvm_args(&new.extra_jvm_args)?;
+        reject_links_between(self.root.path(), &self.root.instances_dir()).map_err(map_link_err)?;
         fs::create_dir_all(self.root.instances_dir())?;
+        reject_links_between(self.root.path(), &self.root.instances_dir()).map_err(map_link_err)?;
 
         // `create_dir` fails if the directory exists, which makes id allocation race-free.
         let base = slugify(&name);
@@ -752,7 +754,7 @@ impl<'a> InstanceStore<'a> {
             }
             Err(e) => return Err(e.into()),
         };
-        let inst: Instance = serde_json::from_slice(&bytes)?;
+        let mut inst: Instance = serde_json::from_slice(&bytes)?;
         if inst.schema > SCHEMA {
             return Err(InstanceError::TooNew(inst.schema));
         }
@@ -763,6 +765,7 @@ impl<'a> InstanceStore<'a> {
                 claimed: inst.id.to_string(),
             });
         }
+        inst.name = validate_name(&inst.name)?;
         validate_jvm_args(&inst.extra_jvm_args)?;
         validate_resolution(inst.resolution)?;
         validate_consistency(&inst)?;
@@ -1062,11 +1065,11 @@ impl<'a> InstanceStore<'a> {
             }
             Err(e) => return Err(e.into()),
         };
-        let inst: Instance = serde_json::from_slice(&bytes)?;
+        let mut inst: Instance = serde_json::from_slice(&bytes)?;
         if inst.schema > SCHEMA {
             return Err(InstanceError::TooNew(inst.schema));
         }
-        validate_name(&inst.name)?;
+        inst.name = validate_name(&inst.name)?;
         validate_jvm_args(&inst.extra_jvm_args)?;
         validate_resolution(inst.resolution)?;
         validate_consistency(&inst)?;
@@ -2093,6 +2096,66 @@ mod tests {
             .unwrap()
             .extra_jvm_args
             .is_empty());
+    }
+
+    #[test]
+    fn validate_retained_folder_rejects_reserved_names_and_dot_variants() {
+        assert!(validate_retained_folder("survival-1700000000-0123abcd").is_ok());
+        for bad in [
+            "", ".", "..", "...", ".removed", ".hidden", "foo.", "foo..", "con", "CON", "nul",
+            "aux", "prn", "com1", "lpt1", "con.txt", "a/b", "a\\b",
+        ] {
+            assert!(
+                matches!(validate_retained_folder(bad), Err(InstanceError::BadId(_))),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn create_rejects_linked_instances_directory() {
+        let (d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let outside = d.path().join("outside-instances");
+        fs::create_dir_all(&outside).unwrap();
+        let instances_dir = root.instances_dir();
+        fs::remove_dir(&instances_dir).unwrap();
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&instances_dir)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mklink /J failed: {out:?}");
+        let res = store.create(NewInstance::vanilla("Blocked", "1.21.4").unwrap(), 1);
+        fs::remove_dir(&instances_dir).unwrap();
+        assert!(matches!(res, Err(InstanceError::Link(_))));
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn get_validates_and_trims_manifest_name_consistently() {
+        let (_d, root) = setup();
+        let store = InstanceStore::new(&root);
+        let inst = store
+            .create(NewInstance::vanilla("Valid", "1.21.4").unwrap(), 1)
+            .unwrap();
+        let path = store.dirs(&inst.id).manifest_file();
+
+        let mut j: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        j["name"] = serde_json::json!("  Trimmed Name  ");
+        fs::write(&path, serde_json::to_vec(&j).unwrap()).unwrap();
+        assert_eq!(store.get(&inst.id).unwrap().name, "Trimmed Name");
+
+        for bad_name in ["", "   ", &"a".repeat(65), "bad\nname"] {
+            j["name"] = serde_json::json!(bad_name);
+            fs::write(&path, serde_json::to_vec(&j).unwrap()).unwrap();
+            assert!(
+                matches!(store.get(&inst.id), Err(InstanceError::BadName(_))),
+                "{bad_name:?} should be rejected"
+            );
+        }
+        assert_eq!(store.list().unwrap().problems.len(), 1);
     }
 }
 

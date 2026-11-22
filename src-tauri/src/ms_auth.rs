@@ -18,10 +18,11 @@
 
 use std::fmt;
 
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::accounts::{classify_oauth_error, ReauthReason};
 use crate::net::{FetchError, HttpRequest, HttpResponse, Method, Transport};
@@ -279,10 +280,19 @@ async fn send<T: Transport>(
     t: &T,
     method: Method,
     url: &str,
-    headers: Vec<(&'static str, String)>,
-    body: Vec<u8>,
+    mut headers: Vec<(&'static str, String)>,
+    mut body: Vec<u8>,
 ) -> Result<HttpResponse, AuthError> {
-    let url = Url::parse(url).map_err(|_| AuthError::BadResponse("bad url"))?;
+    let url = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => {
+            for (_, v) in &mut headers {
+                v.zeroize();
+            }
+            body.zeroize();
+            return Err(AuthError::BadResponse("bad url"));
+        }
+    };
     t.send(HttpRequest {
         method,
         url,
@@ -294,18 +304,20 @@ async fn send<T: Transport>(
     .map_err(network)
 }
 
-async fn post_json<T: Transport>(
+async fn post_json<T: Transport, B: Serialize>(
     t: &T,
     url: &str,
-    body: &Value,
+    body: &B,
     extra: Vec<(&'static str, String)>,
 ) -> Result<HttpResponse, AuthError> {
+    let mut buf = Zeroizing::new(Vec::with_capacity(2048));
+    serde_json::to_writer(&mut *buf, body).map_err(|_| AuthError::BadResponse("bad JSON"))?;
     let mut headers = vec![
         ("Content-Type", "application/json".to_owned()),
         ("Accept", "application/json".to_owned()),
     ];
     headers.extend(extra);
-    send(t, Method::Post, url, headers, body.to_string().into_bytes()).await
+    send(t, Method::Post, url, headers, std::mem::take(&mut *buf)).await
 }
 
 async fn get_bearer<T: Transport>(
@@ -337,6 +349,128 @@ fn str_at<'a>(v: &'a Value, key: &str, what: &'static str) -> Result<&'a str, Au
         .ok_or(AuthError::BadResponse(what))
 }
 
+fn deserialize_opt_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    struct OptStringVisitor;
+    impl<'de> serde::de::Visitor<'de> for OptStringVisitor {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an optional string")
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_owned()))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: serde::Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
+    }
+    d.deserialize_any(OptStringVisitor)
+}
+
+fn deserialize_opt_secret<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Secret>, D::Error> {
+    Ok(deserialize_opt_string(d)?.and_then(|mut s| {
+        if s.is_empty() {
+            s.zeroize();
+            None
+        } else {
+            Some(Secret::new(s))
+        }
+    }))
+}
+
+fn deserialize_opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    struct OptU64Visitor;
+    impl<'de> serde::de::Visitor<'de> for OptU64Visitor {
+        type Value = Option<u64>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an optional u64")
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(u64::try_from(v).ok())
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: serde::Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
+    }
+    d.deserialize_any(OptU64Visitor)
+}
+
 // ------------------------------------------------------------------------------ Microsoft OAuth
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -347,22 +481,37 @@ enum Grant {
     Refresh,
 }
 
+#[derive(Deserialize)]
+struct OAuthTokenResponse {
+    #[serde(default, deserialize_with = "deserialize_opt_secret")]
+    access_token: Option<Secret>,
+    #[serde(default, deserialize_with = "deserialize_opt_secret")]
+    refresh_token: Option<Secret>,
+}
+
+#[derive(Deserialize)]
+struct OAuthErrorResponse {
+    #[serde(default, deserialize_with = "deserialize_opt_string")]
+    error: Option<String>,
+}
+
 fn tokens_from(r: &HttpResponse, grant: Grant) -> Result<MsTokens, AuthError> {
     if r.status >= 500 || r.status == 429 {
         return Err(AuthError::Offline); // Microsoft is busy: retry later, not a verdict on the account
     }
-    let v = json_of(r)?;
     if r.status == 200 {
+        let resp: OAuthTokenResponse =
+            serde_json::from_slice(&r.body).map_err(|_| AuthError::BadResponse("not JSON"))?;
         return Ok(MsTokens {
-            access: Secret::new(str_at(&v, "access_token", "no access token")?.to_owned()),
-            refresh: v
-                .get("refresh_token")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| Secret::new(s.to_owned())),
+            access: resp
+                .access_token
+                .ok_or(AuthError::BadResponse("no access token"))?,
+            refresh: resp.refresh_token,
         });
     }
-    let code = v.get("error").and_then(Value::as_str).unwrap_or("unknown");
+    let err: OAuthErrorResponse =
+        serde_json::from_slice(&r.body).map_err(|_| AuthError::BadResponse("not JSON"))?;
+    let code = err.error.as_deref().unwrap_or("unknown");
     match grant {
         Grant::Refresh
             if matches!(
@@ -432,10 +581,85 @@ fn xsts_error(code: u64) -> AuthError {
     }
 }
 
-fn user_hash<'a>(v: &'a Value, missing: &'static str) -> Result<&'a str, AuthError> {
-    v.pointer("/DisplayClaims/xui/0/uhs")
-        .and_then(Value::as_str)
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XblAuthRequest<'a> {
+    properties: XblAuthProperties<'a>,
+    relying_party: &'static str,
+    token_type: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XblAuthProperties<'a> {
+    auth_method: &'static str,
+    site_name: &'static str,
+    rps_ticket: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XstsAuthRequest<'a> {
+    properties: XstsAuthProperties<'a>,
+    relying_party: &'static str,
+    token_type: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XstsAuthProperties<'a> {
+    sandbox_id: &'static str,
+    user_tokens: [&'a str; 1],
+}
+
+#[derive(Deserialize)]
+struct XboxTokenResponse {
+    #[serde(rename = "Token", default, deserialize_with = "deserialize_opt_secret")]
+    token: Option<Secret>,
+    #[serde(rename = "DisplayClaims", default)]
+    display_claims: Option<DisplayClaims>,
+}
+
+#[derive(Deserialize)]
+struct DisplayClaims {
+    #[serde(default)]
+    xui: Option<Vec<Option<XuiClaim>>>,
+}
+
+#[derive(Deserialize)]
+struct XuiClaim {
+    #[serde(default, deserialize_with = "deserialize_opt_string")]
+    uhs: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct XstsErrorResponse {
+    #[serde(rename = "XErr", default, deserialize_with = "deserialize_opt_u64")]
+    x_err: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McLoginRequest<'a> {
+    identity_token: &'a str,
+}
+
+#[derive(Deserialize)]
+struct McLoginResponse {
+    #[serde(default, deserialize_with = "deserialize_opt_secret")]
+    access_token: Option<Secret>,
+    #[serde(default, deserialize_with = "deserialize_opt_u64")]
+    expires_in: Option<u64>,
+}
+
+fn user_hash(claims: Option<&DisplayClaims>, missing: &'static str) -> Result<String, AuthError> {
+    claims
+        .and_then(|c| c.xui.as_deref())
+        .and_then(|xui| xui.first())
+        .and_then(|first| first.as_ref())
+        .and_then(|claim| claim.uhs.as_deref())
         .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .map(str::to_owned)
         .ok_or(AuthError::BadResponse(missing))
 }
 
@@ -445,49 +669,48 @@ pub async fn minecraft_login<T: Transport>(
     ms_access: &Secret,
 ) -> Result<McSession, AuthError> {
     // 2. Xbox Live user token
-    let r = post_json(
-        t,
-        XBL_AUTH,
-        &json!({
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": format!("d={}", ms_access.expose()),
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT",
-        }),
-        Vec::new(),
-    )
-    .await?;
+    let rps_ticket = Zeroizing::new(format!("d={}", ms_access.expose()));
+    let xbl_req = XblAuthRequest {
+        properties: XblAuthProperties {
+            auth_method: "RPS",
+            site_name: "user.auth.xboxlive.com",
+            rps_ticket: &rps_ticket,
+        },
+        relying_party: "http://auth.xboxlive.com",
+        token_type: "JWT",
+    };
+    let r = post_json(t, XBL_AUTH, &xbl_req, Vec::new()).await?;
+    drop(rps_ticket);
     if r.status >= 500 || r.status == 429 {
         return Err(AuthError::Offline);
     }
     if r.status != 200 {
         return Err(AuthError::BadResponse("Xbox Live refused the sign-in"));
     }
-    let v = json_of(&r)?;
-    let xbl = Secret::new(str_at(&v, "Token", "no Xbox token")?.to_owned());
-    let xbl_uhs = user_hash(&v, "no Xbox user hash")?.to_owned();
+    let xbl_resp: XboxTokenResponse =
+        serde_json::from_slice(&r.body).map_err(|_| AuthError::BadResponse("not JSON"))?;
+    let xbl = xbl_resp
+        .token
+        .ok_or(AuthError::BadResponse("no Xbox token"))?;
+    let xbl_uhs = user_hash(xbl_resp.display_claims.as_ref(), "no Xbox user hash")?;
 
     // 3. XSTS token for the Minecraft services
-    let r = post_json(
-        t,
-        XSTS_AUTH,
-        &json!({
-            "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl.expose()] },
-            "RelyingParty": "rp://api.minecraftservices.com/",
-            "TokenType": "JWT",
-        }),
-        Vec::new(),
-    )
-    .await?;
+    let xsts_req = XstsAuthRequest {
+        properties: XstsAuthProperties {
+            sandbox_id: "RETAIL",
+            user_tokens: [xbl.expose()],
+        },
+        relying_party: "rp://api.minecraftservices.com/",
+        token_type: "JWT",
+    };
+    let r = post_json(t, XSTS_AUTH, &xsts_req, Vec::new()).await?;
+    drop(xbl);
     if r.status >= 500 || r.status == 429 {
         return Err(AuthError::Offline);
     }
-    let v = json_of(&r).unwrap_or(Value::Null);
     if r.status == 401 {
-        return Err(match v.get("XErr").and_then(Value::as_u64) {
+        let err = serde_json::from_slice::<XstsErrorResponse>(&r.body).ok();
+        return Err(match err.and_then(|e| e.x_err) {
             Some(code) => xsts_error(code),
             None => AuthError::BadResponse("XSTS refused the sign-in"),
         });
@@ -495,21 +718,24 @@ pub async fn minecraft_login<T: Transport>(
     if r.status != 200 {
         return Err(AuthError::BadResponse("XSTS refused the sign-in"));
     }
-    let xsts = Secret::new(str_at(&v, "Token", "no XSTS token")?.to_owned());
-    let uhs = user_hash(&v, "no user hash")?;
+    let xsts_resp: XboxTokenResponse =
+        serde_json::from_slice(&r.body).map_err(|_| AuthError::BadResponse("not JSON"))?;
+    let xsts = xsts_resp
+        .token
+        .ok_or(AuthError::BadResponse("no XSTS token"))?;
+    let uhs = user_hash(xsts_resp.display_claims.as_ref(), "no user hash")?;
     if uhs != xbl_uhs {
         return Err(AuthError::BadResponse("Xbox user hash mismatch"));
     }
 
     // 4. Minecraft services (needs Mojang's approval of the client id)
     let identity = Secret::new(format!("XBL3.0 x={uhs};{}", xsts.expose()));
-    let r = post_json(
-        t,
-        MC_LOGIN,
-        &json!({ "identityToken": identity.expose() }),
-        Vec::new(),
-    )
-    .await?;
+    drop(xsts);
+    let mc_req = McLoginRequest {
+        identity_token: identity.expose(),
+    };
+    let r = post_json(t, MC_LOGIN, &mc_req, Vec::new()).await?;
+    drop(identity);
     if r.status >= 500 || r.status == 429 {
         return Err(AuthError::Offline);
     }
@@ -521,14 +747,13 @@ pub async fn minecraft_login<T: Transport>(
             "Minecraft services refused the sign-in",
         ));
     }
-    let v = json_of(&r)?;
+    let mc_resp: McLoginResponse =
+        serde_json::from_slice(&r.body).map_err(|_| AuthError::BadResponse("not JSON"))?;
     Ok(McSession {
-        access_token: Secret::new(str_at(&v, "access_token", "no Minecraft token")?.to_owned()),
-        expires_in: v
-            .get("expires_in")
-            .and_then(Value::as_u64)
-            .unwrap_or(3600)
-            .min(86_400),
+        access_token: mc_resp
+            .access_token
+            .ok_or(AuthError::BadResponse("no Minecraft token"))?,
+        expires_in: mc_resp.expires_in.unwrap_or(3600).min(86_400),
     })
 }
 
@@ -1056,5 +1281,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.expires_in, 86_400);
+    }
+
+    #[tokio::test]
+    async fn typed_oauth_and_login_payloads_handle_missing_or_malformed_fields() {
+        let t = FakeTransport::new();
+        let tok = Secret::new("CODE".into());
+        let ver = Secret::new("VER".into());
+
+        // Missing or empty access_token fails cleanly.
+        for body in [
+            r#"{}"#,
+            r#"{"access_token":""}"#,
+            r#"{"access_token":null,"refresh_token":"R"}"#,
+            r#"{"access_token":123}"#,
+        ] {
+            t.reply(TOKEN, 200, body);
+            assert!(
+                matches!(
+                    exchange_code(&t, "http://localhost:1", &tok, &ver).await,
+                    Err(AuthError::BadResponse("no access token"))
+                ),
+                "{body}"
+            );
+        }
+
+        // Optional/empty/null refresh_token yields None while preserving access_token.
+        for body in [
+            r#"{"access_token":"A"}"#,
+            r#"{"access_token":"A","refresh_token":""}"#,
+            r#"{"access_token":"A","refresh_token":null}"#,
+        ] {
+            t.reply(TOKEN, 200, body);
+            let tokens = exchange_code(&t, "http://localhost:1", &tok, &ver)
+                .await
+                .unwrap();
+            assert_eq!(tokens.access.expose(), "A");
+            assert!(tokens.refresh.is_none());
+        }
+
+        // Non-string error on 400 falls back to "unknown".
+        t.reply(TOKEN, 400, r#"{"error":42}"#);
+        assert!(matches!(
+            exchange_code(&t, "http://localhost:1", &tok, &ver).await,
+            Err(AuthError::OAuth(c)) if c == "unknown"
+        ));
+
+        // Exact request JSON structure + missing/non-numeric expires_in fallback.
+        ok_chain(&t);
+        t.clear(MC_LOGIN);
+        t.reply(MC_LOGIN, 200, r#"{"access_token":"MC","expires_in":"bad"}"#);
+        let session = minecraft_login(&t, &Secret::new("MS-ACCESS".into()))
+            .await
+            .unwrap();
+        assert_eq!(session.access_token.expose(), "MC");
+        assert_eq!(session.expires_in, 3600);
+
+        let calls = t.calls();
+        let xbl_sent: Value = serde_json::from_str(&calls[calls.len() - 3].3).unwrap();
+        assert_eq!(xbl_sent["Properties"]["AuthMethod"], "RPS");
+        assert_eq!(xbl_sent["Properties"]["SiteName"], "user.auth.xboxlive.com");
+        assert_eq!(xbl_sent["Properties"]["RpsTicket"], "d=MS-ACCESS");
+        assert_eq!(xbl_sent["RelyingParty"], "http://auth.xboxlive.com");
+        assert_eq!(xbl_sent["TokenType"], "JWT");
+
+        let xsts_sent: Value = serde_json::from_str(&calls[calls.len() - 2].3).unwrap();
+        assert_eq!(xsts_sent["Properties"]["SandboxId"], "RETAIL");
+        assert_eq!(xsts_sent["Properties"]["UserTokens"][0], "XBL-TOKEN");
+        assert_eq!(xsts_sent["RelyingParty"], "rp://api.minecraftservices.com/");
+        assert_eq!(xsts_sent["TokenType"], "JWT");
+
+        let mc_sent: Value = serde_json::from_str(&calls[calls.len() - 1].3).unwrap();
+        assert_eq!(mc_sent["identityToken"], "XBL3.0 x=1234567890;XSTS-TOKEN");
     }
 }

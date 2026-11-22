@@ -194,7 +194,13 @@ impl StageSession {
     pub fn seed_vanilla(&self, root: &PortableRoot, mc: &McVersion) -> Result<(), InstallError> {
         let src = root.minecraft_dir().join("versions").join(mc.as_str());
         let dst = self.minecraft_dir().join("versions").join(mc.as_str());
+        crate::portable::fsutil::reject_links_between(root.path(), &src)
+            .map_err(|e| violation(e.to_string()))?;
+        crate::portable::fsutil::reject_links_between(&self.base, &dst)
+            .map_err(|e| violation(e.to_string()))?;
         fs::create_dir_all(&dst)?;
+        crate::portable::fsutil::reject_links_between(&self.base, &dst)
+            .map_err(|e| violation(e.to_string()))?;
         for entry in fs::read_dir(&src)? {
             let entry = entry?;
             let path = entry.path();
@@ -413,23 +419,16 @@ pub fn verify_command(
                 "environment variable {k} could bypass the sandbox"
             )));
         }
-        if looks_absolute(v) {
-            let allowed = if SYSTEM_ENV_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
-                // PATH may hold only the system directory, with no extra entries.
-                is_inside(&sys.system_root, Path::new(v)) && !v.contains(';')
-            } else {
-                is_inside(r, Path::new(v))
-            };
-            if !allowed {
+        if SYSTEM_ENV_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
+            // PATH may hold only the system directory, with no extra entries.
+            if !looks_absolute(v) || !is_inside(&sys.system_root, Path::new(v)) || v.contains(';') {
                 return Err(violation(format!(
-                    "environment variable {k} points outside the launcher folder"
+                    "environment variable {k} points outside the system folder"
                 )));
             }
-        } else if SYSTEM_ENV_KEYS.iter().all(|s| !s.eq_ignore_ascii_case(k))
-            && v.contains(['\\', '/'])
-        {
+        } else if !looks_absolute(v) || !is_inside(r, Path::new(v)) {
             return Err(violation(format!(
-                "environment variable {k} holds a relative or odd path"
+                "environment variable {k} must point inside the launcher folder"
             )));
         }
     }
@@ -442,9 +441,14 @@ pub fn verify_command(
         "APPDATA",
         "LOCALAPPDATA",
     ] {
-        if !cmd.env.contains_key(needed) {
+        let Some(v) = cmd.env.get(needed) else {
             return Err(violation(format!(
                 "environment variable {needed} must be redirected"
+            )));
+        };
+        if !looks_absolute(v) || !is_inside(r, Path::new(v)) {
+            return Err(violation(format!(
+                "environment variable {needed} must point inside the launcher folder"
             )));
         }
     }
@@ -590,6 +594,17 @@ fn walk_files(
     base: &Path,
     out: &mut Vec<(RelPath, PathBuf)>,
 ) -> Result<(), InstallError> {
+    match is_link(dir) {
+        Ok(true) => {
+            return Err(violation(format!(
+                "installer produced a link: {}",
+                dir.display()
+            )));
+        }
+        Ok(false) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
     if !dir.is_dir() {
         return Ok(());
     }
@@ -625,6 +640,34 @@ fn walk_files(
     Ok(())
 }
 
+fn reject_non_dir_ancestors(base: &Path, dst: &Path) -> Result<(), InstallError> {
+    let Some(parent) = dst.parent() else {
+        return Ok(());
+    };
+    let rest = crate::portable::fsutil::strip_prefix_portable(parent, base)
+        .ok_or_else(|| violation("destination is outside the launcher folder"))?;
+    let mut cur = base.to_path_buf();
+    for comp in rest.components() {
+        match comp {
+            Component::Normal(c) => cur.push(c),
+            _ => return Err(violation("unexpected path component in destination")),
+        }
+        match fs::symlink_metadata(&cur) {
+            Ok(md) => {
+                if !md.is_dir() {
+                    return Err(violation(format!(
+                        "destination ancestor is not a directory: {}",
+                        cur.display()
+                    )));
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 /// Moves `libraries/` and `versions/` from the stage into the shared stores. Two passes: all
 /// paths and destinations are validated first, so a bad installer result changes nothing; any
 /// pre-existing damaged destination file whose hash differs is quarantined aside (`.corrupt*`)
@@ -634,11 +677,20 @@ pub fn merge_stage_into_shared(
     root: &PortableRoot,
 ) -> Result<MergeReport, InstallError> {
     let mc = session.minecraft_dir();
+    let stage_libs = mc.join("libraries");
+    let stage_vers = mc.join("versions");
+    crate::portable::fsutil::reject_links_between(session.base(), &mc)
+        .map_err(|e| violation(e.to_string()))?;
+    crate::portable::fsutil::reject_links_between(session.base(), &stage_libs)
+        .map_err(|e| violation(e.to_string()))?;
+    crate::portable::fsutil::reject_links_between(session.base(), &stage_vers)
+        .map_err(|e| violation(e.to_string()))?;
+
     let mut plan: Vec<Planned> = Vec::new();
     let mut new_versions: Vec<VersionId> = Vec::new();
 
     let mut libs = Vec::new();
-    walk_files(&mc.join("libraries"), &mc.join("libraries"), &mut libs)?;
+    walk_files(&stage_libs, &stage_libs, &mut libs)?;
     for (rel, src) in libs {
         plan.push(Planned {
             dst: rel.to_path(&root.libraries_dir()),
@@ -649,7 +701,7 @@ pub fn merge_stage_into_shared(
     }
 
     let mut vers = Vec::new();
-    walk_files(&mc.join("versions"), &mc.join("versions"), &mut vers)?;
+    walk_files(&stage_vers, &stage_vers, &mut vers)?;
     let shared_versions = root.minecraft_dir().join("versions");
     for (rel, src) in vers {
         let first = rel.components().next().unwrap_or_default().to_owned();
@@ -666,11 +718,12 @@ pub fn merge_stage_into_shared(
     }
 
     // Pass 1: validate every destination before moving anything. No destination may sit behind a
-    // link or collide with a directory; identical files are reused, while damaged files with
-    // differing bytes are scheduled for quarantine-and-replace.
+    // link, pass through a non-directory ancestor, or collide with a directory; identical files
+    // are reused, while damaged files with differing bytes are scheduled for quarantine-and-replace.
     for p in &mut plan {
         crate::portable::fsutil::reject_links_between(root.path(), &p.dst)
             .map_err(|e| violation(e.to_string()))?;
+        reject_non_dir_ancestors(root.path(), &p.dst)?;
         match fs::symlink_metadata(&p.dst) {
             Ok(md) => {
                 if is_link(&p.dst)? {
@@ -985,6 +1038,35 @@ mod tests {
         assert!(mutate(&|c| {
             c.env.insert("TEMP".into(), r"\Temp".into());
         }));
+        // Empty, dot, dotdot, relative, and parent-traversal env values are all rejected.
+        for key in [
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "USERPROFILE",
+            "HOME",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "SystemRoot",
+            "PATH",
+            "EXTRA_DIR",
+        ] {
+            for bad_val in ["", ".", "..", "relative/dir", "../escape"] {
+                assert!(
+                    mutate(&|c| {
+                        c.env.insert(key.into(), bad_val.into());
+                    }),
+                    "{key}={bad_val:?} must be rejected"
+                );
+            }
+            let traversal = format!(r"{}\..\outside", root.path().display());
+            assert!(
+                mutate(&|c| {
+                    c.env.insert(key.into(), traversal.clone());
+                }),
+                "{key}={traversal:?} must be rejected"
+            );
+        }
         assert!(mutate(&|c| c
             .args
             .push("--mirror=https://example.org/".into())));
@@ -1401,5 +1483,142 @@ mod tests {
         drop(guard);
         assert_eq!(sweep_stale(&root).unwrap(), 1);
         assert!(!locked.base().exists());
+    }
+
+    #[test]
+    fn merge_rejects_file_ancestor_collision_in_pass_1_without_partial_writes() {
+        let (_d, root, _j, _s) = setup();
+        // Existing file where a library parent directory needs to be created.
+        fs::write(root.libraries_dir().join("net"), b"blocking-file").unwrap();
+        let s = StageSession::create(&root).unwrap();
+        fs::create_dir_all(s.minecraft_dir().join("libraries/net/example")).unwrap();
+        fs::write(
+            s.minecraft_dir().join("libraries/net/example/lib.jar"),
+            b"lib",
+        )
+        .unwrap();
+        fs::write(s.minecraft_dir().join("libraries/alpha.jar"), b"alpha").unwrap();
+        fs::create_dir_all(s.minecraft_dir().join("versions/1.21.4-forge-1")).unwrap();
+        fs::write(
+            s.minecraft_dir()
+                .join("versions/1.21.4-forge-1/1.21.4-forge-1.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            merge_stage_into_shared(&s, &root),
+            Err(InstallError::Violation(_))
+        ));
+        assert!(
+            !root.libraries_dir().join("alpha.jar").exists(),
+            "Pass 1 failure must leave earlier files untouched"
+        );
+        assert!(
+            !root
+                .minecraft_dir()
+                .join("versions/1.21.4-forge-1")
+                .exists(),
+            "Pass 1 failure must leave version stores untouched"
+        );
+    }
+
+    #[cfg(windows)]
+    fn create_junction(link: &Path, target: &Path) {
+        let link_win = link.to_string_lossy().replace('/', "\\");
+        let target_win = target.to_string_lossy().replace('/', "\\");
+        let out = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link_win)
+            .arg(target_win)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn merge_and_walk_files_reject_top_level_junctions_in_stage() {
+        let (d, root, _j, _s) = setup();
+        let outside = d.path().join("outside");
+        fs::create_dir_all(outside.join("1.21.4-forge")).unwrap();
+        fs::write(outside.join("evil.jar"), b"evil").unwrap();
+        fs::write(outside.join("1.21.4-forge/1.21.4-forge.json"), b"{}").unwrap();
+
+        // Direct walk_files call on a junction fails closed.
+        let direct_link = d.path().join("direct-link");
+        create_junction(&direct_link, &outside);
+        let mut out = Vec::new();
+        assert!(matches!(
+            walk_files(&direct_link, &direct_link, &mut out),
+            Err(InstallError::Violation(_))
+        ));
+
+        // Staged libraries/ replaced by a junction.
+        let s_libs = StageSession::create(&root).unwrap();
+        create_junction(&s_libs.minecraft_dir().join("libraries"), &outside);
+        assert!(matches!(
+            merge_stage_into_shared(&s_libs, &root),
+            Err(InstallError::Violation(_))
+        ));
+        assert!(!root.libraries_dir().join("evil.jar").exists());
+
+        // Staged versions/ replaced by a junction.
+        let s_vers = StageSession::create(&root).unwrap();
+        create_junction(&s_vers.minecraft_dir().join("versions"), &outside);
+        assert!(matches!(
+            merge_stage_into_shared(&s_vers, &root),
+            Err(InstallError::Violation(_))
+        ));
+        assert!(!root.minecraft_dir().join("versions/1.21.4-forge").exists());
+
+        // Staged .minecraft replaced by a junction.
+        let s_mc = StageSession::create(&root).unwrap();
+        fs::remove_dir_all(s_mc.minecraft_dir()).unwrap();
+        create_junction(&s_mc.minecraft_dir(), &outside);
+        assert!(matches!(
+            merge_stage_into_shared(&s_mc, &root),
+            Err(InstallError::Violation(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn seed_vanilla_rejects_junctions_at_source_or_destination() {
+        let (d, root, _j, _s) = setup();
+        let mc = McVersion::new("1.21.4").unwrap();
+        let outside = d.path().join("outside-vanilla");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("1.21.4.jar"), b"outside").unwrap();
+
+        // Source version directory is a junction.
+        let shared_versions = root.minecraft_dir().join("versions");
+        fs::create_dir_all(&shared_versions).unwrap();
+        create_junction(&shared_versions.join("1.21.4"), &outside);
+        let s1 = StageSession::create(&root).unwrap();
+        assert!(matches!(
+            s1.seed_vanilla(&root, &mc),
+            Err(InstallError::Violation(_))
+        ));
+        fs::remove_dir(shared_versions.join("1.21.4")).unwrap();
+
+        // Valid source, but destination version directory is a junction.
+        let real_src = shared_versions.join("1.21.4");
+        fs::create_dir_all(&real_src).unwrap();
+        fs::write(real_src.join("1.21.4.jar"), b"real").unwrap();
+        let s2 = StageSession::create(&root).unwrap();
+        fs::create_dir_all(s2.minecraft_dir().join("versions")).unwrap();
+        create_junction(&s2.minecraft_dir().join("versions/1.21.4"), &outside);
+        assert!(matches!(
+            s2.seed_vanilla(&root, &mc),
+            Err(InstallError::Violation(_))
+        ));
+        assert_eq!(fs::read(outside.join("1.21.4.jar")).unwrap(), b"outside");
     }
 }

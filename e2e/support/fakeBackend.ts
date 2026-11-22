@@ -58,6 +58,9 @@ interface Control {
   failPrepare: (code: string, params?: Record<string, unknown>) => boolean;
   finishUpdate: () => boolean;
   failUpdate: (code: string, params?: Record<string, unknown>) => boolean;
+  hasPendingSignIn: () => boolean;
+  finishSignIn: (account?: { id?: string; username?: string; uuid?: string }) => boolean;
+  failSignIn: (code: string, params?: Record<string, unknown>) => boolean;
   refuseNextLaunch: (code: string, accountId?: string | null) => void;
   failNext: (cmd: string, code: string, params?: Record<string, unknown>) => void;
   holdNext: (cmd: string) => void;
@@ -87,7 +90,7 @@ function install(cfg: BackendConfig): void {
     vault: clone(cfg.vault),
     retiredVaults: cfg.retiredVaults ?? 0,
     latestRelease: cfg.latestRelease ?? null,
-    latestReleaseInstallable: cfg.latestReleaseInstallable ?? true,
+    latestReleaseInstallable: cfg.latestReleaseInstallable ?? Boolean(cfg.latestRelease),
     latestReleaseSize: cfg.latestReleaseSize ?? 305 * 1024 * 1024,
     updateStatus: { stage: "idle", version: null, bytesDone: 0, bytesTotal: 0 },
     ui: clone(cfg.ui),
@@ -146,17 +149,29 @@ function install(cfg: BackendConfig): void {
     resolve: (v: unknown) => void;
     reject: (e: unknown) => void;
   } | null = null;
+  const prepareFailures: Record<
+    string,
+    { code: string; params?: Record<string, unknown>; message: string }
+  > = {};
   let pendingUpdate: {
     version: string;
     resolve: (v: unknown) => void;
     reject: (e: unknown) => void;
   } | null = null;
+  let pendingSignIn: {
+    accountId: string | null;
+    resolve: (v: unknown) => void;
+    reject: (e: unknown) => void;
+  } | null = null;
   let launchRefusal: { code: string; accountId: string | null } | null = null;
-  // One-shot failures a test asks for, by command (support actions, settings saves, ...).
-  const failures = new Map<string, { code: string; params: Record<string, unknown> }>();
+  let vaultPassphrase: string | null = null;
+  // Queued one-shot failures a test asks for, by command (support actions, settings saves, ...).
+  const failures = new Map<string, { code: string; params: Record<string, unknown> }[]>();
+  const sameTickFailure = new Map<string, { code: string; params: Record<string, unknown> }>();
   // Commands a test wants to stay open until it releases them, to see the busy state.
-  const holds = new Set<string>();
-  let held: (() => void) | null = null;
+  const holds = new Map<string, number>();
+  const sameTickHold = new Map<string, Promise<unknown>>();
+  const heldQueue: (() => void)[] = [];
   // A real (solid-colour) 64x64 PNG, so the browser can decode it like a skin.
   const NEW_SKIN =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAZklEQVR42u3QQREAAAQAMFHFEFAvcjh7rMCiK+ezECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAu4HLPSxsmj7bLHgAAAAAElFTkSuQmCC";
@@ -171,6 +186,10 @@ function install(cfg: BackendConfig): void {
     capes: clone(l.capes),
   });
   const knownAccount = (id: unknown) => state.accounts.some((a) => a.id === id);
+  const effectiveActiveId = () =>
+    state.accounts.some((a) => a.id === state.active)
+      ? state.active
+      : (state.accounts[0]?.id ?? null);
 
   const profilesSnapshot = () => ({
     profiles: clone(state.profiles).map((p) => ({
@@ -195,17 +214,258 @@ function install(cfg: BackendConfig): void {
   });
   const accountsSnapshot = () => ({
     accounts: clone(state.accounts),
-    active: state.active,
+    active: effectiveActiveId(),
     // What this build can do.
     capabilities: { signIn: true, skin: true, cape: true },
   });
   const fail = (code: string, message: string, extra: Record<string, unknown> = {}) =>
     Promise.reject({ code, message, ...extra });
-  const slug = (name: string) =>
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "profile";
+
+  const LOADER_DISPLAY: Record<"fabric" | "forge" | "neoforge" | "quilt", string> = {
+    fabric: "Fabric",
+    forge: "Forge",
+    neoforge: "NeoForge",
+    quilt: "Quilt",
+  };
+  const RESERVED_IDS = new Set([
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com0",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt0",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+  ]);
+  const slug = (name: string): string => {
+    let s = "";
+    for (const ch of name) {
+      if (/^[a-zA-Z0-9]$/.test(ch)) {
+        s += ch.toLowerCase();
+      } else if (!s.endsWith("-")) {
+        s += "-";
+      }
+    }
+    const trimmed = s.replace(/^-+|-+$/g, "");
+    const capped = [...trimmed]
+      .slice(0, 48)
+      .join("")
+      .replace(/^-+|-+$/g, "");
+    const base = capped.length === 0 ? "instance" : capped;
+    return RESERVED_IDS.has(base) ? `i-${base}` : base;
+  };
+  const validateProfileName = (raw: unknown): string | null => {
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    // eslint-disable-next-line no-control-regex
+    if (trimmed.length === 0 || [...trimmed].length > 64 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+      return null;
+    }
+    return trimmed;
+  };
+  const hasNameConflict = (rawName: string, excludeId?: string): boolean => {
+    const wanted = rawName.trim().toLowerCase();
+    return state.profiles.some((p) => p.id !== excludeId && p.name.trim().toLowerCase() === wanted);
+  };
+  const hasUnreadableSlugConflict = (rawName: string): boolean => {
+    const trimmed = rawName.trim();
+    if (trimmed.length === 0) return false;
+    const s = slug(trimmed).toLowerCase();
+    return state.unreadable.some((u) => u.toLowerCase() === s);
+  };
+  const stripCopySuffix = (name: string): string => {
+    const trimmed = name.trim();
+    const open = trimmed.lastIndexOf(" (");
+    if (open !== -1 && trimmed.endsWith(")")) {
+      const digits = trimmed.slice(open + 2, -1);
+      if (/^\d+$/.test(digits) && Number(digits) >= 2) {
+        const stem = trimmed.slice(0, open).trimEnd();
+        if (stem.length > 0) return stem;
+      }
+    }
+    return trimmed;
+  };
+  const nextDuplicateName = (sourceName: string): string => {
+    const stem = stripCopySuffix(sourceName);
+    const stemChars = [...stem];
+    for (let n = 2; n <= 9999; n += 1) {
+      const suffix = ` (${n})`;
+      const maxStem = Math.max(0, 64 - [...suffix].length);
+      const head = stemChars.slice(0, maxStem).join("").trimEnd();
+      const candidate = head.length === 0 ? `Profile${suffix}` : `${head}${suffix}`;
+      if (!hasNameConflict(candidate) && !hasUnreadableSlugConflict(candidate)) {
+        return candidate;
+      }
+    }
+    return "Profile (copy)";
+  };
+  const idExists = (candidate: string): boolean => {
+    const lower = candidate.toLowerCase();
+    return (
+      state.profiles.some((p) => p.id.toLowerCase() === lower) ||
+      state.unreadable.some((u) => u.toLowerCase() === lower)
+    );
+  };
+  const allocateId = (baseId: string): string => {
+    let target = baseId;
+    let k = 2;
+    while (idExists(target)) {
+      target = `${baseId}-${k}`;
+      k += 1;
+    }
+    return target;
+  };
+  const ensureEditableProfile = (
+    id: string,
+  ): { profile: BackendConfig["profiles"][number] } | { error: Promise<never> } => {
+    const target = state.profiles.find((p) => p.id === id);
+    if (!target) return { error: fail("not_found", "No such profile.") };
+    if (state.runs[id]) return { error: fail("already_running", "This profile is running.") };
+    if (pendingPrepare?.id === id) return { error: fail("busy", "This profile is being set up.") };
+    return { profile: target };
+  };
+  const verifyVersionAndLoader = (
+    minecraft: string,
+    profile:
+      | { type: "vanilla" }
+      | {
+          type: "modded";
+          loader: "fabric" | "forge" | "neoforge" | "quilt";
+          loaderVersion: { mode: "auto" } | { mode: "pinned"; version: string };
+        },
+  ): { error: Promise<never> } | { loaderVersion: string | null } => {
+    if (
+      cfg.catalog.entries.length === 0 ||
+      (cfg.catalog.networkError !== null && cfg.catalog.origin === "network" && !cfg.catalog.stale)
+    ) {
+      return {
+        error: fail("cannot_verify", "Can't check Minecraft versions right now."),
+      };
+    }
+    if (!cfg.catalog.entries.some((e) => e.id === minecraft)) {
+      return {
+        error: fail("unknown_minecraft", "Unknown Minecraft version.", {
+          params: { minecraft },
+        }),
+      };
+    }
+    if (profile.type === "vanilla") {
+      return { loaderVersion: null };
+    }
+    const loader = profile.loader;
+    const listed = cfg.loaders[minecraft];
+    const resolvedEntry = listed
+      ? (listed.find((o) => o.loader === loader) ?? {
+          loader,
+          status: "none" as const,
+          versions: [],
+          recommended: null,
+        })
+      : {
+          loader,
+          status: "ok" as const,
+          versions: [{ version: "1.0.0", channel: "recommended" as const }],
+          recommended: "1.0.0",
+        };
+    if (resolvedEntry.status === "unavailable") {
+      return {
+        error: fail("cannot_verify_loader", "Loader check unavailable.", {
+          params: { loader: LOADER_DISPLAY[loader], minecraft },
+        }),
+      };
+    }
+    if (resolvedEntry.status === "none") {
+      return {
+        error: fail("no_compatible_loader", "No compatible loader.", {
+          params: { loader: LOADER_DISPLAY[loader], minecraft },
+        }),
+      };
+    }
+    const lv = profile.loaderVersion;
+    if (lv.mode === "pinned" && !resolvedEntry.versions.some((v) => v.version === lv.version)) {
+      return {
+        error: fail("loader_version_not_offered", "Loader version not offered.", {
+          params: { loader: LOADER_DISPLAY[loader], version: lv.version, minecraft },
+        }),
+      };
+    }
+    return {
+      loaderVersion: lv.mode === "pinned" ? lv.version : (resolvedEntry.recommended ?? null),
+    };
+  };
+
+  type ReleaseTuple = [number, number, number, number, number];
+  const parseReleaseNum = (s: string): number | null => {
+    if (!/^(0|[1-9]\d*)$/.test(s)) return null;
+    const n = Number(s);
+    return Number.isSafeInteger(n) && n <= 0xffffffff ? n : null;
+  };
+  const parseReleaseTag = (raw: string): { tag: string; ver: ReleaseTuple } | null => {
+    const rest = raw.startsWith("v") ? raw.slice(1) : raw;
+    const dash = rest.indexOf("-");
+    const core = dash === -1 ? rest : rest.slice(0, dash);
+    const suffix = dash === -1 ? null : rest.slice(dash + 1);
+    const parts = core.split(".");
+    if (parts.length !== 3) return null;
+    const maj = parseReleaseNum(parts[0]);
+    const min = parseReleaseNum(parts[1]);
+    const pat = parseReleaseNum(parts[2]);
+    if (maj === null || min === null || pat === null) return null;
+    let rank = 2;
+    let sub = 0;
+    if (suffix !== null) {
+      if (suffix === "preview") {
+        rank = 0;
+        sub = 0;
+      } else if (suffix.startsWith("preview.")) {
+        const n = parseReleaseNum(suffix.slice(8));
+        if (n === null) return null;
+        rank = 0;
+        sub = n;
+      } else if (suffix === "rc") {
+        rank = 1;
+        sub = 0;
+      } else if (suffix.startsWith("rc.")) {
+        const n = parseReleaseNum(suffix.slice(3));
+        if (n === null) return null;
+        rank = 1;
+        sub = n;
+      } else {
+        return null;
+      }
+    }
+    return { tag: `v${rest}`, ver: [maj, min, pat, rank, sub] };
+  };
+  const compareReleaseVer = (a: ReleaseTuple, b: ReleaseTuple): number => {
+    for (let i = 0; i < 5; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  };
+  const validIhdrColor = (colorType: number, bitDepth: number): boolean => {
+    if (colorType === 0) return [1, 2, 4, 8, 16].includes(bitDepth);
+    if (colorType === 2) return bitDepth === 8 || bitDepth === 16;
+    if (colorType === 3) return [1, 2, 4, 8].includes(bitDepth);
+    if (colorType === 4) return bitDepth === 8 || bitDepth === 16;
+    if (colorType === 6) return bitDepth === 8 || bitDepth === 16;
+    return false;
+  };
 
   const FORBIDDEN_JVM_PREFIXES = [
     "-javaagent",
@@ -321,17 +581,45 @@ function install(cfg: BackendConfig): void {
   };
 
   const handle = (cmd: string, args: Record<string, unknown>): unknown => {
-    const planned = failures.get(cmd);
+    const callKey = `${cmd}:${JSON.stringify(args)}`;
+    const replayFailure = sameTickFailure.get(callKey);
+    if (replayFailure) {
+      return fail(replayFailure.code, `${cmd} was made to fail by the test`, {
+        params: replayFailure.params,
+      });
+    }
+    const replayHold = sameTickHold.get(callKey);
+    if (replayHold) {
+      return replayHold;
+    }
+    const queue = failures.get(cmd);
+    const planned = queue?.shift();
+    if (queue && queue.length === 0) failures.delete(cmd);
     if (planned) {
-      failures.delete(cmd);
+      // Coalesce duplicate StrictMode effect mounts fired in the same synchronous commit.
+      sameTickFailure.set(callKey, planned);
+      queueMicrotask(() => sameTickFailure.delete(callKey));
+      if (cmd === "reset_vault" && planned.code === "accounts_not_updated") {
+        if (state.vault.unlocked) return fail("vault_unlocked", "The vault is open.");
+        if (state.vault.exists) state.retiredVaults += 1;
+        state.vault = { exists: false, unlocked: false };
+        vaultPassphrase = null;
+        emit("accounts-changed", null);
+      }
       return fail(planned.code, `${cmd} was made to fail by the test`, { params: planned.params });
     }
-    if (holds.delete(cmd)) {
-      return new Promise((resolve, reject) => {
-        held = () => {
+    const holdCount = holds.get(cmd) ?? 0;
+    if (holdCount > 0) {
+      if (holdCount === 1) holds.delete(cmd);
+      else holds.set(cmd, holdCount - 1);
+      const heldPromise = new Promise((resolve, reject) => {
+        heldQueue.push(() => {
           void Promise.resolve(handle(cmd, args)).then(resolve, reject);
-        };
+        });
       });
+      sameTickHold.set(callKey, heldPromise);
+      queueMicrotask(() => sameTickHold.delete(callKey));
+      return heldPromise;
     }
     const announce = () => emit("ui-settings-changed", clone(state.ui));
     // The same decision the real backend makes (src-tauri/src/glass.rs): High Contrast is always opaque,
@@ -375,6 +663,15 @@ function install(cfg: BackendConfig): void {
         announce();
         return null;
       }
+      case "set_theme": {
+        const mode = args.mode;
+        if (mode !== "system" && mode !== "light" && mode !== "dark") {
+          return fail("unsupported_value", "that setting value is not supported");
+        }
+        state.ui.theme = mode;
+        announce();
+        return null;
+      }
       case "set_reduced_motion":
         state.ui.reducedMotion = args.mode as "system" | "on" | "off";
         announce();
@@ -412,6 +709,7 @@ function install(cfg: BackendConfig): void {
         state.ui.soundVolume = 0.5;
         state.ui.language = null;
         state.ui.uiMode = "simple";
+        state.ui.theme = "system";
         state.ui.reducedMotion = "system";
         state.ui.transparency = "system";
         state.ui.memoryMb = null;
@@ -435,13 +733,23 @@ function install(cfg: BackendConfig): void {
         return removed;
       }
       case "check_for_updates": {
-        const currentVersion = `v${state.ui.version}`;
-        if (state.latestRelease && state.latestRelease !== currentVersion) {
+        const currentTag = `v${state.ui.version}`;
+        const parsedCurrent = parseReleaseTag(currentTag);
+        const currentVersion = parsedCurrent?.tag ?? currentTag;
+        const parsedLatest = state.latestRelease ? parseReleaseTag(state.latestRelease) : null;
+        const newer =
+          parsedLatest &&
+          parsedCurrent &&
+          compareReleaseVer(parsedLatest.ver, parsedCurrent.ver) > 0;
+        if (
+          parsedLatest &&
+          (newer || (parsedCurrent === null && state.latestRelease !== currentTag))
+        ) {
           const canInstall = state.latestReleaseInstallable;
           return {
             status: "update_available",
             currentVersion,
-            latestVersion: state.latestRelease,
+            latestVersion: parsedLatest.tag,
             canInstall,
             assetSize: canInstall ? state.latestReleaseSize : null,
           };
@@ -454,8 +762,12 @@ function install(cfg: BackendConfig): void {
           assetSize: null,
         };
       }
-      case "open_release_page":
+      case "open_release_page": {
+        if (typeof args.tag === "string" && !parseReleaseTag(args.tag)) {
+          return fail("unsupported_value", "Invalid release tag.");
+        }
         return null;
+      }
       case "get_update_status":
         return clone(state.updateStatus);
       case "install_update": {
@@ -529,13 +841,17 @@ function install(cfg: BackendConfig): void {
         const idx = state.profiles.findIndex((p) => p.id === id);
         if (idx === -1) return fail("not_found", "No such profile.");
         if (state.runs[id]) return fail("already_running", "This profile is running.");
+        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        delete prepareFailures[id];
         const [removed] = state.profiles.splice(idx, 1);
         state.removed.unshift({
           ...clone(removed),
           folder: `${removed.id}-1700000000-${state.removed.length + 1}`,
           removedAt: 1_700_000_000 + state.removed.length,
         });
-        state.selected = state.profiles[0]?.id ?? null;
+        if (state.selected === id) {
+          state.selected = state.profiles[0]?.id ?? null;
+        }
         return profilesSnapshot();
       }
       case "restore_profile": {
@@ -560,12 +876,7 @@ function install(cfg: BackendConfig): void {
         }
         const baseId =
           finalName.toLowerCase() === item.name.toLowerCase() ? item.id : slug(finalName);
-        let targetId = baseId;
-        let k = 2;
-        while (state.profiles.some((p) => p.id === targetId)) {
-          targetId = `${baseId}-${k}`;
-          k += 1;
-        }
+        const targetId = allocateId(baseId);
         state.profiles.push({
           id: targetId,
           name: finalName,
@@ -586,48 +897,34 @@ function install(cfg: BackendConfig): void {
         return null;
       case "rename_profile": {
         const id = args.id as string;
-        const target = state.profiles.find((p) => p.id === id);
-        if (!target) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
-        const rawName = typeof args.name === "string" ? args.name : "";
-        const trimmed = rawName.trim();
-        // eslint-disable-next-line no-control-regex
-        const hasControl = /[\u0000-\u001f\u007f]/.test(trimmed);
-        if (trimmed.length === 0 || [...trimmed].length > 64 || hasControl)
-          return fail("invalid_name", "That name cannot be used.");
-        if (
-          state.profiles.some(
-            (p) => p.id !== id && p.name.trim().toLowerCase() === trimmed.toLowerCase(),
-          )
-        )
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
+        const trimmed = validateProfileName(args.name);
+        if (!trimmed) return fail("invalid_name", "That name cannot be used.");
+        if (hasNameConflict(trimmed, id))
           return fail("duplicate_name", "A profile with this name already exists.", {
             params: { name: trimmed },
           });
-        target.name = trimmed;
+        checked.profile.name = trimmed;
         return profilesSnapshot();
       }
       case "set_profile_memory": {
         const id = args.id as string;
-        const target = state.profiles.find((p) => p.id === id);
-        if (!target) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
         const mb = args.mb;
         const { min, max } = state.ui.memory;
         if (mb !== null && (typeof mb !== "number" || !Number.isFinite(mb) || mb < min || mb > max))
           return fail("invalid_memory", "Memory is outside the safe range.", {
             params: { min, max },
           });
-        target.memoryMb = mb === null ? null : Math.round(mb);
+        checked.profile.memoryMb = mb === null ? null : Math.round(mb);
         return profilesSnapshot();
       }
       case "set_profile_resolution": {
         const id = args.id as string;
-        const target = state.profiles.find((p) => p.id === id);
-        if (!target) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
         const res = args.resolution as { width?: unknown; height?: unknown } | null | undefined;
         if (res !== null && res !== undefined) {
           const w = res.width;
@@ -646,39 +943,34 @@ function install(cfg: BackendConfig): void {
               params: { minWidth: 320, maxWidth: 7680, minHeight: 240, maxHeight: 4320 },
             });
           }
-          target.resolution = { width: w, height: h };
+          checked.profile.resolution = { width: w, height: h };
         } else {
-          target.resolution = null;
+          checked.profile.resolution = null;
         }
         return profilesSnapshot();
       }
       case "set_profile_jvm_args": {
         const id = args.id as string;
-        const target = state.profiles.find((p) => p.id === id);
-        if (!target) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
         if (!validJvmArgs(args.args)) {
           return fail("invalid_jvm_args", "Invalid JVM argument.");
         }
-        target.jvmArgs = clone(args.args);
+        checked.profile.jvmArgs = clone(args.args);
         return profilesSnapshot();
       }
       case "set_profile_version": {
         const id = args.id as string;
-        const target = state.profiles.find((p) => p.id === id);
-        if (!target) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
+        const target = checked.profile;
         const minecraft = typeof args.minecraft === "string" ? args.minecraft : "";
-        if (!cfg.catalog.entries.some((e) => e.id === minecraft))
-          return fail("unknown_minecraft", "Unknown Minecraft version.", {
-            params: { minecraft },
-          });
         const lv = args.loaderVersion as
           { mode: "auto" } | { mode: "pinned"; version: string } | null | undefined;
         if (target.kind === "vanilla") {
           if (lv !== null && lv !== undefined) return fail("storage", "Vanilla has no loader.");
+          const ver = verifyVersionAndLoader(minecraft, { type: "vanilla" });
+          if ("error" in ver) return ver.error;
           if (target.minecraft !== minecraft) {
             target.minecraft = minecraft;
             target.ready = false;
@@ -686,32 +978,13 @@ function install(cfg: BackendConfig): void {
           return profilesSnapshot();
         }
         const loader = target.loader!;
-        const listed = cfg.loaders[minecraft];
-        const loaderEntry = listed ? listed.find((o) => o.loader === loader) : undefined;
-        const resolvedEntry = loaderEntry ?? {
+        const ver = verifyVersionAndLoader(minecraft, {
+          type: "modded",
           loader,
-          status: "ok" as const,
-          versions: [{ version: "1.0.0", channel: "recommended" as const }],
-          recommended: "1.0.0",
-        };
-        if (resolvedEntry.status === "unavailable")
-          return fail("cannot_verify_loader", "Loader check unavailable.", {
-            params: { loader, minecraft },
-          });
-        if (resolvedEntry.status === "none")
-          return fail("no_compatible_loader", "No compatible loader.", {
-            params: { loader, minecraft },
-          });
-        const nextVersion =
-          lv?.mode === "pinned" ? lv.version : (resolvedEntry.recommended ?? null);
-        if (
-          lv?.mode === "pinned" &&
-          !resolvedEntry.versions.some((v) => v.version === lv.version)
-        ) {
-          return fail("loader_version_not_offered", "Loader version not offered.", {
-            params: { loader, version: lv.version, minecraft },
-          });
-        }
+          loaderVersion: lv ?? { mode: "auto" },
+        });
+        if ("error" in ver) return ver.error;
+        const nextVersion = ver.loaderVersion;
         if (target.minecraft !== minecraft || target.loaderVersion !== nextVersion) {
           target.minecraft = minecraft;
           target.loaderVersion = nextVersion;
@@ -721,18 +994,11 @@ function install(cfg: BackendConfig): void {
       }
       case "duplicate_profile": {
         const id = args.id as string;
-        const source = state.profiles.find((p) => p.id === id);
-        if (!source) return fail("not_found", "No such profile.");
-        if (state.runs[id]) return fail("already_running", "This profile is running.");
-        if (pendingPrepare?.id === id) return fail("busy", "This profile is being set up.");
-        const stem = source.name.trim().replace(/\s+\(([2-9]\d*|\d{2,})\)$/, "");
-        let n = 2;
-        let copyName = `${stem} (${n})`;
-        while (state.profiles.some((p) => p.name.trim().toLowerCase() === copyName.toLowerCase())) {
-          n += 1;
-          copyName = `${stem} (${n})`;
-        }
-        const newId = `${slug(copyName)}-${state.profiles.length + 1}`;
+        const checked = ensureEditableProfile(id);
+        if ("error" in checked) return checked.error;
+        const source = checked.profile;
+        const copyName = nextDuplicateName(source.name);
+        const newId = allocateId(slug(copyName));
         state.profiles.push({
           ...clone(source),
           id: newId,
@@ -777,22 +1043,28 @@ function install(cfg: BackendConfig): void {
                 loader_version: { mode: "auto" } | { mode: "pinned"; version: string };
               };
         };
-        if (state.profiles.some((p) => p.name.toLowerCase() === req.name.trim().toLowerCase()))
+        const name = validateProfileName(req.name);
+        if (!name) return fail("invalid_name", "That name cannot be used.");
+        if (hasNameConflict(name))
           return fail("duplicate_name", "A profile with this name already exists.", {
-            params: { name: req.name.trim() },
+            params: { name },
           });
         const modded = req.profile.type === "modded" ? req.profile : null;
-        const id = `${slug(req.name)}-${state.profiles.length + 1}`;
+        const ver = verifyVersionAndLoader(
+          req.minecraft,
+          modded
+            ? { type: "modded", loader: modded.loader, loaderVersion: modded.loader_version }
+            : { type: "vanilla" },
+        );
+        if ("error" in ver) return ver.error;
+        const id = allocateId(slug(name));
         state.profiles.push({
           id,
-          name: req.name.trim(),
+          name,
           minecraft: req.minecraft,
           kind: modded ? "modded" : "vanilla",
           loader: modded ? modded.loader : null,
-          loaderVersion:
-            modded && modded.loader_version.mode === "pinned"
-              ? modded.loader_version.version
-              : null,
+          loaderVersion: ver.loaderVersion,
           ready: false,
           playtimeSeconds: 0,
           memoryMb: null,
@@ -805,14 +1077,37 @@ function install(cfg: BackendConfig): void {
 
       // ---- preparing a profile: held open until the test finishes or fails it
       case "prepare_profile": {
+        const id = args.id as string;
+        if (!state.profiles.some((p) => p.id === id)) {
+          return fail("not_found", "No such profile.");
+        }
         // The real backend refuses before anything is claimed or fetched: only a ready ACTIVE
         // account (the effective one, with no stand-in) may prepare or verify.
-        const active = state.accounts.find((a) => a.id === state.active) ?? state.accounts[0];
+        const activeId = effectiveActiveId();
+        const active = state.accounts.find((a) => a.id === activeId) ?? null;
         if (!active || active.needsSignIn)
           return fail("account_required", "Sign in with a Minecraft account first.");
+        if (state.runs[id]) {
+          return fail("already_running", "This profile is starting or running.");
+        }
+        if (pendingPrepare !== null) {
+          return fail("busy", "Another profile is being set up.");
+        }
+        delete prepareFailures[id];
         return new Promise((resolve, reject) => {
-          pendingPrepare = { id: args.id as string, resolve, reject };
+          pendingPrepare = { id, resolve, reject };
         });
+      }
+      case "prepare_status": {
+        const id = args.id as string;
+        if (pendingPrepare?.id === id) {
+          return { state: "preparing", error: null };
+        }
+        const failed = prepareFailures[id];
+        if (failed) {
+          return { state: "failed", error: clone(failed) };
+        }
+        return { state: "idle", error: null };
       }
       case "cancel_prepare":
         if (pendingPrepare) {
@@ -828,6 +1123,28 @@ function install(cfg: BackendConfig): void {
           const r = launchRefusal;
           launchRefusal = null;
           return fail(r.code, "The launch was refused.", { accountId: r.accountId });
+        }
+        const target = state.profiles.find((p) => p.id === id);
+        if (!target) {
+          return fail("not_found", "That profile no longer exists.");
+        }
+        if (!target.ready) {
+          return fail("not_ready", "This profile has to be set up before it can start.");
+        }
+        const activeId = effectiveActiveId();
+        const active = state.accounts.find((a) => a.id === activeId) ?? null;
+        if (!active) {
+          return fail("no_account", "Sign in with a Microsoft account to play.", {
+            accountId: null,
+          });
+        }
+        if (active.needsSignIn) {
+          return fail("needs_sign_in", "This account needs to sign in again.", {
+            accountId: active.id,
+          });
+        }
+        if (pendingPrepare?.id === id) {
+          return fail("already_preparing", "This profile is being set up. Wait for it to finish.");
         }
         if (state.runs[id]) return fail("already_running", "This profile is already running.");
         state.runs[id] = "launching";
@@ -873,12 +1190,20 @@ function install(cfg: BackendConfig): void {
       case "set_account_skin": {
         if (!knownAccount(args.id)) return fail("unknown_account", "No such account.");
         const png = args.png as number[];
-        const isPng = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every(
-          (b, i) => png[i] === b,
-        );
+        const isPng =
+          png.length >= 26 &&
+          [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((b, i) => png[i] === b);
         const width = ((png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19]) >>> 0;
         const height = ((png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23]) >>> 0;
-        if (!isPng || width !== 64 || ![32, 64].includes(height) || png.length > 256 * 1024)
+        const bitDepth = png[24];
+        const colorType = png[25];
+        if (
+          !isPng ||
+          width !== 64 ||
+          ![32, 64].includes(height) ||
+          !validIhdrColor(colorType, bitDepth) ||
+          png.length > 256 * 1024
+        )
           return fail("invalid_skin", "Not a skin.");
         lookOf(args.id).skinModel = args.variant as "classic" | "slim";
         const account = state.accounts.find((a) => a.id === args.id);
@@ -905,24 +1230,63 @@ function install(cfg: BackendConfig): void {
       }
       case "vault_status":
         return clone(state.vault);
-      case "create_vault":
+      case "create_vault": {
+        const pass = typeof args.passphrase === "string" ? args.passphrase : "";
+        if ([...pass].length < 8) {
+          return fail("passphrase_too_short", "Passphrase is too short.");
+        }
+        vaultPassphrase = pass;
         state.vault = { exists: true, unlocked: true };
         return null;
-      case "unlock_vault":
+      }
+      case "unlock_vault": {
+        if (!state.vault.exists && vaultPassphrase === null) {
+          state.vault = { exists: true, unlocked: true };
+          return null;
+        }
+        const pass = typeof args.passphrase === "string" ? args.passphrase : "";
+        if (vaultPassphrase !== null && pass !== vaultPassphrase) {
+          return fail("passphrase_mismatch", "Passphrase rejected.");
+        }
         state.vault.unlocked = true;
         return null;
+      }
       // "Start fresh": like the backend, only for a vault that is not open; every account signs in again.
       case "reset_vault":
         if (state.vault.unlocked) return fail("vault_unlocked", "The vault is open.");
         if (state.vault.exists) state.retiredVaults += 1;
         state.vault = { exists: false, unlocked: false };
+        vaultPassphrase = null;
         for (const a of state.accounts) a.needsSignIn = true;
         emit("accounts-changed", null);
         return accountsSnapshot();
       case "cancel_sign_in":
+        if (pendingSignIn) {
+          const reject = pendingSignIn.reject;
+          pendingSignIn = null;
+          reject({ code: "cancelled", params: {}, message: "Sign-in was cancelled." });
+        }
         return null;
-      case "begin_sign_in":
-        return fail("approval_required", "Sign-in is not available in tests.");
+      case "begin_sign_in": {
+        if (!state.vault.exists || !state.vault.unlocked) {
+          return fail("vault_locked", "Unlock your accounts first.");
+        }
+        if (pendingSignIn) {
+          return fail("in_progress", "A sign-in is already in progress.");
+        }
+        const accountId = typeof args.accountId === "string" ? args.accountId : null;
+        return new Promise((resolve, reject) => {
+          pendingSignIn = { accountId, resolve, reject };
+        });
+      }
+      case "refresh_account": {
+        const id = args.id as string;
+        if (!knownAccount(id)) return fail("unknown_account", "That account no longer exists.");
+        if (!state.vault.exists || !state.vault.unlocked) {
+          return fail("vault_locked", "Unlock your accounts first.");
+        }
+        return accountsSnapshot();
+      }
       default:
         return fail("unknown_command", `The fake backend does not implement "${cmd}".`);
     }
@@ -980,6 +1344,7 @@ function install(cfg: BackendConfig): void {
     hasPendingPrepare: () => pendingPrepare !== null,
     finishPrepare: () => {
       if (!pendingPrepare) return false;
+      delete prepareFailures[pendingPrepare.id];
       const p = state.profiles.find((x) => x.id === pendingPrepare?.id);
       if (p) p.ready = true;
       pendingPrepare.resolve(profilesSnapshot());
@@ -988,8 +1353,43 @@ function install(cfg: BackendConfig): void {
     },
     failPrepare: (code, params = {}) => {
       if (!pendingPrepare) return false;
+      if (code !== "cancelled") {
+        prepareFailures[pendingPrepare.id] = { code, params, message: "Preparation failed." };
+      }
       pendingPrepare.reject({ code, params, message: "Preparation failed." });
       pendingPrepare = null;
+      return true;
+    },
+    hasPendingSignIn: () => pendingSignIn !== null,
+    finishSignIn: (account) => {
+      if (!pendingSignIn) return false;
+      const pending = pendingSignIn;
+      pendingSignIn = null;
+      const targetId = pending.accountId ?? account?.id ?? "acc-new";
+      const existing = state.accounts.find((a) => a.id === targetId);
+      if (existing) {
+        existing.needsSignIn = false;
+        if (account?.username) existing.username = account.username;
+        if (account?.uuid) existing.uuid = account.uuid;
+      } else {
+        state.accounts.push({
+          id: targetId,
+          username: account?.username ?? "FixtureNew",
+          uuid: account?.uuid ?? "00000000-0000-4000-8000-000000000003",
+          needsSignIn: false,
+          skin: null,
+        });
+      }
+      state.active = targetId;
+      emit("accounts-changed", null);
+      pending.resolve(accountsSnapshot());
+      return true;
+    },
+    failSignIn: (code, params = {}) => {
+      if (!pendingSignIn) return false;
+      const pending = pendingSignIn;
+      pendingSignIn = null;
+      pending.reject({ code, params, message: "Sign-in failed." });
       return true;
     },
     finishUpdate: () => {
@@ -1016,15 +1416,17 @@ function install(cfg: BackendConfig): void {
       launchRefusal = { code, accountId };
     },
     failNext: (cmd, code, params = {}) => {
-      failures.set(cmd, { code, params });
+      const q = failures.get(cmd) ?? [];
+      q.push({ code, params });
+      failures.set(cmd, q);
     },
     holdNext: (cmd) => {
-      holds.add(cmd);
+      holds.set(cmd, (holds.get(cmd) ?? 0) + 1);
     },
     releaseHeld: () => {
-      if (!held) return false;
-      held();
-      held = null;
+      const next = heldQueue.shift();
+      if (!next) return false;
+      next();
       return true;
     },
   };

@@ -15,6 +15,7 @@ import { listen } from "@tauri-apps/api/event";
 import { isLocale, type Locale } from "@/lib/i18n/core";
 
 export type UiMode = "simple" | "advanced";
+export type ThemeMode = "system" | "light" | "dark";
 export type MotionMode = "system" | "on" | "off";
 /** Whether the translucent window material follows Windows, is always tried, or is never used. */
 export type TransparencyMode = "system" | "on" | "off";
@@ -41,6 +42,8 @@ export interface UiSettings {
   systemLocale: string | null;
   /** Whether the interface hides advanced tuning options (`simple`) or exposes them (`advanced`). */
   uiMode: UiMode;
+  /** Colour palette choice: follow Windows, light paper, or graphite dark. */
+  theme: ThemeMode;
   /** Whether decorative motion follows Windows, is always reduced, or is never reduced. */
   reducedMotion: MotionMode;
   /** The "Transparency effects" choice: follow Windows, on, or off. Separate from reduced motion. */
@@ -63,6 +66,7 @@ export const DEFAULT_UI_SETTINGS: Readonly<UiSettings> = {
   language: null,
   systemLocale: null,
   uiMode: "simple",
+  theme: "system",
   reducedMotion: "system",
   transparency: "system",
   // A backend that cannot be read must never trap anyone in the introduction, so the fallback is
@@ -87,9 +91,11 @@ export const inTauri = (): boolean =>
 // ------------------------------------------------------------------------------ the live copy
 
 let current: UiSettings = { ...DEFAULT_UI_SETTINGS };
+let generation = 0;
 const listeners = new Set<() => void>();
 
 function setCurrent(next: UiSettings) {
+  generation += 1;
   current = next;
   for (const l of [...listeners]) l();
 }
@@ -108,8 +114,9 @@ export function subscribeUiSettings(listener: () => void): () => void {
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
   typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
-const whole = (v: unknown, fallback: number): number =>
-  typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : fallback;
+const positiveWhole = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : null;
+const whole = (v: unknown, fallback: number): number => positiveWhole(v) ?? fallback;
 
 /** Validates data coming from the backend instead of trusting its shape. */
 export function parseUiSettings(raw: unknown): UiSettings {
@@ -137,16 +144,17 @@ export function parseUiSettings(raw: unknown): UiSettings {
         ? o.systemLocale
         : null,
     uiMode: oneOf(o.uiMode, ["simple", "advanced"], "simple"),
+    theme: oneOf(o.theme, ["system", "light", "dark"], "system"),
     reducedMotion: oneOf(o.reducedMotion, ["system", "on", "off"], "system"),
     transparency: oneOf(o.transparency, ["system", "on", "off"], "system"),
     onboardingDone:
       typeof o.onboardingDone === "boolean" ? o.onboardingDone : DEFAULT_UI_SETTINGS.onboardingDone,
-    memoryMb: typeof o.memoryMb === "number" && o.memoryMb > 0 ? Math.round(o.memoryMb) : null,
+    memoryMb: positiveWhole(o.memoryMb),
     memory: {
       min,
       max,
       auto: Math.min(max, Math.max(min, whole(m.auto, d.auto))),
-      total: typeof m.total === "number" && m.total > 0 ? Math.round(m.total) : null,
+      total: positiveWhole(m.total),
     },
     onLaunch: oneOf(o.onLaunch, ["embed", "keep_open", "hide"], "embed"),
     onExit: oneOf(o.onExit, ["show", "stay_hidden"], "show"),
@@ -160,9 +168,9 @@ function warn(what: string, e: unknown) {
 }
 
 function browserLanguage(): string | null {
-  return typeof navigator !== "undefined" && typeof navigator.language === "string"
-    ? navigator.language
-    : null;
+  if (typeof navigator === "undefined") return null;
+  const lang = navigator.language;
+  return typeof lang === "string" ? lang : null;
 }
 
 // ---------------------------------------------------------------------------------- loading
@@ -176,20 +184,34 @@ export async function loadUiSettings(): Promise<UiSettings> {
     setCurrent({ ...current, systemLocale });
     return current;
   }
+  const epoch = ++generation;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("timed out")), LOAD_TIMEOUT_MS),
-    );
-    setCurrent(parseUiSettings(await Promise.race([invoke("get_ui_settings"), timeout])));
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timed out")), LOAD_TIMEOUT_MS);
+    });
+    const next = parseUiSettings(await Promise.race([invoke("get_ui_settings"), timeout]));
+    if (generation === epoch) setCurrent(next);
     return current;
   } catch (e) {
     warn("loading", e);
-    setCurrent({ ...DEFAULT_UI_SETTINGS });
+    if (generation === epoch) setCurrent({ ...DEFAULT_UI_SETTINGS });
     return current;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
 // ----------------------------------------------------------------------- saving (fire and forget)
+
+function fireAndForget(promise: Promise<unknown>, what: string): void {
+  promise.then(
+    () => {
+      generation += 1;
+    },
+    (e: unknown) => warn(what, e),
+  );
+}
 
 /** Saves a sound-preference change (fire and forget; the UI never waits on the disk). */
 export function saveSoundSettings(patch: { enabled?: boolean; volume?: number }): void {
@@ -204,8 +226,9 @@ export function saveSoundSettings(patch: { enabled?: boolean; volume?: number })
     });
     return;
   }
-  invoke("set_sound_settings", { enabled: patch.enabled, volume: patch.volume }).catch(
-    (e: unknown) => warn("saving sound settings", e),
+  fireAndForget(
+    invoke("set_sound_settings", { enabled: patch.enabled, volume: patch.volume }),
+    "saving sound settings",
   );
 }
 
@@ -215,7 +238,7 @@ export function saveLastPhrase(id: string): void {
     setCurrent({ ...current, lastPhrase: parseUiSettings({ lastPhrase: id }).lastPhrase });
     return;
   }
-  invoke("set_last_phrase", { id }).catch((e: unknown) => warn("saving the last headline", e));
+  fireAndForget(invoke("set_last_phrase", { id }), "saving the last headline");
 }
 
 /**
@@ -229,6 +252,7 @@ export async function saveLanguage(language: Locale): Promise<boolean> {
   }
   try {
     await invoke("set_language", { language });
+    generation += 1;
     return true;
   } catch (e) {
     warn("saving the language", e);
@@ -252,6 +276,7 @@ async function change(
   }
   try {
     await invoke(command, args);
+    generation += 1;
     return { ok: true };
   } catch (error) {
     warn(command, error);
@@ -260,6 +285,8 @@ async function change(
 }
 
 export const saveUiMode = (mode: UiMode) => change("set_ui_mode", { mode }, { uiMode: mode });
+
+export const saveTheme = (mode: ThemeMode) => change("set_theme", { mode }, { theme: mode });
 
 export const saveReducedMotion = (mode: MotionMode) =>
   change("set_reduced_motion", { mode }, { reducedMotion: mode });
@@ -293,6 +320,7 @@ export const resetUiSettings = () =>
       soundVolume: DEFAULT_UI_SETTINGS.soundVolume,
       language: null,
       uiMode: "simple",
+      theme: "system",
       reducedMotion: "system",
       transparency: "system",
       memoryMb: null,

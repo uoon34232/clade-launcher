@@ -21,12 +21,15 @@ describe("PlayerHead", () => {
       { viewBox: "8 8 8 8", href: skin, layer: "face" },
       { viewBox: "40 8 8 8", href: skin, layer: "hat" }, // drawn after the face: over it
     ]);
-    const image = container.querySelector("image");
-    expect(image?.getAttribute("width")).toBe("64");
-    expect(image?.getAttribute("height")).toBe("64");
-    expect(image?.getAttribute("preserveAspectRatio")).toBe("none");
-    expect(image?.getAttribute("image-rendering")).toBe("pixelated");
-    expect(image?.getAttribute("style")).toContain("image-rendering: pixelated");
+    const images = container.querySelectorAll("image");
+    expect(images).toHaveLength(2);
+    for (const image of images) {
+      expect(image.getAttribute("width")).toBe("64");
+      expect(image.getAttribute("height")).toBe("64");
+      expect(image.getAttribute("preserveAspectRatio")).toBe("none");
+      expect(image.getAttribute("image-rendering")).toBe("pixelated");
+      expect(image.getAttribute("style")).toContain("image-rendering: pixelated");
+    }
     expect(container.querySelector("svg")?.getAttribute("shape-rendering")).toBe("crispEdges");
   });
 
@@ -81,5 +84,39 @@ describe("PlayerHead", () => {
     );
     expect(layers(view.container).map((l) => l.viewBox)).toEqual(["16 16 16 16", "80 16 16 16"]);
     expect(view.container.querySelector("image")?.getAttribute("width")).toBe("128");
+  });
+
+  it("renders the placeholder without calling skinSize when skinDimensions is explicitly null", () => {
+    const view = render(
+      <PlayerHead
+        account={{
+          username: "Alex",
+          skin: testSkin(64, 64),
+          skinDimensions: null,
+        }}
+      />,
+    );
+    expect(view.container.querySelector("svg[data-skin-head]")).toBeNull();
+    expect(view.container.querySelector("image")).toBeNull();
+    expect(view.container.querySelectorAll("svg rect")).toHaveLength(64);
+  });
+
+  it("forwards className to both the rendered skin head and the placeholder avatar", () => {
+    const rendered = render(
+      <PlayerHead
+        account={{ username: "Alex", skin: testSkin(64, 64) }}
+        className="size-8 rounded"
+      />,
+    );
+    const headSvg = rendered.container.querySelector("svg[data-skin-head]");
+    expect(headSvg?.getAttribute("class")).toBe("size-8 rounded [image-rendering:pixelated]");
+    cleanup();
+
+    const placeholderView = render(
+      <PlayerHead account={{ username: "Alex", skin: null }} className="size-8 rounded" />,
+    );
+    const avatarSvg = placeholderView.container.querySelector("svg");
+    expect(placeholderView.container.querySelector("svg[data-skin-head]")).toBeNull();
+    expect(avatarSvg?.getAttribute("class")).toBe("size-8 rounded");
   });
 });

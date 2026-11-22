@@ -37,7 +37,7 @@ export function TitleWordmark() {
         data-phase={on ? "on" : "off"}
         data-mode={mode}
         onClick={activate}
-        className="wordmark text-graphite/65 pointer-events-auto relative -mx-2 cursor-default rounded-md px-2 py-0.5 font-serif text-[0.9375rem] leading-none font-normal tracking-[0.04em] whitespace-nowrap outline-none select-none"
+        className="wordmark text-graphite/80 pointer-events-auto relative -mx-2 cursor-default rounded-md px-2 py-0.5 font-serif text-[0.9375rem] leading-none font-normal tracking-[0.04em] whitespace-nowrap outline-hidden select-none"
         style={{ fontVariationSettings: '"opsz" 24, "SOFT" 60' }}
       >
         <span className="sr-only" aria-live="polite">

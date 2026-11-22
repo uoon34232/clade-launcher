@@ -95,7 +95,8 @@ export function Segmented<T extends string>({
               if (!disabled && !o.disabled) onKeyDown(e, o.value);
             }}
             className={cn(
-              "ease-out-soft focus-visible:ring-clay/45 min-w-0 cursor-default transition-[background-color,color,box-shadow,opacity] duration-200 outline-none focus-visible:ring-2 disabled:opacity-40",
+              "ease-out-soft focus-visible:ring-ring min-w-0 cursor-default border border-transparent outline-hidden transition-[background-color,color,box-shadow,opacity] duration-200 focus-visible:ring-2 disabled:opacity-40",
+              selected && "forced-colors:border-[Highlight]",
               variant === "track"
                 ? cn(
                     "truncate",
@@ -103,12 +104,14 @@ export function Segmented<T extends string>({
                       ? "h-8 rounded-[0.65rem] px-2.5 text-[0.8125rem] font-medium"
                       : "h-9 rounded-[0.7rem] px-3.5 text-[0.875rem] font-medium",
                     selected
-                      ? "bg-card text-graphite shadow-[0_1px_2px_rgb(43_38_34/0.12)]"
-                      : "text-ink-muted hover:text-graphite",
+                      ? "text-graphite bg-[var(--segmented-active)] shadow-[var(--segmented-shadow)]"
+                      : "text-ink-muted enabled:hover:text-graphite enabled:hover:bg-[var(--segmented-hover)]",
                   )
                 : cn(
-                    "rounded-md py-0.5 text-[0.8125rem]",
-                    selected ? "text-graphite font-medium" : "text-ink-muted hover:text-graphite",
+                    "rounded-md px-1.5 py-1.5 text-[0.8125rem]",
+                    selected
+                      ? "text-graphite font-medium"
+                      : "text-ink-muted enabled:hover:text-graphite enabled:hover:bg-[var(--quiet-hover)]",
                   ),
             )}
           >

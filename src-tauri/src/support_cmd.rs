@@ -34,8 +34,15 @@ where
         .map_err(|e| CodedError::new(code, e.to_string()))?
 }
 
-fn open_folder(app: &AppHandle, dir: &Path) -> Result<(), CodedError> {
+fn prepare_open_folder_dir(root: &PortableRoot, dir: &Path) -> Result<(), CodedError> {
+    reject_links_between(root.path(), dir).map_err(CodedError::storage)?;
     fs::create_dir_all(dir).map_err(CodedError::storage)?;
+    reject_links_between(root.path(), dir).map_err(CodedError::storage)?;
+    Ok(())
+}
+
+fn open_folder(app: &AppHandle, root: &PortableRoot, dir: &Path) -> Result<(), CodedError> {
+    prepare_open_folder_dir(root, dir)?;
     app.opener()
         .open_path(dir.to_string_lossy(), None::<&str>)
         .map_err(|e| CodedError::new("open_failed", e.to_string()))
@@ -72,8 +79,9 @@ pub async fn open_clade_folder(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), CodedError> {
-    let dir = state.root.path().to_path_buf();
-    let work = move || open_folder(&app, &dir);
+    let root = state.root.clone();
+    let dir = root.path().to_path_buf();
+    let work = move || open_folder(&app, &root, &dir);
     run_blocking("open_failed", work).await
 }
 
@@ -83,8 +91,9 @@ pub async fn open_logs_folder(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), CodedError> {
-    let dir = state.root.logs_dir();
-    let work = move || open_folder(&app, &dir);
+    let root = state.root.clone();
+    let dir = root.logs_dir();
+    let work = move || open_folder(&app, &root, &dir);
     run_blocking("open_failed", work).await
 }
 
@@ -400,5 +409,30 @@ mod tests {
         assert!(archived_vault.is_file());
         assert!(outside_vault.is_file());
         fs::remove_dir(&linked).unwrap();
+    }
+
+    #[test]
+    fn open_folder_preparation_rejects_links_and_allows_real_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(dir.path());
+        root.ensure_layout().unwrap();
+
+        prepare_open_folder_dir(&root, root.path()).unwrap();
+        prepare_open_folder_dir(&root, &root.logs_dir()).unwrap();
+
+        fs::remove_dir_all(root.logs_dir()).unwrap();
+        let outside = dir.path().join("outside-logs");
+        fs::create_dir_all(&outside).unwrap();
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.logs_dir())
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let err = prepare_open_folder_dir(&root, &root.logs_dir()).unwrap_err();
+        assert_eq!(err.code, "storage");
+        fs::remove_dir(root.logs_dir()).unwrap();
     }
 }

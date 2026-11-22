@@ -302,6 +302,27 @@ impl HttpFetcher {
     }
 }
 
+/// Validates the status and `Content-Range` of a streamed response.
+/// Only accepts `206 Partial Content` when a `Range` request (`from > 0`) was actually sent.
+fn check_stream_response(
+    status: u16,
+    from: u64,
+    content_range: Option<&str>,
+) -> Result<(), FetchError> {
+    if status != 200 && !(status == 206 && from > 0) {
+        return Err(FetchError::Status(status));
+    }
+    if status == 206 {
+        // The body must start exactly where we asked, or appending would corrupt the file.
+        let expected_prefix = format!("bytes {from}-");
+        let starts_right = content_range.is_some_and(|v| v.starts_with(&expected_prefix));
+        if !starts_right {
+            return Err(FetchError::Network("unexpected byte range".into()));
+        }
+    }
+    Ok(())
+}
+
 impl Streamer for HttpFetcher {
     #[allow(clippy::manual_async_fn)] // the trait spells out the borrowed lifetime
     fn stream<'a>(
@@ -332,20 +353,11 @@ impl Streamer for HttpFetcher {
                 };
                 policy.check(response.url())?;
                 let status = response.status().as_u16();
-                if status != 200 && status != 206 {
-                    return Err(FetchError::Status(status));
-                }
-                if status == 206 {
-                    // The body must start exactly where we asked, or appending would corrupt the file.
-                    let starts_right = response
-                        .headers()
-                        .get("content-range")
-                        .and_then(|v| v.to_str().ok())
-                        .is_some_and(|v| v.starts_with(&format!("bytes {from}-")));
-                    if !starts_right {
-                        return Err(FetchError::Network("unexpected byte range".into()));
-                    }
-                }
+                let content_range = response
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok());
+                check_stream_response(status, from, content_range)?;
                 let head = StreamHead {
                     status,
                     content_length: response.content_length(),
@@ -981,5 +993,32 @@ mod tests {
             })
             .await;
         assert!(matches!(r, Err(FetchError::TooLarge(32))), "{r:?}");
+    }
+
+    #[test]
+    fn stream_response_validation_rejects_unsolicited_partial_content() {
+        assert!(check_stream_response(200, 0, None).is_ok());
+        assert!(check_stream_response(200, 128, None).is_ok());
+        assert!(matches!(
+            check_stream_response(206, 0, Some("bytes 0-63/128")),
+            Err(FetchError::Status(206))
+        ));
+        assert!(matches!(
+            check_stream_response(206, 0, None),
+            Err(FetchError::Status(206))
+        ));
+        assert!(check_stream_response(206, 64, Some("bytes 64-127/128")).is_ok());
+        assert!(matches!(
+            check_stream_response(206, 64, Some("bytes 0-127/128")),
+            Err(FetchError::Network(_))
+        ));
+        assert!(matches!(
+            check_stream_response(206, 64, None),
+            Err(FetchError::Network(_))
+        ));
+        assert!(matches!(
+            check_stream_response(404, 0, None),
+            Err(FetchError::Status(404))
+        ));
     }
 }

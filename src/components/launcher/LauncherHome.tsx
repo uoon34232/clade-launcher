@@ -9,6 +9,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
+import { XIcon } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   accountsApi,
@@ -148,6 +149,7 @@ export function LauncherHome({
   const t = useT();
   const [snapshot, setSnapshot] = useState<ProfilesSnapshot>(EMPTY);
   const [instancesError, setInstancesError] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<AccountsSnapshot>(NO_ACCOUNTS);
   // Until the first answer the dock must not claim "sign in" for accounts that simply have not loaded.
   const [accountsLoaded, setAccountsLoaded] = useState(false);
@@ -156,6 +158,7 @@ export function LauncherHome({
   const [embed, setEmbed] = useState<GameEmbedStatus>(NO_EMBED);
   const [prevEmbedActive, setPrevEmbedActive] = useState(embed.active);
   const [embedReturning, setEmbedReturning] = useState(false);
+  const [embedSettled, setEmbedSettled] = useState(false);
   const returnTimerRef = useRef<number | null>(null);
   const ui = useUiSettings();
 
@@ -163,8 +166,12 @@ export function LauncherHome({
     setPrevEmbedActive(embed.active);
     if (embed.active) {
       if (embedReturning) setEmbedReturning(false);
+      if (embedSettled) setEmbedSettled(false);
     } else if (!prefersReducedMotion()) {
       setEmbedReturning(true);
+      if (embedSettled) setEmbedSettled(false);
+    } else {
+      setEmbedSettled(true);
     }
   }
   useEffect(() => {
@@ -173,6 +180,7 @@ export function LauncherHome({
     returnTimerRef.current = window.setTimeout(() => {
       returnTimerRef.current = null;
       setEmbedReturning(false);
+      setEmbedSettled(true);
     }, 560);
     return () => {
       if (returnTimerRef.current !== null) {
@@ -181,10 +189,16 @@ export function LauncherHome({
       }
     };
   }, [embedReturning]);
+  const homeEntrance: "rise" | "return" | "settled" = embedReturning
+    ? "return"
+    : embedSettled
+      ? "settled"
+      : "rise";
   const stageRef = useRef<HTMLDivElement>(null);
   const refreshSeqRef = useRef(0);
   const accountsSeqRef = useRef(0);
   const selectAccountSeqRef = useRef(0);
+  const selectProfileSeqRef = useRef(0);
   const switchTimerRef = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -239,30 +253,55 @@ export function LauncherHome({
         if (accountsSeqRef.current === seq) setAccountsLoaded(true);
       });
   }, [accountsClient]);
-  useEffect(refreshAccounts, [refreshAccounts]);
 
-  // Avatars are fetched in the background after the list was answered; the backend says when to look again.
+  // Register the change listener before the initial `list_accounts` invoke so fast background
+  // avatar updates (`accounts-changed`) never miss the startup event window.
   useEffect(() => {
     let stale = false;
     let off: (() => void) | null = null;
     const subscribe = accountsClient.onChanged ?? accountsEvents.onChanged;
-    void subscribe(refreshAccounts).then((u) => {
-      if (stale) u();
-      else off = u;
-    });
+    void Promise.resolve(subscribe(() => !stale && refreshAccounts())).then(
+      (u) => {
+        if (stale) {
+          u();
+          return;
+        }
+        off = u;
+        refreshAccounts();
+      },
+      () => {
+        if (!stale) refreshAccounts();
+      },
+    );
     return () => {
       stale = true;
       off?.();
     };
   }, [accountsClient, refreshAccounts]);
 
-  // What the backend says about running games: the starting state, "playing", and how each ended.
+  // What the backend says about running games: subscribe first so initial `status()` cannot miss a
+  // `stopped` event emitted before `listen("launch-state")` finishes registering.
   useEffect(() => {
     let stale = false;
     let off: (() => void) | null = null;
     const seenFromEvent = new Set<string>();
-    void launchClient
-      .onState((ev) => {
+    const syncStatus = () => {
+      void launchClient.status().then(
+        (list) => {
+          if (stale) return;
+          setRuns((prev) => {
+            const next = { ...prev };
+            for (const r of list) {
+              if (!seenFromEvent.has(r.instanceId)) next[r.instanceId] = r.state;
+            }
+            return next;
+          });
+        },
+        () => undefined, // no backend, nothing is running
+      );
+    };
+    void Promise.resolve(
+      launchClient.onState((ev) => {
         if (stale) return;
         seenFromEvent.add(ev.instanceId);
         setRuns((prev) => {
@@ -280,23 +319,19 @@ export function LauncherHome({
             setProblem({ kind: "ended", profileId: ev.instanceId, exit: ev.exit });
           }
         }
-      })
-      .then((u) => {
-        if (stale) u();
-        else off = u;
-      });
-    launchClient.status().then(
-      (list) => {
-        if (stale) return;
-        setRuns((prev) => {
-          const next = { ...prev };
-          for (const r of list) {
-            if (!seenFromEvent.has(r.instanceId)) next[r.instanceId] = r.state;
-          }
-          return next;
-        });
+      }),
+    ).then(
+      (u) => {
+        if (stale) {
+          u();
+          return;
+        }
+        off = u;
+        syncStatus();
       },
-      () => undefined, // no backend, nothing is running
+      () => {
+        if (!stale) syncStatus();
+      },
     );
     return () => {
       stale = true;
@@ -304,11 +339,12 @@ export function LauncherHome({
     };
   }, [launchClient, refresh, refreshAccounts]);
 
-  // Framed game mode ("Inside Clade"): sync active attachment state and report responsive stage
-  // geometry in physical pixels so Rust can size and round the embedded game window to match.
+  // Framed game mode ("Inside Clade"): subscribe before reading initial status and never allow a
+  // slower `embedStatus()` response to overwrite a live `game-embed-state` event.
   useEffect(() => {
     if (!launchClient.embedStatus && !launchClient.onEmbedState) return;
     let stale = false;
+    let sawEmbedEvent = false;
     let off: (() => void) | null = null;
     const apply = (next: GameEmbedStatus) => {
       if (stale) return;
@@ -317,12 +353,36 @@ export function LauncherHome({
         setSurface((cur) => (cur.kind === "none" ? cur : { kind: "none" }));
       }
     };
-    launchClient.embedStatus?.().then(apply, () => undefined);
+    const fetchInitial = () => {
+      void launchClient.embedStatus?.().then(
+        (next) => {
+          if (!stale && !sawEmbedEvent) apply(next);
+        },
+        () => undefined,
+      );
+    };
     if (launchClient.onEmbedState) {
-      void launchClient.onEmbedState(apply).then((u) => {
-        if (stale) u();
-        else off = u;
-      });
+      void Promise.resolve(
+        launchClient.onEmbedState((next) => {
+          if (stale) return;
+          sawEmbedEvent = true;
+          apply(next);
+        }),
+      ).then(
+        (u) => {
+          if (stale) {
+            u();
+            return;
+          }
+          off = u;
+          fetchInitial();
+        },
+        () => {
+          if (!stale) fetchInitial();
+        },
+      );
+    } else {
+      fetchInitial();
     }
     return () => {
       stale = true;
@@ -382,8 +442,12 @@ export function LauncherHome({
   const addAccount = () => setSurface({ kind: "sign-in", accountId: null });
 
   const select = (id: string) => {
+    const seq = ++selectProfileSeqRef.current;
+    setFolderError(null);
     setSnapshot((s) => ({ ...s, selected: id })); // immediate; the backend remembers it in data/settings.json
-    api.select(id).catch(refresh);
+    api.select(id).catch(() => {
+      if (selectProfileSeqRef.current === seq) refresh();
+    });
   };
 
   const close = () => {
@@ -409,9 +473,8 @@ export function LauncherHome({
     setIntroduction(false);
     void completeOnboarding();
     // let the introduction finish closing before the next dialog takes focus
-    if (how === "create-profile")
-      window.setTimeout(() => setSurface({ kind: "create-profile" }), 0);
-    if (how === "add-account") window.setTimeout(addAccount, 0);
+    if (how === "create-profile") switchSurface({ kind: "create-profile" });
+    if (how === "add-account") switchSurface({ kind: "sign-in", accountId: null });
   };
   const selectedProfile = snapshot.profiles.find((p) => p.id === snapshot.selected) ?? null;
 
@@ -552,12 +615,15 @@ export function LauncherHome({
         </div>
         {!embed.active && (
           <section
+            inert={embedLaunching || undefined}
+            aria-hidden={embedLaunching || undefined}
             data-launching={embedLaunching ? "true" : undefined}
             className="hero-stage absolute inset-0 z-0 grid place-items-center pb-[clamp(6rem,19vh,12rem)]"
           >
             <Hero
-              lastPhraseId={initialUi?.lastPhrase}
+              lastPhraseId={ui.lastPhrase ?? initialUi?.lastPhrase}
               playtimeSeconds={snapshot.totalPlaytimeSeconds}
+              entrance={homeEntrance}
               returning={embedReturning}
             />
           </section>
@@ -594,64 +660,82 @@ export function LauncherHome({
             className="game-stage-exit bg-ivory/25 pointer-events-none absolute inset-x-0 top-[44px] bottom-0 z-10 overflow-hidden"
           />
         )}
-        {!embed.active && unreadable.length > 0 && (
-          <div
-            role="status"
-            className="launcher-notice dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
-          >
-            <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
-              <span className="text-ink-muted">
-                {t("profile.unreadableNotice", {
-                  count: unreadable.length,
-                  folders: unreadable.join(", "),
-                })}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  playSound("click");
-                  setInstancesError(null);
-                  void api
-                    .openInstancesFolder()
-                    .catch((e: unknown) => setInstancesError(describeError("profile", e)));
-                }}
-                className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-clay/45 cursor-default rounded-md font-medium underline underline-offset-3 transition-colors outline-none focus-visible:ring-2"
-              >
-                {t("profile.openInstancesFolder")}
-              </button>
-              {instancesError && (
-                <span role="alert" className="text-clay-deep">
-                  {instancesError}
-                </span>
-              )}
+        <div
+          aria-live="polite"
+          inert={embedLaunching || undefined}
+          className="pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex flex-col items-center gap-2 px-6"
+        >
+          {!embed.active && folderError && (
+            <div role="alert" className="launcher-notice dock-rise">
+              <div className="bg-sand/85 text-clay-deep ring-sand-border/60 pointer-events-auto flex max-w-[min(42rem,100%)] items-center gap-3 rounded-2xl px-3.5 py-2 text-[0.8125rem] leading-snug ring-1">
+                <span className="min-w-0 break-words">{folderError}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSound("click");
+                    setFolderError(null);
+                  }}
+                  aria-label={t("common.close")}
+                  className="text-graphite hover:text-clay-deep focus-visible:ring-ring cursor-default rounded-md p-1 font-medium outline-hidden transition-colors focus-visible:ring-2"
+                >
+                  <XIcon aria-hidden className="size-3.5" />
+                </button>
+              </div>
             </div>
-          </div>
-        )}
-        {!embed.active &&
-          snapshot.profiles.length === 0 &&
-          unreadable.length === 0 &&
-          removed.length > 0 && (
-            <div
-              role="status"
-              className="launcher-notice dock-rise pointer-events-none absolute inset-x-0 bottom-[calc(clamp(1.5rem,6vh,3.5rem)+4.625rem)] flex justify-center px-6"
-            >
+          )}
+          {!embed.active && unreadable.length > 0 && (
+            <div role="status" className="launcher-notice dock-rise">
               <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
-                <span className="text-ink-muted">
-                  {t("removedProfiles.emptyNotice", { count: removed.length })}
+                <span className="text-ink-muted min-w-0 break-words">
+                  {t("profile.unreadableNotice", {
+                    count: unreadable.length,
+                    folders: unreadable.join(", "),
+                  })}
                 </span>
                 <button
                   type="button"
                   onClick={() => {
                     playSound("click");
-                    setSurface({ kind: "removed-profiles" });
+                    setInstancesError(null);
+                    void api
+                      .openInstancesFolder()
+                      .catch((e: unknown) => setInstancesError(describeError("profile", e)));
                   }}
-                  className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-clay/45 cursor-default rounded-md font-medium underline underline-offset-3 transition-colors outline-none focus-visible:ring-2"
+                  className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-ring cursor-default rounded-md font-medium underline underline-offset-3 outline-hidden transition-colors focus-visible:ring-2"
                 >
-                  {t("removedProfiles.openAction")}
+                  {t("profile.openInstancesFolder")}
                 </button>
+                {instancesError && (
+                  <span role="alert" className="text-clay-deep min-w-0 break-words">
+                    {instancesError}
+                  </span>
+                )}
               </div>
             </div>
           )}
+          {!embed.active &&
+            snapshot.profiles.length === 0 &&
+            unreadable.length === 0 &&
+            removed.length > 0 && (
+              <div role="status" className="launcher-notice dock-rise">
+                <div className="bg-sand/75 text-graphite ring-graphite/10 pointer-events-auto flex max-w-[min(42rem,100%)] flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl px-3.5 py-2 text-center text-[0.8125rem] leading-snug ring-1">
+                  <span className="text-ink-muted">
+                    {t("removedProfiles.emptyNotice", { count: removed.length })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSound("click");
+                      setSurface({ kind: "removed-profiles" });
+                    }}
+                    className="text-graphite decoration-graphite/35 hover:text-clay-deep hover:decoration-clay-deep focus-visible:ring-ring cursor-default rounded-md font-medium underline underline-offset-3 outline-hidden transition-colors focus-visible:ring-2"
+                  >
+                    {t("removedProfiles.openAction")}
+                  </button>
+                </div>
+              </div>
+            )}
+        </div>
         {!embed.active && (
           <LauncherDock
             accounts={accounts.accounts}
@@ -666,9 +750,13 @@ export function LauncherHome({
             onOpenProfileSettings={() =>
               selectedProfile && setSurface({ kind: "profile", id: selectedProfile.id })
             }
-            onOpenProfileFolder={() =>
-              selectedProfile && void api.openFolder(selectedProfile.id).catch(() => undefined)
-            }
+            onOpenProfileFolder={() => {
+              if (!selectedProfile) return;
+              setFolderError(null);
+              void api
+                .openFolder(selectedProfile.id)
+                .catch((e: unknown) => setFolderError(describeError("profile", e)));
+            }}
             onVerifyProfile={() =>
               selectedProfile &&
               setSurface({ kind: "prepare", id: selectedProfile.id, verify: true })
@@ -683,6 +771,7 @@ export function LauncherHome({
             onPlay={play}
             playState={playState}
             onOpenSettings={() => setSurface({ kind: "settings" })}
+            entrance={homeEntrance}
             returning={embedReturning}
           />
         )}

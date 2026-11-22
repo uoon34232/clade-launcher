@@ -1,6 +1,6 @@
 import { renderMessage } from "@/lib/i18n/core";
 import { en, ru } from "@/locales";
-import { CREATIVE, DEFAULT_CONFIG, FRESH, SURVIVAL } from "./support/fixtures";
+import { CREATIVE, DEFAULT_CONFIG, FRESH, LOADERS, SURVIVAL } from "./support/fixtures";
 import { expect, test, type Page } from "./support/test";
 import { dock, playButton, profileTrigger, settingsButton, text, textRu } from "./support/ui";
 
@@ -45,6 +45,7 @@ test.describe("profile settings", () => {
     await expect(dialog.getByRole("radiogroup", { name: text("create.filterLabel") })).toHaveCount(
       0,
     );
+    expect(await fits()).toEqual({ vertical: true, horizontal: true });
     await dialog.getByRole("button", { name: text("common.cancel") }).click();
     await dialog.getByRole("button", { name: text("common.done") }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -226,6 +227,42 @@ test.describe("profile settings", () => {
     expect(orig?.ready).toBe(true);
     expect(copy?.minecraft).toBe("1.21.1");
     expect(copy?.ready).toBe(false);
+  });
+
+  test("edits a modded profile version in Simple mode with auto-recommended loader and keeps loader picker hidden", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    await profileTrigger(page).click();
+    await page.getByRole("menuitemradio", { name: new RegExp(`^${CREATIVE.name}`) }).click();
+
+    const dialog = await openProfileSettings(page);
+    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await expect(
+      dialog.getByRole("combobox", {
+        name: text("profileModal.loaderVersionFor", { loader: "Fabric" }),
+      }),
+    ).toHaveCount(0);
+
+    await dialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    await page.getByRole("option", { name: /^1\.20\.1/ }).click();
+    await dialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
+
+    await expect
+      .poll(async () => (await backend.calls("set_profile_version")).map((c) => c.args))
+      .toEqual([
+        {
+          id: CREATIVE.id,
+          minecraft: "1.20.1",
+          loaderVersion: { mode: "pinned", version: "0.15.11" },
+        },
+      ]);
+    await expect(dialog.getByText("Fabric 1.20.1 · 0.15.11")).toBeVisible();
+    await expect(
+      dialog.getByText(text("profileModal.statusPending"), { exact: true }),
+    ).toBeVisible();
   });
 });
 
@@ -493,6 +530,247 @@ test.describe("profile settings: Advanced mode", () => {
     ).toBeVisible();
     await expect(ruDialog.getByLabel(textRu("profileModal.resolutionWidth"))).toBeVisible();
     expect(await fits()).toEqual({ vertical: true, horizontal: true });
+  });
+
+  test("switches version filters for Vanilla and selects a pinned loader version for modded profiles", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    const vanillaDialog = await openProfileSettings(page);
+    await vanillaDialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+
+    const filters = vanillaDialog.getByRole("radiogroup", { name: text("create.filterLabel") });
+    await expect(filters).toBeVisible();
+
+    await filters.getByRole("radio", { name: text("create.filter.snapshots") }).click();
+    await vanillaDialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    await page.getByRole("option", { name: /^24w50a/ }).click();
+
+    await filters.getByRole("radio", { name: text("create.filter.historical") }).click();
+    await vanillaDialog.getByRole("combobox", { name: text("create.mcVersion") }).click();
+    await expect(page.getByRole("option", { name: /^b1\.7\.3/ })).toBeVisible();
+    await expect(page.getByRole("option", { name: /^a1\.2\.6/ })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await filters.getByRole("radio", { name: text("create.filter.snapshots") }).click();
+    await vanillaDialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
+
+    await expect(vanillaDialog.getByText("Vanilla 24w50a")).toBeVisible();
+    await expect
+      .poll(async () => (await backend.calls("set_profile_version")).map((c) => c.args))
+      .toEqual([{ id: SURVIVAL.id, minecraft: "24w50a", loaderVersion: null }]);
+    await vanillaDialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await profileTrigger(page).click();
+    await page.getByRole("menuitemradio", { name: new RegExp(`^${CREATIVE.name}`) }).click();
+    const moddedDialog = await openProfileSettings(page);
+    await moddedDialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+
+    const loaderCombo = moddedDialog.getByRole("combobox", {
+      name: text("profileModal.loaderVersionFor", { loader: "Fabric" }),
+    });
+    await expect(loaderCombo).toBeVisible();
+    await loaderCombo.click();
+    await page.getByRole("option", { name: /^0\.16\.8/ }).click();
+    await moddedDialog.getByRole("button", { name: text("profileModal.saveVersion") }).click();
+
+    await expect(moddedDialog.getByText("Fabric 1.21.4 · 0.16.8")).toBeVisible();
+    await expect
+      .poll(async () => (await backend.calls("set_profile_version")).map((c) => c.args))
+      .toEqual([
+        { id: SURVIVAL.id, minecraft: "24w50a", loaderVersion: null },
+        {
+          id: CREATIVE.id,
+          minecraft: "1.21.4",
+          loaderVersion: { mode: "pinned", version: "0.16.8" },
+        },
+      ]);
+  });
+
+  test("fits 960x600 in English and Russian with expanded modded VersionEditor alongside Custom memory and Fixed size", async ({
+    page,
+    openApp,
+  }) => {
+    await page.setViewportSize({ width: 960, height: 600 });
+    await openApp();
+
+    const assertViewportFit = async (d: typeof enDialog) => {
+      const box = await d.boundingBox();
+      expect(box).not.toBeNull();
+      if (box) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(960);
+        expect(box.y + box.height).toBeLessThanOrEqual(600);
+      }
+      expect(await d.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    };
+    const assertSelectListboxInViewport = async (
+      trigger: ReturnType<typeof enDialog.getByRole>,
+    ) => {
+      await trigger.click();
+      const listbox = page.getByRole("listbox");
+      await expect(listbox).toBeVisible();
+      const lbox = await listbox.boundingBox();
+      expect(lbox).not.toBeNull();
+      if (lbox) {
+        expect(lbox.y).toBeGreaterThanOrEqual(0);
+        expect(lbox.y + lbox.height).toBeLessThanOrEqual(600);
+      }
+      await page.keyboard.press("Escape");
+      await expect(listbox).toHaveCount(0);
+    };
+
+    await profileTrigger(page).click();
+    await page.getByRole("menuitemradio", { name: new RegExp(`^${CREATIVE.name}`) }).click();
+    const enDialog = await openProfileSettings(page);
+    await enDialog.getByRole("radio", { name: text("settings.memory.custom") }).click();
+    await enDialog.getByRole("radio", { name: text("profileModal.resolutionFixed") }).click();
+    await enDialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await expect(
+      enDialog.getByRole("radiogroup", { name: text("create.filterLabel") }),
+    ).toBeVisible();
+    const enMc = enDialog.getByRole("combobox", { name: text("create.mcVersion") });
+    const enLoader = enDialog.getByRole("combobox", {
+      name: text("profileModal.loaderVersionFor", { loader: "Fabric" }),
+    });
+    await expect(enLoader).toBeVisible();
+    await assertViewportFit(enDialog);
+    await assertSelectListboxInViewport(enMc);
+    await assertSelectListboxInViewport(enLoader);
+
+    await enDialog.getByRole("button", { name: text("common.cancel") }).click();
+    await enDialog.getByRole("button", { name: text("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await settingsButton(page).click();
+    await page
+      .getByRole("dialog", { name: text("settings.title") })
+      .getByRole("radio", { name: "Русский" })
+      .click();
+    await page.getByRole("button", { name: textRu("common.done") }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await profileTrigger(page).click();
+    await page.getByRole("menuitem", { name: textRu("profile.settings") }).click();
+    const ruDialog = page.getByRole("dialog");
+    await expect(ruDialog).toBeVisible();
+    await ruDialog.getByRole("button", { name: textRu("profileModal.changeVersion") }).click();
+    await expect(
+      ruDialog.getByRole("radiogroup", { name: textRu("create.filterLabel") }),
+    ).toBeVisible();
+    const ruMc = ruDialog.getByRole("combobox", { name: textRu("create.mcVersion") });
+    const ruLoader = ruDialog.getByRole("combobox", {
+      name: textRu("profileModal.loaderVersionFor", { loader: "Fabric" }),
+    });
+    await expect(ruLoader).toBeVisible();
+    await assertViewportFit(ruDialog);
+    await assertSelectListboxInViewport(ruMc);
+    await assertSelectListboxInViewport(ruLoader);
+  });
+});
+
+test.describe("VersionEditor incompatibilities and error recovery", () => {
+  const NEOPACK = {
+    id: "neopack",
+    name: "NeoPack",
+    minecraft: "1.21.4",
+    kind: "modded" as const,
+    loader: "neoforge" as const,
+    loaderVersion: "21.4.10",
+    ready: true,
+    playtimeSeconds: 0,
+    memoryMb: null,
+  };
+
+  test.use({
+    backendConfig: {
+      ui: { ...DEFAULT_CONFIG.ui, uiMode: "advanced" },
+      profiles: [NEOPACK, SURVIVAL],
+      selected: NEOPACK.id,
+      loaders: {
+        ...LOADERS,
+        "1.19.4": [
+          {
+            loader: "neoforge",
+            status: "unavailable",
+            versions: [],
+            recommended: null,
+            stale: false,
+            error: "offline",
+          },
+        ],
+      },
+    },
+  });
+
+  test("handles catalog retry, loader incompatibilities (none/unavailable/failure), and set_profile_version errors", async ({
+    page,
+    backend,
+    openApp,
+  }) => {
+    await openApp();
+    const dialog = await openProfileSettings(page);
+
+    // 1. Catalog failure -> Try again recovers version picker
+    await backend.failNext("get_version_catalog", "catalog_unavailable");
+    await dialog.getByRole("button", { name: text("profileModal.changeVersion") }).click();
+    await expect(dialog.getByText(text("create.unavailable"))).toBeVisible();
+    await expect(dialog.getByRole("alert")).toContainText(
+      text("error.catalog.catalog_unavailable"),
+    );
+    await dialog.getByRole("button", { name: text("common.tryAgain") }).click();
+    await expect(dialog.getByRole("combobox", { name: text("create.mcVersion") })).toContainText(
+      "1.21.4",
+    );
+
+    const mcCombo = dialog.getByRole("combobox", { name: text("create.mcVersion") });
+    const saveVersion = dialog.getByRole("button", { name: text("profileModal.saveVersion") });
+
+    // 2. status: "none" (NeoForge has no build for 1.20.1)
+    await mcCombo.click();
+    await page.getByRole("option", { name: /^1\.20\.1/ }).click();
+    await expect(
+      dialog.getByText(text("create.loaderNone", { loader: "NeoForge", minecraft: "1.20.1" })),
+    ).toBeVisible();
+    await expect(saveVersion).toBeDisabled();
+
+    // 3. status: "unavailable"
+    await mcCombo.click();
+    await page.getByRole("option", { name: /^1\.19\.4/ }).click();
+    await expect(
+      dialog.getByText(text("create.loaderUnchecked", { loader: "NeoForge" })),
+    ).toBeVisible();
+    await expect(saveVersion).toBeDisabled();
+
+    // 4. get_loader_options rejection
+    await backend.failNext("get_loader_options", "network_unavailable");
+    await mcCombo.click();
+    await page.getByRole("option", { name: /^1\.21\.1/ }).click();
+    await expect(dialog.getByText(text("create.loaderCheckFailed"))).toBeVisible();
+    await expect(saveVersion).toBeDisabled();
+
+    // 5. set_profile_version backend error stays inline inside VersionEditor
+    await mcCombo.click();
+    await page.getByRole("option", { name: /^1\.21\.4/ }).click();
+    const loaderCombo = dialog.getByRole("combobox", {
+      name: text("profileModal.loaderVersionFor", { loader: "NeoForge" }),
+    });
+    await loaderCombo.click();
+    await page.getByRole("option", { name: /^21\.4\.9/ }).click();
+    await backend.failNext("set_profile_version", "cannot_verify_loader", {
+      loader: "NeoForge",
+      minecraft: "1.21.4",
+    });
+    await expect(saveVersion).toBeEnabled();
+    await saveVersion.click();
+    await expect(dialog.getByRole("alert")).toHaveText(
+      text("error.profile.cannot_verify_loader", { loader: "NeoForge", minecraft: "1.21.4" }),
+    );
+    await expect(mcCombo).toBeVisible();
   });
 });
 

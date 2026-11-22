@@ -143,7 +143,11 @@ Add-Item 'Program Files Java folders' $(if ($javaDirs.Count) { $javaDirs -join '
 Add-Section 'Disk'
 $target = if ($CladeRoot) { $CladeRoot } else { (Get-Location).Path }
 try {
-  $full = [System.IO.Path]::GetFullPath($target)
+  $full = if (Test-Path -LiteralPath $target) {
+    (Resolve-Path -LiteralPath $target -ErrorAction Stop).ProviderPath
+  } else {
+    $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($target)
+  }
   Add-Item 'Checked path' $full
   $root = [System.IO.Path]::GetPathRoot($full)
   if ($root -like '\\*') {

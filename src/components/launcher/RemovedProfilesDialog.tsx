@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { formatPlaytime, profileDetail } from "@/features/launcher/profileUi";
 import { useT } from "@/lib/i18n";
 import { describeError } from "@/lib/i18n/errors";
@@ -22,28 +22,84 @@ interface Props {
  */
 export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api }: Props) {
   const t = useT();
+  const listId = useId();
   const [busyFolder, setBusyFolder] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [wasOpen, setWasOpen] = useState(open);
+  const mountedRef = useRef(true);
+  const openRef = useRef(open);
+  const sessionRef = useRef(0);
+  const openFolderInFlightRef = useRef(false);
+  const listRef = useRef<HTMLUListElement>(null);
+  const pendingRestoreFocusIndexRef = useRef<number | null>(null);
+
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setBusyFolder(null);
+    setError(null);
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open || busyFolder !== null || pendingRestoreFocusIndexRef.current === null) return;
+    const idx = pendingRestoreFocusIndexRef.current;
+    pendingRestoreFocusIndexRef.current = null;
+    const activeEl = document.activeElement;
+    if (activeEl && activeEl !== document.body && activeEl !== document.documentElement) return;
+    const buttons = listRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+    if (buttons && buttons.length > 0) {
+      buttons[Math.min(idx, buttons.length - 1)]?.focus();
+    }
+  }, [open, busyFolder, removed.length]);
+
+  useLayoutEffect(() => {
+    openRef.current = open;
+    sessionRef.current += 1;
+    if (!open) {
+      openFolderInFlightRef.current = false;
+      pendingRestoreFocusIndexRef.current = null;
+    }
+  }, [open]);
+
+  const close = () => {
+    sessionRef.current += 1;
+    setError(null);
+    onClose();
+  };
 
   const handleOpenChange = (next: boolean) => {
     if (!next && busyFolder === null) {
-      setError(null);
-      onClose();
+      close();
     }
   };
 
-  const restoreOne = (folder: string) => {
-    if (!api.restore || busyFolder !== null) return;
+  const restoreOne = (folder: string, index: number) => {
+    if (!api.restore || busyFolder !== null || !open) return;
+    const session = sessionRef.current;
+    pendingRestoreFocusIndexRef.current = index;
     setBusyFolder(folder);
     setError(null);
     playSound("click");
     api.restore(folder).then(
       (snapshot) => {
+        if (!mountedRef.current) return;
+        const sameSession = openRef.current && sessionRef.current === session;
+        if (!sameSession) {
+          onRestored(snapshot);
+          return;
+        }
         setBusyFolder(null);
         onRestored(snapshot);
-        if ((snapshot.removed ?? []).length === 0) onClose();
+        if ((snapshot.removed ?? []).length === 0) close();
       },
       (e: unknown) => {
+        if (!mountedRef.current || !openRef.current || sessionRef.current !== session) return;
         setBusyFolder(null);
         setError(describeError("profile", e));
       },
@@ -51,10 +107,21 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
   };
 
   const openFolder = () => {
-    if (!api.openRemovedFolder) return;
+    if (!api.openRemovedFolder || !open || openFolderInFlightRef.current) return;
+    openFolderInFlightRef.current = true;
+    const session = sessionRef.current;
     setError(null);
     playSound("click");
-    api.openRemovedFolder().catch((e: unknown) => setError(describeError("profile", e)));
+    api.openRemovedFolder().then(
+      () => {
+        if (sessionRef.current === session) openFolderInFlightRef.current = false;
+      },
+      (e: unknown) => {
+        if (sessionRef.current === session) openFolderInFlightRef.current = false;
+        if (!mountedRef.current || !openRef.current || sessionRef.current !== session) return;
+        setError(describeError("profile", e));
+      },
+    );
   };
 
   return (
@@ -67,9 +134,13 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
         {removed.length === 0 ? (
           <p className="text-ink-muted py-3 text-[0.9375rem]">{t("removedProfiles.empty")}</p>
         ) : (
-          <ul className="quiet-scroll divide-graphite/10 border-graphite/10 bg-sand/30 max-h-64 divide-y overflow-y-auto rounded-2xl border">
-            {removed.map((item) => {
+          <ul
+            ref={listRef}
+            className="quiet-scroll divide-graphite/10 border-graphite/10 bg-sand/30 max-h-64 divide-y overflow-y-auto rounded-2xl border forced-colors:border-[CanvasText]"
+          >
+            {removed.map((item, index) => {
               const busy = busyFolder === item.folder;
+              const nameId = `${listId}-name-${index}`;
               const detail =
                 item.playtimeSeconds >= 60
                   ? `${profileDetail(item)} · ${formatPlaytime(item.playtimeSeconds)}`
@@ -77,7 +148,7 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
               return (
                 <li key={item.folder} className="flex items-center justify-between gap-3 px-4 py-3">
                   <div className="min-w-0">
-                    <p className="text-graphite truncate text-[0.9375rem] font-medium">
+                    <p id={nameId} className="text-graphite truncate text-[0.9375rem] font-medium">
                       {item.name}
                     </p>
                     <p className="text-ink-muted truncate text-[0.8125rem]">{detail}</p>
@@ -85,7 +156,8 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
                   <button
                     type="button"
                     disabled={busyFolder !== null}
-                    onClick={() => restoreOne(item.folder)}
+                    aria-describedby={nameId}
+                    onClick={() => restoreOne(item.folder, index)}
                     className={`${BUTTON_SMALL_SOFT} shrink-0`}
                   >
                     {busy ? t("removedProfiles.restoring") : t("removedProfiles.restore")}
@@ -116,8 +188,9 @@ export function RemovedProfilesDialog({ open, removed, onClose, onRestored, api 
           type="button"
           disabled={busyFolder !== null}
           onClick={() => {
+            if (busyFolder !== null) return;
             playSound("click");
-            onClose();
+            close();
           }}
           className={BUTTON_SOFT}
         >

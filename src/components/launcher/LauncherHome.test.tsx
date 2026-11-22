@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BASE_PHRASES, phraseText } from "@/features/launcher/phrases";
+import { NO_ACCOUNTS, type AccountsApi, type AccountsSnapshot } from "@/lib/accounts/api";
+import { NO_EMBED, type GameEmbedStatus, type LaunchApi, type LaunchEvent } from "@/lib/launch/api";
 import type {
   LoaderOption,
   ProfilesApi,
@@ -10,7 +12,7 @@ import type {
 import { BackendError } from "@/lib/ipc";
 import { resetUiSettings, saveUiMode } from "@/lib/settings/uiSettings";
 import { LauncherHome } from "./LauncherHome";
-import { readyAccountsClient } from "@/test/testAccounts";
+import { READY_ACCOUNTS, readyAccountsClient } from "@/test/testAccounts";
 
 vi.mock("@/lib/sound/soundService", () => ({ playSound: vi.fn(() => true) }));
 
@@ -140,6 +142,43 @@ function makeApi(initial: ProfilesSnapshot) {
   };
 }
 
+function makeAccountsClient(snapshot: AccountsSnapshot = READY_ACCOUNTS): AccountsApi {
+  return {
+    ...readyAccountsClient(snapshot),
+    onChanged: vi.fn<NonNullable<AccountsApi["onChanged"]>>(() => Promise.resolve(() => undefined)),
+  };
+}
+
+function makeLaunchClient(over: Partial<LaunchApi> = {}) {
+  return {
+    launch: vi.fn<LaunchApi["launch"]>(() => Promise.resolve()),
+    status: vi.fn<LaunchApi["status"]>(() => Promise.resolve([])),
+    openLogs: vi.fn<LaunchApi["openLogs"]>(() => Promise.resolve()),
+    onState: vi.fn<LaunchApi["onState"]>(() => Promise.resolve(() => undefined)),
+    embedStatus: vi.fn<NonNullable<LaunchApi["embedStatus"]>>(() => Promise.resolve(NO_EMBED)),
+    setStageBounds: vi.fn<NonNullable<LaunchApi["setStageBounds"]>>(() => Promise.resolve()),
+    toggleMaximize: vi.fn<NonNullable<LaunchApi["toggleMaximize"]>>(() =>
+      Promise.resolve(NO_EMBED),
+    ),
+    onEmbedState: vi.fn<NonNullable<LaunchApi["onEmbedState"]>>(() =>
+      Promise.resolve(() => undefined),
+    ),
+    ...over,
+  };
+}
+
+function renderHome(
+  api: ProfilesApi,
+  {
+    accountsClient = makeAccountsClient(),
+    launchClient = makeLaunchClient(),
+  }: { accountsClient?: AccountsApi; launchClient?: LaunchApi } = {},
+) {
+  return render(
+    <LauncherHome api={api} accountsClient={accountsClient} launchClient={launchClient} />,
+  );
+}
+
 const empty: ProfilesSnapshot = { profiles: [], selected: null, totalPlaytimeSeconds: 0 };
 const flush = async () => act(async () => void (await Promise.resolve()));
 const dialog = () => screen.getByRole("dialog");
@@ -166,15 +205,17 @@ beforeEach(async () => {
     });
   }
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+});
 
 describe("LauncherHome", () => {
   it("shows the headline and the dock controls", async () => {
-    render(
-      <LauncherHome
-        api={makeApi({ profiles: [profile()], selected: "survival", totalPlaytimeSeconds: 0 })}
-      />,
-    );
+    renderHome(makeApi({ profiles: [profile()], selected: "survival", totalPlaytimeSeconds: 0 }), {
+      accountsClient: makeAccountsClient(NO_ACCOUNTS),
+    });
     await flush();
     expect(BASE_PHRASES.map((p) => phraseText(p))).toContain(
       screen.getByRole("heading", { level: 1 }).textContent,
@@ -202,7 +243,7 @@ describe("LauncherHome", () => {
       selected: "modded",
       totalPlaytimeSeconds: 0,
     });
-    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
+    renderHome(api);
     await flush();
     const trigger = screen.getByRole("button", { name: "Profile: Modded. Change profile" });
     // The collapsed dock button shows only the profile's name: no version, loader or "Vanilla".
@@ -213,30 +254,267 @@ describe("LauncherHome", () => {
   it("shows no fake profiles when there is no backend or no profile", async () => {
     const api = makeApi(empty);
     api.list.mockRejectedValueOnce(new Error("no backend"));
-    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
+    renderHome(api);
     await flush();
     expect(screen.getByRole("button", { name: /Create a profile/ })).toBeTruthy();
     expect(screen.queryByText(/Vanilla 1\./)).toBeNull();
+  });
+
+  it("switches the selected profile in the dock and reverts if api.select fails", async () => {
+    const second = profile({
+      id: "modded",
+      name: "Modded",
+      minecraft: "1.20.1",
+      kind: "modded",
+      loader: "fabric",
+      loaderVersion: "0.16.9",
+    });
+    const api = makeApi({
+      profiles: [profile(), second],
+      selected: "survival",
+      totalPlaytimeSeconds: 0,
+    });
+    renderHome(api);
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Survival. Change profile" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Modded/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Profile: Modded. Change profile" })).toBeTruthy(),
+    );
+    expect(api.select).toHaveBeenCalledWith("modded");
+
+    api.select.mockRejectedValueOnce(new Error("save failed"));
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Modded. Change profile" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Survival/ }));
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Profile: Modded. Change profile" })).toBeTruthy(),
+    );
+  });
+
+  it("shows the unreadable-profiles notice and reports openInstancesFolder failures", async () => {
+    const api = makeApi({
+      profiles: [],
+      selected: null,
+      totalPlaytimeSeconds: 0,
+      unreadable: ["corrupt-pack"],
+      removed: [
+        {
+          folder: "old-pack",
+          name: "Old Pack",
+          minecraft: "1.21.4",
+          kind: "vanilla",
+          loader: null,
+          loaderVersion: null,
+          playtimeSeconds: 0,
+          removedAt: 1_700_000_000,
+        },
+      ],
+    });
+    api.openInstancesFolder.mockRejectedValueOnce(new BackendError("cannot open", "open_failed"));
+    renderHome(api);
+    await flush();
+
+    expect(screen.getByRole("status").textContent).toContain(
+      "1 profile folder couldn’t be read (corrupt-pack). Its files were left untouched.",
+    );
+    expect(screen.queryByRole("button", { name: "Restore…" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open profiles folder" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Windows couldn’t open that folder.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open profiles folder" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("shows the removed-profiles notice when empty and opens Restore dialog", async () => {
+    const api = makeApi({
+      profiles: [],
+      selected: null,
+      totalPlaytimeSeconds: 0,
+      unreadable: [],
+      removed: [
+        {
+          folder: "survival-old",
+          name: "Old Survival",
+          minecraft: "1.21.4",
+          kind: "vanilla",
+          loader: null,
+          loaderVersion: null,
+          playtimeSeconds: 3600,
+          removedAt: 1_700_000_000,
+        },
+      ],
+    });
+    renderHome(api);
+    await flush();
+
+    expect(screen.getByRole("status").textContent).toContain(
+      "1 removed profile is kept in this Clade folder.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Restore…" }));
+    const d = within(await screen.findByRole("dialog"));
+    expect(d.getByText("Removed profiles")).toBeTruthy();
+    expect(d.getByText("Old Survival")).toBeTruthy();
+  });
+
+  it("tracks framed embed mode: stage bounds, launching veil, modal dismissal and maximize", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 44,
+      right: 1280,
+      bottom: 720,
+      width: 1280,
+      height: 676,
+      x: 0,
+      y: 44,
+      toJSON: () => ({}),
+    });
+
+    try {
+      let emitEmbed: ((s: GameEmbedStatus) => void) | null = null;
+      const launchClient = makeLaunchClient({
+        onEmbedState: vi.fn<NonNullable<LaunchApi["onEmbedState"]>>((cb) => {
+          emitEmbed = cb;
+          return Promise.resolve(() => undefined);
+        }),
+        toggleMaximize: vi.fn<NonNullable<LaunchApi["toggleMaximize"]>>(() =>
+          Promise.resolve({
+            active: true,
+            watching: false,
+            instanceId: "survival",
+            maximized: true,
+            closing: false,
+          }),
+        ),
+      });
+      const api = makeApi({
+        profiles: [profile({ ready: true })],
+        selected: "survival",
+        totalPlaytimeSeconds: 0,
+      });
+
+      renderHome(api, { launchClient });
+      await flush();
+
+      expect(launchClient.embedStatus).toHaveBeenCalledTimes(1);
+      expect(launchClient.setStageBounds).toHaveBeenCalledWith({
+        x: 0,
+        y: 44,
+        width: 1280,
+        height: 676,
+        radius: 0,
+      });
+
+      await act(async () => {
+        emitEmbed?.({
+          active: false,
+          watching: true,
+          instanceId: "survival",
+          maximized: false,
+          closing: false,
+        });
+        await Promise.resolve();
+      });
+      const veil = screen.getByTestId("game-stage-launching");
+      expect(veil.textContent).toContain("Survival");
+      expect(veil.textContent).toContain("Launching…");
+
+      // Open a modal, then embed becomes active: the open surface is closed and chrome switches to framed.
+      fireEvent.click(screen.getByRole("button", { name: "Profile: Survival. Change profile" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: /Create profile/ }));
+      await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+
+      await act(async () => {
+        emitEmbed?.({
+          active: true,
+          watching: false,
+          instanceId: "survival",
+          maximized: false,
+          closing: false,
+        });
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+      expect(screen.queryByTestId("game-stage-launching")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+      expect(launchClient.toggleMaximize).toHaveBeenCalledTimes(1);
+      expect(await screen.findByRole("button", { name: "Restore" })).toBeTruthy();
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("shows and clears the embedReturning exit veil when an embedded game stops", async () => {
+    vi.useFakeTimers();
+    let emitState: ((ev: LaunchEvent) => void) | null = null;
+    const launchClient = makeLaunchClient({
+      embedStatus: vi.fn<NonNullable<LaunchApi["embedStatus"]>>(() =>
+        Promise.resolve({
+          active: true,
+          watching: false,
+          instanceId: "survival",
+          maximized: false,
+          closing: false,
+        }),
+      ),
+      onState: vi.fn<LaunchApi["onState"]>((cb) => {
+        emitState = cb;
+        return Promise.resolve(() => undefined);
+      }),
+    });
+    const api = makeApi({
+      profiles: [profile({ ready: true })],
+      selected: "survival",
+      totalPlaytimeSeconds: 0,
+    });
+
+    renderHome(api, { launchClient });
+    await flush();
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+
+    await act(async () => {
+      emitState?.({ instanceId: "survival", state: "stopped", exit: null });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("game-stage-exit")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 })).toBeTruthy();
+    expect(document.querySelector(".hero-return")).toBeTruthy();
+    expect(document.querySelector(".dock-return")).toBeTruthy();
+
+    await act(async () => {
+      vi.advanceTimersByTime(560);
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("game-stage-exit")).toBeNull();
+    expect(document.querySelector(".hero-return")).toBeNull();
+    expect(document.querySelector(".dock-return")).toBeNull();
+    expect(document.querySelector(".hero-rise")).toBeNull();
+    expect(document.querySelector(".dock-rise")).toBeNull();
   });
 });
 
 describe("total playtime under the subtitle", () => {
   it("shows the real backend total, understated", async () => {
-    render(
-      <LauncherHome
-        api={makeApi({
-          profiles: [profile()],
-          selected: "survival",
-          totalPlaytimeSeconds: 27 * 3600 + 42 * 60,
-        })}
-      />,
+    renderHome(
+      makeApi({
+        profiles: [profile()],
+        selected: "survival",
+        totalPlaytimeSeconds: 27 * 3600 + 42 * 60,
+      }),
     );
     await flush();
     expect(screen.getByText("Played 27h 42m")).toBeTruthy();
   });
 
   it("is hidden gracefully for a brand-new launcher", async () => {
-    render(<LauncherHome api={makeApi(empty)} accountsClient={readyAccountsClient()} />);
+    renderHome(makeApi(empty));
     await flush();
     expect(screen.queryByText(/Played/)).toBeNull();
   });
@@ -244,7 +522,7 @@ describe("total playtime under the subtitle", () => {
 
 describe("Create profile", () => {
   async function openDialog(api: ReturnType<typeof makeApi>, snapshot?: ProfilesSnapshot) {
-    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
+    renderHome(api);
     await flush();
     void snapshot;
     fireEvent.click(screen.getByRole("button", { name: /Create a profile/ }));
@@ -273,7 +551,7 @@ describe("Create profile", () => {
 
   it("validates the name and refuses duplicates", async () => {
     const api = makeApi({ profiles: [profile()], selected: "survival", totalPlaytimeSeconds: 0 });
-    render(<LauncherHome api={api} accountsClient={readyAccountsClient()} />);
+    renderHome(api);
     await flush();
     fireEvent.click(screen.getByRole("button", { name: /Profile: Survival/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Create profile/ }));
@@ -463,5 +741,170 @@ describe("Create profile", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create a profile/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
     expect(within(dialog()).getByLabelText<HTMLInputElement>("Name").value).toBe("");
+  });
+
+  it("validates name length limit and rejects control characters", async () => {
+    const api = makeApi(empty);
+    await openDialog(api);
+    const d = within(dialog());
+    const input = d.getByLabelText("Name");
+    const create = d.getByRole<HTMLButtonElement>("button", { name: "Create profile" });
+
+    fireEvent.change(input, { target: { value: "a".repeat(65) } });
+    fireEvent.blur(input);
+    expect(d.getByRole("alert").textContent).toBe("Keep the name under 64 characters.");
+    expect(create.disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: "Bad\u0007Name" } });
+    fireEvent.blur(input);
+    expect(d.getByRole("alert").textContent).toBe("The name can’t contain control characters.");
+    expect(create.disabled).toBe(true);
+  });
+
+  it("recovers from a versionCatalog failure via Try again", async () => {
+    const api = makeApi(empty);
+    api.versionCatalog
+      .mockRejectedValueOnce(new BackendError("offline", "catalog_unavailable"))
+      .mockResolvedValueOnce(CATALOG);
+    await openDialog(api);
+    const d = within(dialog());
+
+    expect(d.getByText("Versions unavailable")).toBeTruthy();
+    expect(d.getByRole("alert").textContent).toContain(
+      "Could not load the version list. Check your connection and try again.",
+    );
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "Survival" } });
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Create profile" }).disabled).toBe(
+      true,
+    );
+
+    fireEvent.click(d.getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain("26.3"),
+    );
+    expect(api.versionCatalog).toHaveBeenCalledTimes(2);
+    expect(d.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Create profile" }).disabled).toBe(
+      false,
+    );
+  });
+
+  it("shows an empty-list message and keeps submit disabled when no versions match the filter", async () => {
+    await saveUiMode("advanced");
+    const api = makeApi(empty);
+    api.versionCatalog.mockResolvedValueOnce({
+      ...CATALOG,
+      entries: [CATALOG.entries[1]],
+      latestSnapshot: null,
+    });
+    await openDialog(api);
+    const d = within(dialog());
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "Snap" } });
+
+    fireEvent.click(d.getByRole("radio", { name: "Snapshots" }));
+    expect(await d.findByText("No versions in this list.")).toBeTruthy();
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Create profile" }).disabled).toBe(
+      true,
+    );
+  });
+
+  it("shows loaderCheckFailed and blocks submission when loaderOptions fails", async () => {
+    const api = makeApi(empty);
+    api.loaderOptions.mockRejectedValueOnce(new Error("network down"));
+    await openDialog(api);
+    const d = within(dialog());
+
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "Modded" } });
+    fireEvent.click(d.getByRole("radio", { name: "Modded" }));
+
+    expect(
+      await d.findByText("Could not check which loaders fit. Check your connection."),
+    ).toBeTruthy();
+    expect(d.getByRole<HTMLButtonElement>("radio", { name: "Fabric" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Create profile" }).disabled).toBe(
+      true,
+    );
+  });
+
+  it("allows selecting a non-recommended loader version in Advanced mode and warns on stale loader options", async () => {
+    await saveUiMode("advanced");
+    const api = makeApi(empty);
+    api.loaderOptions.mockResolvedValueOnce(
+      OPTIONS.map((o) => (o.loader === "fabric" ? { ...o, stale: true } : o)),
+    );
+    await openDialog(api);
+    const d = within(dialog());
+
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "Pinned Fabric" } });
+    fireEvent.click(d.getByRole("radio", { name: "Modded" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Loader version" }).textContent).toContain("0.19.5"),
+    );
+    expect(d.getByText("Offline: using a saved list of versions.")).toBeTruthy();
+
+    fireEvent.click(d.getByRole("combobox", { name: "Loader version" }));
+    const nonRecommended = await screen.findByRole("option", { name: /0\.18\.0/ });
+    fireEvent.pointerDown(nonRecommended);
+    fireEvent.click(nonRecommended);
+
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Loader version" }).textContent).toContain("0.18.0"),
+    );
+    fireEvent.click(d.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
+    expect(api.create.mock.calls[0][0]).toEqual({
+      name: "Pinned Fabric",
+      minecraft: "26.3",
+      profile: {
+        type: "modded",
+        loader: "fabric",
+        loader_version: { mode: "pinned", version: "0.18.0" },
+      },
+    });
+  });
+
+  it("locks the form and dialog while api.create is in flight", async () => {
+    const api = makeApi(empty);
+    let resolveCreate!: (snap: ProfilesSnapshot) => void;
+    api.create.mockImplementationOnce(
+      () =>
+        new Promise<ProfilesSnapshot>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    await openDialog(api);
+    const d = within(dialog());
+
+    fireEvent.change(d.getByLabelText("Name"), { target: { value: "InFlight" } });
+    const submitBtn = await waitFor(() => {
+      const btn = d.getByRole<HTMLButtonElement>("button", { name: "Create profile" });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    fireEvent.click(submitBtn);
+
+    const creatingBtn = await d.findByRole<HTMLButtonElement>("button", { name: "Creating…" });
+    expect(creatingBtn.disabled).toBe(true);
+    expect(d.getByLabelText<HTMLInputElement>("Name").disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("radio", { name: "Vanilla" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(true);
+
+    // Escape and duplicate form submissions are ignored while submitting.
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+    const form = dialog().querySelector("form");
+    expect(form).toBeTruthy();
+    if (form) {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    }
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(api.create).toHaveBeenCalledTimes(1);
+
+    const created = profile({ id: "inflight", name: "InFlight", minecraft: "26.3" });
+    await act(async () => {
+      resolveCreate({ profiles: [created], selected: "inflight", totalPlaytimeSeconds: 0 });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });

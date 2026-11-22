@@ -1,23 +1,20 @@
 // Small helpers for finding the launcher's controls by what a person sees.
 
 import type { Locator, Page } from "@playwright/test";
+import { type Params, renderMessage } from "@/lib/i18n/core";
 import { en } from "@/locales/en";
 import { ru } from "@/locales/ru";
 
 type EnKey = keyof typeof en;
 
 /** English catalog text with `{params}` filled in (the suite runs in English unless a test switches). */
-export function text(key: EnKey, params: Record<string, string | number> = {}): string {
-  const raw = en[key];
-  if (typeof raw !== "string") throw new Error(`"${key}" is not a plain message`);
-  return raw.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? `{${k}}`));
+export function text(key: EnKey, params: Params = {}): string {
+  return renderMessage("en", en[key], params);
 }
 
 /** Russian catalog text with `{params}` filled in. */
-export function textRu(key: keyof typeof ru, params: Record<string, string | number> = {}): string {
-  const raw = ru[key];
-  if (typeof raw !== "string") throw new Error(`"${String(key)}" is not a plain message`);
-  return raw.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? `{${k}}`));
+export function textRu(key: keyof typeof ru, params: Params = {}): string {
+  return renderMessage("ru", ru[key], params);
 }
 
 export const dock = (page: Page) => page.getByRole("navigation", { name: "Clade" });

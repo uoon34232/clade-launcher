@@ -99,9 +99,6 @@ pub fn run() {
     });
     startup::preview_requested(root.path());
 
-    // Before any WebView exists: choose the bundled runtime if present (unless on a UNC share).
-    let webview_source = webview::select_runtime(&root);
-
     root.ensure_data_dir().unwrap_or_else(|e| {
         let id = match e {
             portable::root::RootError::NotWritable(_) => StartupMessage::FolderNotWritable,
@@ -136,6 +133,10 @@ pub fn run() {
         startup::fail(id, Some(root.path()), Some(&e.to_string()))
     });
     startup::init_logging(&root);
+
+    // Single-threaded under `RootLock` with logging ready, and before any worker threads or
+    // WebView exist: choose the bundled runtime if present (unless on a UNC share).
+    let webview_source = webview::select_runtime(&root);
 
     let workers = std::thread::available_parallelism()
         .map(usize::from)
@@ -298,6 +299,7 @@ pub fn run() {
                 }
                 let launch = window.app_handle().state::<launch_cmd::LaunchState>();
                 if launch.close_requested() {
+                    stop_pending_embed_watch(window.app_handle());
                     api.prevent_close();
                     let _ = window.hide();
                     glass::suspend(window.app_handle());
@@ -331,6 +333,7 @@ pub fn run() {
             ui_settings::set_last_phrase,
             ui_settings::set_language,
             ui_settings::set_ui_mode,
+            ui_settings::set_theme,
             ui_settings::set_reduced_motion,
             ui_settings::set_transparency,
             glass::get_glass_status,
@@ -390,6 +393,14 @@ pub fn run() {
             game_embed::toggle_game_maximize
         ])
         .setup(move |app| {
+            // Start the permanent WinRT appearance watcher before creating the window so initial
+            // light/dark OS preference sets `backgroundColor` prior to the first painted frame.
+            let initial_system_dark = glass::watch_system_preference(app.handle().clone());
+            let initial_dark = glass::wanted_dark(
+                &app.state::<ui_settings::SettingsState>().theme(),
+                initial_system_dark,
+            );
+
             // The window is created here, not from tauri.conf.json, because only the builder
             // accepts an absolute WebView2 profile directory (the config option is always
             // resolved under %LOCALAPPDATA%).
@@ -414,6 +425,7 @@ pub fn run() {
             if placement.is_some() {
                 cfg.center = false;
             }
+            cfg.background_color = Some(glass::opaque_background(initial_dark));
             let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_dir)
                 .maximizable(false)
@@ -445,8 +457,6 @@ pub fn run() {
             });
 
             launch_cmd::reattach_live_sessions(app.handle());
-            // Cosmetic only: a failure here is logged and Clade simply stays opaque.
-            glass::watch_system_preference(app.handle().clone());
             glass::refresh(app.handle());
             Ok(())
         })
@@ -454,6 +464,19 @@ pub fn run() {
     if let Err(e) = result {
         tracing::error!(error = %e, "the application failed to run");
         startup::fail(StartupMessage::WindowFailed, Some(&root_for_errors), None);
+    }
+}
+
+/// Stops a pending pre-attach framed-embed monitor if the launcher window is hiding while waiting
+/// for the game window to appear, so it does not keep polling or reattach after a later wake.
+fn stop_pending_embed_watch(app: &tauri::AppHandle) {
+    if let Some(embed) = app.try_state::<game_embed::EmbedState>() {
+        let status = embed.status();
+        if status.watching {
+            if let Some(instance_id) = status.instance_id {
+                game_embed::end_session(app, &instance_id);
+            }
+        }
     }
 }
 

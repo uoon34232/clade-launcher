@@ -242,6 +242,9 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
       ctx = createContext();
       if (!ctx) return false;
       master = ctx.createGain();
+      const initialGain = settings.volume * MASTER_CEILING;
+      master.gain.value = initialGain;
+      master.gain.setValueAtTime(initialGain, ctx.currentTime);
       const compressor = ctx.createDynamicsCompressor();
       master.connect(compressor).connect(ctx.destination);
       noise = noiseBuffer(ctx);
@@ -273,44 +276,50 @@ export function createSoundService(options: SoundServiceOptions = {}): SoundServ
         return false;
       }
       if (!ensureAudio() || !ctx || !master || !noise) return false;
-      const scheduleVoice = () => {
-        if (!ctx || !master || !noise || !settings.enabled || settings.volume <= 0) return;
-        try {
-          applyVolume();
-          VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
-          scheduleIdleSuspend(DURATION[kind]);
-        } catch {
-          /* audio is a nicety: never let it break the UI */
+      if (resumeInFlight) return false;
+      const scheduleVoice = (): boolean => {
+        if (!ctx || !master || !noise) return false;
+        if (!settings.enabled || settings.volume <= 0) {
+          suspendContext();
+          return false;
         }
+        applyVolume();
+        VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
+        scheduleIdleSuspend(DURATION[kind]);
+        return true;
       };
       try {
         if (ctx.state === "suspended") {
           clearIdleSuspend();
-          if (!resumeInFlight) {
-            resumeInFlight = true;
-            const resuming = ctx.resume();
-            if ((ctx.state as AudioContextState) === "running") {
-              resumeInFlight = false;
-              void Promise.resolve(resuming).catch(() => undefined);
-              applyVolume();
-              VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
-              scheduleIdleSuspend(DURATION[kind]);
-            } else {
-              void Promise.resolve(resuming).then(
-                () => {
-                  resumeInFlight = false;
+          resumeInFlight = true;
+          let resuming: Promise<void> | void;
+          try {
+            resuming = ctx.resume();
+          } catch (err) {
+            resumeInFlight = false;
+            throw err;
+          }
+          if ((ctx.state as AudioContextState) === "running") {
+            resumeInFlight = false;
+            void Promise.resolve(resuming).catch(() => undefined);
+            if (!scheduleVoice()) return false;
+          } else {
+            void Promise.resolve(resuming).then(
+              () => {
+                resumeInFlight = false;
+                try {
                   scheduleVoice();
-                },
-                () => {
-                  resumeInFlight = false;
-                },
-              );
-            }
+                } catch {
+                  /* audio is a nicety: never let it break the UI */
+                }
+              },
+              () => {
+                resumeInFlight = false;
+              },
+            );
           }
         } else {
-          applyVolume();
-          VOICES[kind](ctx, master, noise, ctx.currentTime + 0.005);
-          scheduleIdleSuspend(DURATION[kind]);
+          if (!scheduleVoice()) return false;
         }
       } catch {
         return false;

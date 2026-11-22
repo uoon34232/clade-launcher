@@ -4,7 +4,20 @@ import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "dist-portable", "shots", "src-tauri", "node_modules", "src/components/ui"] },
+  {
+    ignores: [
+      "dist",
+      "dist-portable",
+      "playwright-report",
+      "test-results",
+      "coverage",
+      "Clade-Launcher",
+      "shots",
+      "src-tauri",
+      "node_modules",
+      "src/components/ui",
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {

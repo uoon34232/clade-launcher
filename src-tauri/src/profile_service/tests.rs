@@ -124,6 +124,25 @@ impl Env {
             .unwrap();
     }
 
+    fn expire_token(&self, id: &str) {
+        let mut guard = self.vault.lock().unwrap();
+        let v = guard.as_mut().unwrap();
+        let mut secrets = v.account(id).unwrap().clone();
+        secrets.minecraft_token_expires_at = Some(NOW - 1);
+        v.set_account(id, secrets).unwrap();
+    }
+
+    fn account_status(&self, id: &str) -> AccountStatus {
+        self.accounts
+            .load()
+            .unwrap()
+            .accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .unwrap()
+            .status
+    }
+
     fn calls(&self) -> Vec<(Method, String)> {
         self.t.calls().into_iter().map(|c| (c.0, c.1)).collect()
     }
@@ -205,13 +224,24 @@ fn unknown_fields_are_ignored_and_bad_profiles_are_refused() {
 
 #[test]
 fn cape_ids_are_uuids_only() {
-    assert!(CapeId::new("2340C0E0-3A8C-4F5B-9F2E-0123456789AB").is_ok());
-    assert_eq!(
-        CapeId::new("../../etc").unwrap_err(),
-        ProfileServiceError::CapeNotOwned
-    );
-    assert!(CapeId::new("{\"capeId\":1}").is_err());
-    assert!(CapeId::new("").is_err());
+    let normalized = CapeId::new("2340C0E0-3A8C-4F5B-9F2E-0123456789AB").unwrap();
+    assert_eq!(normalized.as_str(), "2340c0e0-3a8c-4f5b-9f2e-0123456789ab");
+    for bad in [
+        "../../etc",
+        "{\"capeId\":1}",
+        "",
+        "2340C0E0-3A8C-4F5B-9F2E-0123456789AZ",
+        "2340C0E03-A8C-4F5B-9F2E-0123456789AB",
+        "2340C0E0_3A8C_4F5B_9F2E_0123456789AB",
+        "2340c0e0-3a8c-4f5b-9f2e-0123456789ab0",
+        "2340c0e03a8c4f5b9f2e0123456789ab",
+    ] {
+        assert_eq!(
+            CapeId::new(bad).unwrap_err(),
+            ProfileServiceError::CapeNotOwned,
+            "{bad}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------- skin validation
@@ -495,6 +525,189 @@ async fn hiding_the_cape_is_one_delete_and_needs_no_cape_id() {
     assert_eq!(env.t.calls()[0].3, "");
 }
 
+#[tokio::test]
+async fn bare_success_on_upload_skin_and_set_cape_reads_profile_once() {
+    // upload_skin with 204
+    let env = Env::new();
+    env.t.reply(SKINS, 204, "");
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, &slim(), ""));
+    let skin = SkinPng::validate(png(64, 64)).unwrap();
+    let p = env
+        .service()
+        .upload_skin("a", SkinVariant::Slim, skin)
+        .await
+        .unwrap();
+    assert_eq!(p.skin_variant, Some(SkinVariant::Slim));
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Post, SKINS.to_owned()),
+            (Method::Get, PROFILE.to_owned()),
+        ]
+    );
+
+    // upload_skin with empty 200
+    let env = Env::new();
+    env.t.reply(SKINS, 200, "");
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), ""));
+    let skin = SkinPng::validate(png(64, 64)).unwrap();
+    let p = env
+        .service()
+        .upload_skin("a", SkinVariant::Classic, skin)
+        .await
+        .unwrap();
+    assert_eq!(p.skin_variant, Some(SkinVariant::Classic));
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Post, SKINS.to_owned()),
+            (Method::Get, PROFILE.to_owned()),
+        ]
+    );
+
+    // set_cape(Some) with 204
+    let env = Env::new();
+    let capes = format!(
+        r#"{{"id":"{CAPE_1}","state":"INACTIVE","alias":"A"}},{{"id":"{CAPE_2}","state":"INACTIVE","alias":"B"}}"#
+    );
+    let after = format!(r#"{{"id":"{CAPE_2}","state":"ACTIVE","alias":"B"}}"#);
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &capes));
+    env.t.reply(CAPE_ACTIVE, 204, "");
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &after));
+    let p = env
+        .service()
+        .set_cape("a", Some(CapeId::new(CAPE_2).unwrap()))
+        .await
+        .unwrap();
+    assert!(p.capes[0].active);
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Get, PROFILE.to_owned()),
+            (Method::Put, CAPE_ACTIVE.to_owned()),
+            (Method::Get, PROFILE.to_owned()),
+        ]
+    );
+
+    // set_cape(Some) with whitespace-only 200
+    let env = Env::new();
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &capes));
+    env.t.reply(CAPE_ACTIVE, 200, "  \r\n");
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &after));
+    let p = env
+        .service()
+        .set_cape("a", Some(CapeId::new(CAPE_2).unwrap()))
+        .await
+        .unwrap();
+    assert!(p.capes[0].active);
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Get, PROFILE.to_owned()),
+            (Method::Put, CAPE_ACTIVE.to_owned()),
+            (Method::Get, PROFILE.to_owned()),
+        ]
+    );
+
+    // set_cape(None) with 204
+    let env = Env::new();
+    env.t.reply(CAPE_ACTIVE, 204, "");
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), ""));
+    let p = env.service().set_cape("a", None).await.unwrap();
+    assert!(p.capes.is_empty());
+    assert_eq!(
+        env.calls(),
+        vec![
+            (Method::Delete, CAPE_ACTIVE.to_owned()),
+            (Method::Get, PROFILE.to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn set_cape_shares_one_refresh_budget_between_read_and_put() {
+    let capes = format!(r#"{{"id":"{CAPE_2}","state":"INACTIVE","alias":"B"}}"#);
+    let after = format!(r#"{{"id":"{CAPE_2}","state":"ACTIVE","alias":"B"}}"#);
+
+    // 1. GET hits 401 -> refreshes once -> GET retry succeeds -> PUT hits 401 -> Unauthorized, no second refresh
+    let env = Env::new();
+    env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+    script_refresh(&env.t, "FRESH-CAPE-TOKEN-1", RAW_A);
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &capes));
+    env.t.reply(CAPE_ACTIVE, 401, r#"{"error":"still_401"}"#);
+    let e = env
+        .service()
+        .set_cape("a", Some(CapeId::new(CAPE_2).unwrap()))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ProfileServiceError::Unauthorized);
+    assert_eq!(
+        env.t
+            .calls()
+            .iter()
+            .filter(|(_, u, _, _)| u == ENDPOINTS[1])
+            .count(),
+        1,
+        "GET 401 consumed the single refresh budget"
+    );
+    let cape_calls: Vec<_> = env
+        .t
+        .calls()
+        .into_iter()
+        .filter(|(_, u, _, _)| u == CAPE_ACTIVE)
+        .collect();
+    assert_eq!(cape_calls.len(), 1, "PUT must not refresh or retry");
+    assert!(cape_calls[0]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == "Bearer FRESH-CAPE-TOKEN-1"));
+
+    // 2. GET hits 200 -> PUT hits 401 -> refreshes once -> retries PUT once with fresh token
+    let env = Env::new();
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &classic(), &capes));
+    env.t.reply(CAPE_ACTIVE, 401, r#"{"error":"expired"}"#);
+    script_refresh(&env.t, "FRESH-CAPE-TOKEN-2", RAW_A);
+    env.t
+        .reply(CAPE_ACTIVE, 200, profile_json(RAW_A, &classic(), &after));
+    let p = env
+        .service()
+        .set_cape("a", Some(CapeId::new(CAPE_2).unwrap()))
+        .await
+        .unwrap();
+    assert!(p.capes[0].active);
+    assert_eq!(
+        env.t
+            .calls()
+            .iter()
+            .filter(|(_, u, _, _)| u == ENDPOINTS[1])
+            .count(),
+        1
+    );
+    let cape_calls: Vec<_> = env
+        .t
+        .calls()
+        .into_iter()
+        .filter(|(_, u, _, _)| u == CAPE_ACTIVE)
+        .collect();
+    assert_eq!(cape_calls.len(), 2);
+    assert!(cape_calls[0]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == &format!("Bearer {TOKEN}")));
+    assert!(cape_calls[1]
+        .2
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == "Bearer FRESH-CAPE-TOKEN-2"));
+}
+
 fn script_refresh(t: &FakeTransport, fresh_mc_token: &str, raw_uuid: &str) {
     t.reply(
         ENDPOINTS[1],
@@ -560,6 +773,29 @@ async fn failures_are_mapped_to_stable_codes_and_changes_are_never_retried() {
         .unwrap_err();
     assert_eq!(e.code(), "invalid_skin");
     assert_eq!(env.t.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn read_400_and_oversized_responses_map_to_bad_response() {
+    let env = Env::new();
+    env.t.reply(PROFILE, 400, r#"{"error":"bad request"}"#);
+    let e = env.service().profile("a").await.unwrap_err();
+    assert_eq!(
+        e,
+        ProfileServiceError::BadResponse("the request was refused")
+    );
+    assert_eq!(e.code(), "bad_response");
+    assert_eq!(env.t.calls().len(), 1);
+
+    let env = Env::new();
+    env.t
+        .reply(PROFILE, 200, vec![b' '; MAX_RESPONSE_BYTES + 1]);
+    let e = env.service().profile("a").await.unwrap_err();
+    assert_eq!(
+        e,
+        ProfileServiceError::BadResponse("the answer was too large")
+    );
+    assert_eq!(e.code(), "bad_response");
 }
 
 #[tokio::test]
@@ -704,6 +940,133 @@ fn auth_errors_map_no_java_profile_and_unknown_account_accurately() {
         auth_error(&AuthError::UnknownAccount),
         ProfileServiceError::UnknownAccount
     );
+    assert_eq!(
+        auth_error(&AuthError::VaultLocked),
+        ProfileServiceError::VaultLocked
+    );
+    assert_eq!(
+        auth_error(&AuthError::NeedsSignIn(ReauthReason::Revoked)),
+        ProfileServiceError::NeedsSignIn
+    );
+    assert_eq!(
+        auth_error(&AuthError::Offline),
+        ProfileServiceError::Offline
+    );
+    assert_eq!(
+        auth_error(&AuthError::Storage("io".into())),
+        ProfileServiceError::Storage
+    );
+    assert_eq!(
+        auth_error(&AuthError::ApprovalRequired),
+        ProfileServiceError::Unauthorized
+    );
+    assert_eq!(
+        auth_error(&AuthError::WrongAccount),
+        ProfileServiceError::Unauthorized
+    );
+}
+
+#[tokio::test]
+async fn refresh_failures_through_service_map_errors_and_reauth_state() {
+    // 1. Expired cached token -> invalid_grant -> NeedsSignIn & account marked NeedsReauth
+    let env = Env::new();
+    env.expire_token("a");
+    env.t
+        .reply(ENDPOINTS[1], 400, r#"{"error":"invalid_grant"}"#);
+    assert_eq!(
+        env.service().profile("a").await.unwrap_err(),
+        ProfileServiceError::NeedsSignIn
+    );
+    assert_eq!(
+        env.account_status("a"),
+        AccountStatus::NeedsReauth {
+            reason: ReauthReason::Revoked,
+            since: NOW,
+        }
+    );
+    assert_eq!(
+        env.calls(),
+        vec![(Method::Post, ENDPOINTS[1].to_owned())],
+        "no profile call when cached token refresh fails"
+    );
+
+    // 2. 401 forced refresh -> invalid_grant -> NeedsSignIn & account marked NeedsReauth
+    let env = Env::new();
+    env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+    env.t
+        .reply(ENDPOINTS[1], 400, r#"{"error":"invalid_grant"}"#);
+    assert_eq!(
+        env.service().profile("a").await.unwrap_err(),
+        ProfileServiceError::NeedsSignIn
+    );
+    assert_eq!(
+        env.account_status("a"),
+        AccountStatus::NeedsReauth {
+            reason: ReauthReason::Revoked,
+            since: NOW,
+        }
+    );
+
+    // 3. Expired cached token -> network failure -> Offline without marking NeedsReauth
+    let env = Env::new();
+    env.expire_token("a");
+    env.t.offline(ENDPOINTS[1]);
+    assert_eq!(
+        env.service().profile("a").await.unwrap_err(),
+        ProfileServiceError::Offline
+    );
+    assert_eq!(env.account_status("a"), AccountStatus::Ready);
+
+    // 4. 401 forced refresh -> network failure -> Offline without marking NeedsReauth
+    let env = Env::new();
+    env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+    env.t.offline(ENDPOINTS[1]);
+    assert_eq!(
+        env.service().profile("a").await.unwrap_err(),
+        ProfileServiceError::Offline
+    );
+    assert_eq!(env.account_status("a"), AccountStatus::Ready);
+
+    // 5. 403 on login_with_xbox during refresh (both expired and 401) -> Unauthorized, stays Ready
+    for force_via_401 in [false, true] {
+        let env = Env::new();
+        if force_via_401 {
+            env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+        } else {
+            env.expire_token("a");
+        }
+        env.t.reply(
+            ENDPOINTS[1],
+            200,
+            r#"{"access_token":"MS-ACCESS","refresh_token":"REFRESH-2","expires_in":3600}"#,
+        );
+        env.t.reply(
+            ENDPOINTS[2],
+            200,
+            r#"{"Token":"XBL","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        env.t.reply(
+            ENDPOINTS[3],
+            200,
+            r#"{"Token":"XSTS","DisplayClaims":{"xui":[{"uhs":"99"}]}}"#,
+        );
+        env.t.reply(ENDPOINTS[4], 403, "");
+        assert_eq!(
+            env.service().profile("a").await.unwrap_err(),
+            ProfileServiceError::Unauthorized
+        );
+        assert_eq!(env.account_status("a"), AccountStatus::Ready);
+    }
+
+    // 6. Wrong account returned during refresh -> Unauthorized, stays Ready
+    let env = Env::new();
+    env.expire_token("a");
+    script_refresh(&env.t, "FRESH-WRONG", "0000000000004000800000000000b002");
+    assert_eq!(
+        env.service().profile("a").await.unwrap_err(),
+        ProfileServiceError::Unauthorized
+    );
+    assert_eq!(env.account_status("a"), AccountStatus::Ready);
 }
 
 #[tokio::test]
@@ -788,16 +1151,68 @@ async fn a_locked_vault_gives_the_unlock_error_and_sends_nothing() {
 #[tokio::test]
 async fn the_token_is_only_ever_sent_to_the_minecraft_services_host() {
     let env = Env::new();
-    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", ""));
-    env.t.reply(SKIN_ACTIVE, 200, profile_json(RAW_A, "", ""));
+    let capes = format!(r#"{{"id":"{CAPE_1}","state":"INACTIVE","alias":"A"}}"#);
+    let after_cape = format!(r#"{{"id":"{CAPE_1}","state":"ACTIVE","alias":"A"}}"#);
+
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", &capes));
     env.service().profile("a").await.unwrap();
+
+    env.t
+        .reply(SKINS, 200, profile_json(RAW_A, &slim(), &capes));
+    let skin = SkinPng::validate(png(64, 64)).unwrap();
+    env.service()
+        .upload_skin("a", SkinVariant::Slim, skin)
+        .await
+        .unwrap();
+
+    env.t
+        .reply(PROFILE, 200, profile_json(RAW_A, &slim(), &capes));
+    env.t
+        .reply(CAPE_ACTIVE, 200, profile_json(RAW_A, &slim(), &after_cape));
+    env.service()
+        .set_cape("a", Some(CapeId::new(CAPE_1).unwrap()))
+        .await
+        .unwrap();
+
+    env.t
+        .reply(CAPE_ACTIVE, 200, profile_json(RAW_A, &slim(), &capes));
+    env.service().set_cape("a", None).await.unwrap();
+
+    env.t
+        .reply(SKIN_ACTIVE, 200, profile_json(RAW_A, "", &capes));
     env.service().reset_skin("a").await.unwrap();
-    for (_, url, headers, _) in env.t.calls() {
-        assert!(
-            url.starts_with("https://api.minecraftservices.com/minecraft/profile"),
-            "{url}"
-        );
-        assert!(headers.iter().any(|h| h.0 == "Authorization"));
+
+    // Forced refresh exercises Microsoft/Xbox endpoints and login_with_xbox
+    env.t.reply(PROFILE, 401, r#"{"error":"expired"}"#);
+    script_refresh(&env.t, "FRESH-ISOLATED-TOKEN", RAW_A);
+    env.t.reply(PROFILE, 200, profile_json(RAW_A, "", &capes));
+    env.service().profile("a").await.unwrap();
+
+    let calls = env.t.calls();
+    assert!(
+        ENDPOINTS[1..=4]
+            .iter()
+            .all(|ep| calls.iter().any(|(_, url, _, _)| url == ep)),
+        "forced refresh must exercise all Microsoft/Xbox endpoints"
+    );
+    for (_, url, headers, body) in calls {
+        assert!(url.starts_with("https://"), "{url}");
+        if url.starts_with("https://api.minecraftservices.com/minecraft/profile") {
+            assert!(headers.iter().any(|h| h.0 == "Authorization"));
+        } else {
+            assert!(
+                !headers.iter().any(|(k, v)| {
+                    k.eq_ignore_ascii_case("authorization")
+                        || v.contains(TOKEN)
+                        || v.contains("FRESH-ISOLATED-TOKEN")
+                }),
+                "Minecraft token leaked in headers to {url}"
+            );
+            assert!(
+                !body.contains(TOKEN) && !body.contains("FRESH-ISOLATED-TOKEN"),
+                "Minecraft token leaked in body to {url}"
+            );
+        }
     }
 }
 
@@ -823,18 +1238,24 @@ async fn no_error_can_print_the_token() {
         let text = format!("{e:?} {e} {} {:?}", e.code(), e.coded());
         assert!(!text.contains("FAKE-") && !text.to_lowercase().contains("bearer"));
     }
-    // and a failed request leaves no trace of it either
+    // Live 401 -> refresh -> second 401 echoing tokens in body must not leak via error or CodedError
     let env = Env::new();
     env.t.reply(PROFILE, 401, TOKEN);
+    script_refresh(&env.t, "FRESH-TOKEN", RAW_A);
+    env.t.reply(PROFILE, 401, format!("{TOKEN} FRESH-TOKEN"));
     let e = env.service().profile("a").await.unwrap_err();
-    assert!(!format!("{e:?} {e}").contains(TOKEN));
-    let _ = HttpRequest {
-        method: Method::Get,
-        url: Url::parse(PROFILE).unwrap(),
-        headers: vec![("Authorization", format!("Bearer {TOKEN}"))],
-        body: Vec::new(),
-        max_response_bytes: 1,
-    };
+    assert_eq!(e, ProfileServiceError::Unauthorized);
+    let text = format!("{e:?} {e} {:?}", e.coded());
+    assert!(!text.contains(TOKEN) && !text.contains("FRESH-TOKEN"));
+
+    // Live non-401 error statuses echoing TOKEN in body must not leak via error or CodedError
+    for status in [400, 403, 500] {
+        let env = Env::new();
+        env.t.reply(PROFILE, status, TOKEN);
+        let e = env.service().profile("a").await.unwrap_err();
+        let text = format!("{e:?} {e} {:?}", e.coded());
+        assert!(!text.contains(TOKEN), "status {status}");
+    }
 }
 
 #[test]

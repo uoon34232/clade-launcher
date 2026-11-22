@@ -14,6 +14,7 @@
 //! launch executable (`javaw.exe`, falling back to `java.exe`) still matches the hash recorded at
 //! install time ([`resolve_java`]).
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 
@@ -37,6 +38,7 @@ const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const JAVAW_EXE: &str = "bin/javaw.exe";
 const JAVA_EXE: &str = "bin/java.exe";
 const STAGING: &str = "java-staging";
+const RUNTIME_MANIFEST: &str = "runtime.json";
 /// Written beside `runtime.json` at install time: every file of the runtime with the SHA-1 and size
 /// Mojang's manifest gave for it. It is what lets "Verify files" check the whole runtime, offline.
 const FILES_RECORD: &str = "runtime-files.json";
@@ -124,6 +126,60 @@ pub fn parse_index(body: &[u8], component: &str) -> Result<RuntimeRelease, JavaE
     })
 }
 
+/// Tracks case-folded runtime paths so manifests cannot collide on case-insensitive Windows
+/// filesystems or overwrite Clade's own runtime metadata files.
+struct PathCollisionSet {
+    files: HashSet<String>,
+    explicit_dirs: HashSet<String>,
+    implicit_dirs: HashSet<String>,
+}
+
+impl PathCollisionSet {
+    fn new() -> Self {
+        Self {
+            files: HashSet::new(),
+            explicit_dirs: HashSet::new(),
+            implicit_dirs: HashSet::new(),
+        }
+    }
+
+    fn insert(&mut self, path: &RelPath, is_dir: bool) -> Result<(), &'static str> {
+        let folded = path.fold_case();
+        if folded == RUNTIME_MANIFEST || folded == FILES_RECORD {
+            return Err("reserved metadata filename");
+        }
+        let mut prefix = String::new();
+        let mut comps = path.components().peekable();
+        while let Some(comp) = comps.next() {
+            if comps.peek().is_none() {
+                break;
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(&comp.to_lowercase());
+            if prefix == RUNTIME_MANIFEST || prefix == FILES_RECORD {
+                return Err("reserved metadata filename");
+            }
+            if self.files.contains(&prefix) {
+                return Err("case-insensitive path collision");
+            }
+            self.implicit_dirs.insert(prefix.clone());
+        }
+        if is_dir {
+            if self.files.contains(&folded) || !self.explicit_dirs.insert(folded) {
+                return Err("case-insensitive path collision");
+            }
+        } else if self.explicit_dirs.contains(&folded)
+            || self.implicit_dirs.contains(&folded)
+            || !self.files.insert(folded)
+        {
+            return Err("case-insensitive path collision");
+        }
+        Ok(())
+    }
+}
+
 /// Parses a component manifest. Links are refused (a runtime has none on Windows, and a link
 /// is how an archive escapes its folder).
 pub fn parse_files(body: &[u8]) -> Result<(Vec<RelPath>, Vec<RuntimeFile>), JavaError> {
@@ -136,11 +192,16 @@ pub fn parse_files(body: &[u8]) -> Result<(Vec<RelPath>, Vec<RuntimeFile>), Java
         return Err(JavaError::Manifest("too many files"));
     }
     let (mut dirs, mut out, mut total) = (Vec::new(), Vec::new(), 0u64);
+    let mut seen = PathCollisionSet::new();
     for (name, entry) in files {
         let path = RelPath::new(name).map_err(|_| JavaError::Manifest("unsafe path"))?;
         match entry.get("type").and_then(Value::as_str) {
-            Some("directory") => dirs.push(path),
+            Some("directory") => {
+                seen.insert(&path, true).map_err(JavaError::Manifest)?;
+                dirs.push(path);
+            }
             Some("file") => {
+                seen.insert(&path, false).map_err(JavaError::Manifest)?;
                 let raw = entry
                     .pointer("/downloads/raw")
                     .and_then(download_of)
@@ -297,10 +358,14 @@ pub async fn install_runtime<S: Streamer>(
     tokio::task::spawn_blocking(move || -> Result<ManagedJava, JavaError> {
         fsutil::reject_links_between(root.path(), &staging)?;
         let java_exe = RelPath::new(chosen_exe).map_err(|_| JavaError::Manifest("bad exe path"))?;
-        let java_exe_sha256 = sha256_hex(&java_exe.to_path(&staging))?;
+        let java_exe_path = java_exe.to_path(&staging);
+        fsutil::reject_links_between(root.path(), &java_exe_path)?;
+        let java_exe_sha256 = sha256_hex(&java_exe_path)?;
         let (java_cli_exe, java_cli_exe_sha256) = if has_javaw && has_java {
             let cli = RelPath::new(JAVA_EXE).map_err(|_| JavaError::Manifest("bad exe path"))?;
-            let sha = sha256_hex(&staging.join(JAVA_EXE))?;
+            let cli_path = cli.to_path(&staging);
+            fsutil::reject_links_between(root.path(), &cli_path)?;
+            let sha = sha256_hex(&cli_path)?;
             (Some(cli), Some(sha))
         } else {
             (None, None)
@@ -318,7 +383,7 @@ pub async fn install_runtime<S: Streamer>(
         };
         atomic_write(&staging.join(FILES_RECORD), &record_bytes(&files)?)?;
         atomic_write(
-            &staging.join("runtime.json"),
+            &staging.join(RUNTIME_MANIFEST),
             &serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
         )?;
         if let Some(parent) = target.parent() {
@@ -374,18 +439,22 @@ fn record_bytes(files: &[RuntimeFile]) -> io::Result<Vec<u8>> {
 /// entry means the whole record is not trusted).
 pub fn recorded_files(root: &PortableRoot, id: &str) -> Option<Vec<RuntimeFile>> {
     let dir = runtime_dir(root, id).ok()?;
-    fsutil::reject_links_between(root.path(), &dir).ok()?;
-    let bytes = fsutil::read_bounded(&dir.join(FILES_RECORD), MAX_MANIFEST_BYTES as u64).ok()?;
+    let record_path = dir.join(FILES_RECORD);
+    fsutil::reject_links_between(root.path(), &record_path).ok()?;
+    let bytes = fsutil::read_bounded(&record_path, MAX_MANIFEST_BYTES as u64).ok()?;
     let record: FilesRecord = serde_json::from_slice(&bytes).ok()?;
     if record.schema != 1 || record.files.len() > MAX_FILES {
         return None;
     }
+    let mut seen = PathCollisionSet::new();
     record
         .files
         .into_iter()
         .map(|f| {
+            let path = RelPath::new(&f.path).ok()?;
+            seen.insert(&path, false).ok()?;
             Some(RuntimeFile {
-                path: RelPath::new(&f.path).ok()?,
+                path,
                 download: download_of(&serde_json::json!({
                     "sha1": f.sha1,
                     "size": f.size,
@@ -679,6 +748,8 @@ mod tests {
             "not json".to_owned(),
             r#"{"schema":1,"files":[{"path":"../x.dll","url":"https://piston-data.mojang.com/x","sha1":"0123456789abcdef0123456789abcdef01234567","size":1}]}"#.to_owned(),
             r#"{"schema":1,"files":[{"path":"a.dll","url":"https://piston-data.mojang.com/x","sha1":"zz","size":1}]}"#.to_owned(),
+            r#"{"schema":1,"files":[{"path":"runtime.json","url":"https://piston-data.mojang.com/x","sha1":"0123456789abcdef0123456789abcdef01234567","size":1}]}"#.to_owned(),
+            r#"{"schema":1,"files":[{"path":"a.dll","url":"https://piston-data.mojang.com/x","sha1":"0123456789abcdef0123456789abcdef01234567","size":1},{"path":"A.dll","url":"https://piston-data.mojang.com/x","sha1":"0123456789abcdef0123456789abcdef01234567","size":1}]}"#.to_owned(),
         ] {
             fs::write(&path, bad).unwrap();
             assert!(recorded_files(&w.root, &java.id).is_none());
@@ -793,6 +864,75 @@ mod tests {
             parse_files(br#"{"files":{"a":{"type":"directory"}}}"#).is_err(),
             "must contain javaw.exe or java.exe"
         );
+        // Case-insensitive collisions (file/file, dir/dir, dir/file, parent-dir/file).
+        assert!(parse_files(make("bin/JAVA.EXE", ok.clone()).as_bytes()).is_err());
+        assert!(parse_files(
+            json!({"files": {
+                "bin/java.exe": ok.clone(),
+                "lib/a.dll": ok.clone(),
+                "lib/A.dll": ok.clone()
+            }})
+            .to_string()
+            .as_bytes()
+        )
+        .is_err());
+        assert!(parse_files(
+            json!({"files": {
+                "bin/java.exe": ok.clone(),
+                "lib": {"type": "directory"},
+                "LIB": {"type": "directory"}
+            }})
+            .to_string()
+            .as_bytes()
+        )
+        .is_err());
+        assert!(parse_files(
+            json!({"files": {
+                "bin/java.exe": ok.clone(),
+                "lib": {"type": "directory"},
+                "LIB": ok.clone()
+            }})
+            .to_string()
+            .as_bytes()
+        )
+        .is_err());
+        assert!(parse_files(
+            json!({"files": {
+                "bin/java.exe": ok.clone(),
+                "BIN": ok.clone()
+            }})
+            .to_string()
+            .as_bytes()
+        )
+        .is_err());
+        assert!(parse_files(
+            json!({"files": {
+                "bin/java.exe": ok.clone(),
+                "lib": ok.clone(),
+                "LIB/a.dll": ok.clone()
+            }})
+            .to_string()
+            .as_bytes()
+        )
+        .is_err());
+        // Reserved metadata filenames (case-insensitive, file or directory).
+        for reserved in [
+            "runtime.json",
+            "RUNTIME.JSON",
+            "runtime-files.json",
+            "Runtime-Files.json",
+            "runtime.json/sub",
+            "runtime-files.json/sub",
+        ] {
+            assert!(
+                parse_files(make(reserved, ok.clone()).as_bytes()).is_err(),
+                "reserved file {reserved} must be refused"
+            );
+            assert!(
+                parse_files(make(reserved, json!({"type":"directory"})).as_bytes()).is_err(),
+                "reserved dir {reserved} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -876,5 +1016,66 @@ mod tests {
         let java = install_runtime(&root, &plan, 8, &dl, 2).await.unwrap();
         assert!(java.exe.ends_with("bin/java.exe") || java.exe.ends_with("bin\\java.exe"));
         assert_eq!(resolve_cli_java_exe(&root, &java).unwrap(), java.exe);
+    }
+
+    #[test]
+    fn find_installed_handles_mixed_numeric_and_alphanumeric_prerelease_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+        let exe_bytes = b"MZ javaw";
+        let sha = hex::encode(Sha256::digest(exe_bytes));
+
+        for ver in ["21.0.1-2", "21.0.1-10", "21.0.1-1a", "21.0.1-beta.1"] {
+            let id = runtime_id("java-runtime-delta", ver);
+            let dir = runtime_dir(&root, &id).unwrap();
+            fs::create_dir_all(dir.join("bin")).unwrap();
+            fs::write(dir.join("bin").join("javaw.exe"), exe_bytes).unwrap();
+            write_manifest(
+                &root,
+                &RuntimeManifest {
+                    schema: 1,
+                    id,
+                    vendor: "mojang".into(),
+                    java_major: 21,
+                    arch: "x64".into(),
+                    java_exe: RelPath::new("bin/javaw.exe").unwrap(),
+                    java_exe_sha256: sha.clone(),
+                    java_cli_exe: None,
+                    java_cli_exe_sha256: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let picked = find_installed(&root, "java-runtime-delta").unwrap();
+        assert_eq!(picked.id, "java-runtime-delta--21.0.1-beta.1--windows-x64");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn recorded_files_refuses_reparse_point_at_files_record() {
+        let w = world();
+        let (_plan, java) = installed(&w).await;
+        let record_path = java.home.join(FILES_RECORD);
+        fs::remove_file(&record_path).unwrap();
+
+        let outside = w._dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let out = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&record_path)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert!(recorded_files(&w.root, &java.id).is_none());
     }
 }

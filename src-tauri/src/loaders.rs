@@ -437,13 +437,16 @@ pub fn choose_auto(offers: &[OfferedVersion]) -> Option<&OfferedVersion> {
     offers.iter().min_by_key(|o| o.channel) // min_by_key returns the first minimum: the newest of that channel
 }
 
-/// Orders loader version strings numerically (`54.1.9 < 54.1.14`), with any pre-release
-/// (`-beta.2`, `-rc1`) before its release.
+/// Orders loader version strings numerically (`54.1.9 < 54.1.14`), ignoring `+` build
+/// metadata and sorting pre-releases (`-beta.2`, `-rc1`) before their release with numeric
+/// pre-release tokens before alphanumeric ones.
 pub fn cmp_versions(a: &str, b: &str) -> Ordering {
     fn split(v: &str) -> (Vec<u64>, Option<&str>) {
-        let (core, pre) = match v.split_once('-') {
+        // SemVer `+` build metadata does not affect precedence and may contain `-` or dots.
+        let without_build = v.split_once('+').map_or(v, |(head, _)| head);
+        let (core, pre) = match without_build.split_once('-') {
             Some((c, p)) => (c, Some(p)),
-            None => (v, None),
+            None => (without_build, None),
         };
         (
             core.split('.')
@@ -478,7 +481,9 @@ pub fn cmp_versions(a: &str, b: &str) -> Ordering {
                     (Some(p), Some(q)) => {
                         let o = match (p.parse::<u64>(), q.parse::<u64>()) {
                             (Ok(m), Ok(n)) => m.cmp(&n),
-                            _ => p.cmp(q),
+                            (Ok(_), Err(_)) => Ordering::Less,
+                            (Err(_), Ok(_)) => Ordering::Greater,
+                            (Err(_), Err(_)) => p.cmp(q),
                         };
                         if o != Ordering::Equal {
                             return o;
@@ -687,6 +692,74 @@ mod tests {
         assert_eq!(cmp_versions("0.24.0", "0.20.0"), Greater);
         assert_eq!(cmp_versions("21.4.158", "21.4.158"), Equal);
         assert_eq!(cmp_versions("26.3.0.48-beta", "21.4.158"), Greater);
+    }
+
+    #[test]
+    fn version_ordering_ignores_build_metadata_and_is_strict_weak_order() {
+        use Ordering::*;
+
+        // `+` build metadata must not corrupt core or pre-release numeric parsing.
+        assert_eq!(cmp_versions("21.0.5+11", "21.0.1"), Greater);
+        assert_eq!(cmp_versions("0.16.9+build.1", "0.16.8"), Greater);
+        assert_eq!(cmp_versions("0.16.9+build.1", "0.16.9"), Equal);
+        assert_eq!(cmp_versions("0.16.9+build-1", "0.16.9"), Equal);
+        assert_eq!(cmp_versions("0.16.9+build-1", "0.16.9-rc.1"), Greater);
+        assert_eq!(
+            cmp_versions("0.20.0-beta.2+build.1", "0.20.0-beta.10+build.2"),
+            Less
+        );
+
+        // Numeric pre-release tokens sort strictly before alphanumeric ones.
+        assert_eq!(cmp_versions("0.1.0-2", "0.1.0-10"), Less);
+        assert_eq!(cmp_versions("0.1.0-10", "0.1.0-1a"), Less);
+        assert_eq!(cmp_versions("0.1.0-2", "0.1.0-1a"), Less);
+        assert_eq!(cmp_versions("0.1.0-01", "0.1.0-1"), Equal);
+        assert_eq!(cmp_versions("0.1.0-01", "0.1.0-0a"), Less);
+        assert_eq!(cmp_versions("0.1.0-1", "0.1.0-0a"), Less);
+
+        // Exhaustive strict-weak-order check across mixed numeric/alphanumeric/metadata tokens.
+        let samples = [
+            "0.1.0-01",
+            "0.1.0-1",
+            "0.1.0-2",
+            "0.1.0-10",
+            "0.1.0-0a",
+            "0.1.0-1a",
+            "0.1.0-alpha.1",
+            "0.1.0-alpha.beta",
+            "0.1.0-beta",
+            "0.1.0-rc.1+build.4",
+            "0.1.0",
+            "0.1.0+build-1",
+            "0.16.9+build.1",
+            "21.0.1",
+            "21.0.5+11",
+        ];
+        for &a in &samples {
+            assert_eq!(cmp_versions(a, a), Equal, "reflexivity for {a}");
+            for &b in &samples {
+                assert_eq!(
+                    cmp_versions(a, b),
+                    cmp_versions(b, a).reverse(),
+                    "antisymmetry for ({a}, {b})"
+                );
+                for &c in &samples {
+                    let ab = cmp_versions(a, b);
+                    let bc = cmp_versions(b, c);
+                    let ac = cmp_versions(a, c);
+                    if ab == Less && bc == Less {
+                        assert_eq!(ac, Less, "transitivity (<) for ({a}, {b}, {c})");
+                    }
+                    if ab == Equal {
+                        assert_eq!(ac, bc, "equivalence congruence for ({a}, {b}, {c})");
+                    }
+                }
+            }
+        }
+
+        let mut reversed: Vec<&str> = samples.iter().copied().rev().collect();
+        reversed.sort_by(|a, b| cmp_versions(a, b).then_with(|| a.cmp(b)));
+        assert_eq!(reversed, samples);
     }
 
     #[test]

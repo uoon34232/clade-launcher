@@ -38,6 +38,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The version must be the same in every file that states it (the release tooling's own tests run in pnpm check).
       - run: node scripts/release/check-versions.mjs
+      # generate-notices.mjs invokes `cargo metadata` in src-tauri/; install the pinned toolchain and cache Cargo's registry.
+      - run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+            cargo-${{ runner.os }}-
       - shell: pwsh
         run: node scripts/release/generate-notices.mjs --out "$env:RUNNER_TEMP/THIRD-PARTY-NOTICES.txt" --strict
       - run: pnpm check

@@ -5,6 +5,17 @@ import { PlayButton, type PlayState } from "./PlayButton";
 import { ProfileSelector } from "./ProfileSelector";
 import { SettingsButton } from "./SettingsButton";
 
+export type DockEntrance = "rise" | "return" | "settled";
+
+const DOCK_ENTRANCE_CLASS: Readonly<Record<DockEntrance, string>> = {
+  rise: "dock-rise",
+  return: "dock-return",
+  settled: "",
+};
+
+const DOCK_WRAP_BASE =
+  "launcher-dock-wrap absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] z-[15] flex justify-center px-6";
+
 interface Props {
   accounts: readonly Account[];
   activeAccountId: string | null;
@@ -29,15 +40,17 @@ interface Props {
   removedCount?: number;
   onOpenRemovedProfiles?: () => void;
   onOpenSettings: () => void;
+  /** Entrance animation mode: initial `"rise"`, post-embed `"return"`, or static `"settled"`. */
+  entrance?: DockEntrance;
   /** True right after an embedded game closes so the dock rises back swiftly. */
   returning?: boolean;
 }
 
 export function LauncherDock(p: Props) {
+  const entranceClass = DOCK_ENTRANCE_CLASS[p.entrance ?? (p.returning ? "return" : "rise")];
+
   return (
-    <div
-      className={`launcher-dock-wrap ${p.returning ? "dock-return" : "dock-rise"} absolute inset-x-0 bottom-[clamp(1.5rem,6vh,3.5rem)] z-[15] flex justify-center px-6`}
-    >
+    <div className={entranceClass ? `${entranceClass} ${DOCK_WRAP_BASE}` : DOCK_WRAP_BASE}>
       <nav aria-label="Clade" className="glass-dock flex items-center gap-2 rounded-[1.75rem] p-2">
         <AccountMenu
           accounts={p.accounts}

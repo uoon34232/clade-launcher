@@ -19,6 +19,134 @@ import { getLocale, hasMessage, setLocale, subscribeLocale, t, tDynamic } from "
 
 afterEach(() => setLocale("en"));
 
+function skipStringOrComment(src: string, i: number): number {
+  const ch = src[i];
+  if (ch === "/" && src[i + 1] === "/") {
+    const nl = src.indexOf("\n", i + 2);
+    return nl === -1 ? src.length : nl + 1;
+  }
+  if (ch === "/" && src[i + 1] === "*") {
+    let depth = 1;
+    let j = i + 2;
+    while (j < src.length && depth > 0) {
+      if (src[j] === "/" && src[j + 1] === "*") {
+        depth++;
+        j += 2;
+      } else if (src[j] === "*" && src[j + 1] === "/") {
+        depth--;
+        j += 2;
+      } else {
+        j++;
+      }
+    }
+    return j;
+  }
+  if (
+    (ch === "r" || (ch === "b" && src[i + 1] === "r")) &&
+    (i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]))
+  ) {
+    let j = ch === "b" ? i + 2 : i + 1;
+    let hashes = 0;
+    while (src[j] === "#") {
+      hashes++;
+      j++;
+    }
+    if (src[j] === '"') {
+      const closing = '"' + "#".repeat(hashes);
+      const end = src.indexOf(closing, j + 1);
+      return end === -1 ? src.length : end + closing.length;
+    }
+  }
+  if (ch === '"' || (ch === "b" && src[i + 1] === '"')) {
+    let j = ch === "b" ? i + 2 : i + 1;
+    while (j < src.length) {
+      if (src[j] === "\\") {
+        j += 2;
+      } else if (src[j] === '"') {
+        return j + 1;
+      } else {
+        j++;
+      }
+    }
+    return src.length;
+  }
+  if (ch === "'" || (ch === "b" && src[i + 1] === "'")) {
+    const q = ch === "b" ? i + 1 : i;
+    if (src[q + 1] === "\\") {
+      let j = q + 3;
+      while (j < src.length && src[j] !== "'" && src[j] !== "\n") j++;
+      if (src[j] === "'") return j + 1;
+    } else if (q + 2 < src.length && src[q + 2] === "'" && src[q + 1] !== "\n") {
+      return q + 3;
+    }
+  }
+  return i;
+}
+
+/** Strips inline `#[cfg(test)]` items from Rust source before scanning production error codes. */
+function stripCfgTest(src: string): string {
+  const chunks: string[] = [];
+  let last = 0;
+  let i = 0;
+  while (i < src.length) {
+    const skipped = skipStringOrComment(src, i);
+    if (skipped > i) {
+      i = skipped;
+      continue;
+    }
+    if (src[i] === "#" && src[i + 1] === "[") {
+      const m = /^#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.exec(src.slice(i, i + 40));
+      if (m) {
+        let j = i + m[0].length;
+        let parenDepth = 0;
+        let bracketDepth = 0;
+        while (j < src.length) {
+          const inner = skipStringOrComment(src, j);
+          if (inner > j) {
+            j = inner;
+            continue;
+          }
+          const c = src[j];
+          if (c === "(") parenDepth++;
+          else if (c === ")" && parenDepth > 0) parenDepth--;
+          else if (c === "[") bracketDepth++;
+          else if (c === "]" && bracketDepth > 0) bracketDepth--;
+          else if (parenDepth === 0 && bracketDepth === 0) {
+            if (c === ";") {
+              j++;
+              break;
+            }
+            if (c === "{") {
+              let braceDepth = 1;
+              j++;
+              while (j < src.length && braceDepth > 0) {
+                const inBlock = skipStringOrComment(src, j);
+                if (inBlock > j) {
+                  j = inBlock;
+                  continue;
+                }
+                if (src[j] === "{") braceDepth++;
+                else if (src[j] === "}") braceDepth--;
+                j++;
+              }
+              break;
+            }
+          }
+          j++;
+        }
+        chunks.push(src.slice(last, i), "\n");
+        last = j;
+        i = j;
+        continue;
+      }
+    }
+    i++;
+  }
+  if (last === 0) return src;
+  chunks.push(src.slice(last));
+  return chunks.join("");
+}
+
 const enKeys = Object.keys(en).sort();
 const ruKeys = Object.keys(ru).sort();
 
@@ -349,12 +477,60 @@ describe("structured backend errors are worded in the current language", () => {
     );
   });
 
+  it("words settings parameters, account codes, catalog network, and backend_unavailable in both languages", () => {
+    expect(
+      describeError(
+        "settings",
+        new BackendError("x", "not_enough_space", {
+          params: { requiredBytes: 3 * 1024 ** 3, availableBytes: 200 * 1024 ** 2 },
+        }),
+      ),
+    ).toBe("Not enough free space for the update: about 3.0 GB is needed and 200 MB is available.");
+    expect(describeCode("settings", "invalid_memory", { min: 1024, max: 12288 })).toBe(
+      "That amount of memory isn’t safe for this computer. Choose between 1 GB and 12 GB.",
+    );
+    expect(describeError("account", new BackendError("x", "unknown_account"))).toBe(
+      "That account no longer exists.",
+    );
+    expect(describeCode("account", "storage")).toBe(
+      "Clade couldn’t read or write the files it needs. Check that its folder is writable.",
+    );
+    expect(describeCode("account", null)).toBe("Could not remove the account.");
+    expect(describeCode("catalog", "network_unavailable")).toBe("Networking is unavailable.");
+    expect(describeCode("settings", "backend_unavailable")).toBe(
+      "The launcher backend is not available here.",
+    );
+
+    setLocale("ru");
+    expect(
+      describeError(
+        "settings",
+        new BackendError("x", "not_enough_space", {
+          params: { requiredBytes: 3 * 1024 ** 3, availableBytes: 200 * 1024 ** 2 },
+        }),
+      ),
+    ).toBe("Недостаточно места для обновления: нужно около 3,0 ГБ, доступно 200 МБ.");
+    expect(describeCode("settings", "invalid_memory", { min: 1024, max: 12288 })).toBe(
+      "Такой объём памяти небезопасен для этого компьютера. Выбери от 1 ГБ до 12 ГБ.",
+    );
+    expect(describeError("account", new BackendError("x", "unknown_account"))).toBe(
+      "Этого аккаунта больше нет.",
+    );
+    expect(describeCode("account", "storage")).toBe(
+      "Clade не удалось прочитать или записать нужные файлы. Проверь, что папка Clade доступна для записи.",
+    );
+    expect(describeCode("account", null)).toBe("Не удалось удалить аккаунт.");
+    expect(describeCode("catalog", "network_unavailable")).toBe("Сеть недоступна.");
+    expect(describeCode("settings", "backend_unavailable")).toBe("Здесь лаунчер недоступен.");
+  });
+
   it("has wording for every code the Rust backend can send", () => {
     const dir = join(process.cwd(), "src-tauri", "src");
     const sources = readdirSync(dir, { recursive: true })
-      .map(String)
+      .map((f) => String(f).replace(/\\/g, "/"))
       .filter((f) => f.endsWith(".rs") && !f.includes("tests"))
-      .map((f) => readFileSync(join(dir, f), "utf8"));
+      .sort()
+      .map((f) => stripCfgTest(readFileSync(join(dir, f), "utf8")));
     const text = sources.join("\n");
     const wanted = (domain: string, codes: string[]) =>
       codes.filter((c) => !hasMessage(`error.${domain}.${c}`) && !hasMessage(`error.common.${c}`));
@@ -362,7 +538,12 @@ describe("structured backend errors are worded in the current language", () => {
     const launch = [...text.matchAll(/\bfail\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
     expect(wanted("launch", [...new Set(launch)])).toEqual([]);
 
-    const authBlock = text.slice(text.indexOf("pub fn code(&self)"), text.indexOf("fn network("));
+    const msAuthSrc = stripCfgTest(readFileSync(join(dir, "ms_auth.rs"), "utf8"));
+    const authStart = msAuthSrc.indexOf("pub fn code(&self)");
+    const authEnd = msAuthSrc.indexOf("fn network(", authStart);
+    expect(authStart).toBeGreaterThan(-1);
+    expect(authEnd).toBeGreaterThan(authStart);
+    const authBlock = msAuthSrc.slice(authStart, authEnd);
     const auth = [...authBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
     expect(auth.length).toBeGreaterThan(10);
     expect(
@@ -372,10 +553,12 @@ describe("structured backend errors are worded in the current language", () => {
       ),
     ).toEqual([]);
 
-    const prepBlock = text.slice(
-      text.indexOf("impl PrepareError"),
-      text.indexOf("impl From<DownloadError>"),
-    );
+    const prepareSrc = stripCfgTest(readFileSync(join(dir, "prepare.rs"), "utf8"));
+    const prepStart = prepareSrc.indexOf("impl PrepareError");
+    const prepEnd = prepareSrc.indexOf("impl From<DownloadError>", prepStart);
+    expect(prepStart).toBeGreaterThan(-1);
+    expect(prepEnd).toBeGreaterThan(prepStart);
+    const prepBlock = prepareSrc.slice(prepStart, prepEnd);
     const prep = [...prepBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
     expect(prep).toContain("disk_space");
     expect(
@@ -385,23 +568,44 @@ describe("structured backend errors are worded in the current language", () => {
       ),
     ).toEqual([]);
 
-    const profileServiceSrc = readFileSync(join(dir, "profile_service.rs"), "utf8");
-    const appearanceBlock = profileServiceSrc.slice(
-      profileServiceSrc.indexOf("pub fn code(self)"),
-      profileServiceSrc.indexOf("pub fn coded(self)"),
-    );
+    const profileServiceSrc = stripCfgTest(readFileSync(join(dir, "profile_service.rs"), "utf8"));
+    const appearanceStart = profileServiceSrc.indexOf("pub fn code(self)");
+    const appearanceEnd = profileServiceSrc.indexOf("pub fn coded(self)", appearanceStart);
+    expect(appearanceStart).toBeGreaterThan(-1);
+    expect(appearanceEnd).toBeGreaterThan(appearanceStart);
+    const appearanceBlock = profileServiceSrc.slice(appearanceStart, appearanceEnd);
     const appearanceCodes = [...appearanceBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
     expect(appearanceCodes.length).toBeGreaterThanOrEqual(14);
     expect(wanted("appearance", appearanceCodes)).toEqual([]);
 
-    const vaultRecoverySrc = readFileSync(join(dir, "vault_recovery.rs"), "utf8");
-    const resetBlock = vaultRecoverySrc.slice(
-      vaultRecoverySrc.indexOf("pub fn code(self)"),
-      vaultRecoverySrc.indexOf("pub fn coded(self)"),
-    );
+    const vaultRecoverySrc = stripCfgTest(readFileSync(join(dir, "vault_recovery.rs"), "utf8"));
+    const resetStart = vaultRecoverySrc.indexOf("pub fn code(self)");
+    const resetEnd = vaultRecoverySrc.indexOf("pub fn coded(self)", resetStart);
+    expect(resetStart).toBeGreaterThan(-1);
+    expect(resetEnd).toBeGreaterThan(resetStart);
+    const resetBlock = vaultRecoverySrc.slice(resetStart, resetEnd);
     const resetCodes = [...resetBlock.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]);
     expect(resetCodes.length).toBeGreaterThanOrEqual(7);
     expect(wanted("vault", resetCodes)).toEqual([]);
+
+    const accountsApiSrc = stripCfgTest(readFileSync(join(dir, "accounts_api.rs"), "utf8"));
+    const accountStart = accountsApiSrc.indexOf("impl AccountError");
+    const accountEnd = accountsApiSrc.indexOf("fn load(", accountStart);
+    expect(accountStart).toBeGreaterThan(-1);
+    expect(accountEnd).toBeGreaterThan(accountStart);
+    const accountBlock = accountsApiSrc.slice(accountStart, accountEnd);
+    const accountCodes = [...accountBlock.matchAll(/CodedError::new\(\s*"([a-z_]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(accountCodes).toContain("unknown_account");
+    expect(accountCodes).toContain("storage");
+    expect(
+      wanted(
+        "account",
+        accountCodes.filter((c) => c !== "sign_in_unavailable"),
+      ),
+    ).toEqual([]);
+    expect(wanted("account", ["unknown_account", "storage"])).toEqual([]);
 
     const coded = [...text.matchAll(/CodedError::new\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
     const known = new Set([
@@ -471,6 +675,8 @@ describe("structured backend errors are worded in the current language", () => {
       "invalid_memory",
       "invalid_resolution",
       "invalid_jvm_args",
+      "network_unavailable",
+      "storage",
       "open_failed",
       "already_running",
       "busy",
@@ -507,6 +713,7 @@ describe("structured backend errors are worded in the current language", () => {
         "diagnostics_failed",
         "retired_vaults_clear_failed",
         "offline",
+        "network_unavailable",
         "update_rate_limited",
         "update_check_failed",
         "update_not_portable",
@@ -524,7 +731,9 @@ describe("structured backend errors are worded in the current language", () => {
         "storage",
       ]),
     ).toEqual([]);
-    expect(wanted("catalog", ["catalog_unavailable"])).toEqual([]);
+    expect(wanted("catalog", ["catalog_unavailable", "network_unavailable", "storage"])).toEqual(
+      [],
+    );
     expect(wanted("signIn", ["sign_in_unavailable"])).toEqual([]);
     expect(
       wanted("vault", [

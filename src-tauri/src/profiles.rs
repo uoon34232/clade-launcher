@@ -417,17 +417,29 @@ pub async fn loader_options_all<F: Fetcher>(
         .collect()
 }
 
+fn normalize_profile_name(raw_name: &str) -> String {
+    raw_name.trim().to_lowercase()
+}
+
+fn has_name_conflict(
+    listing: &crate::instances::Listing,
+    raw_name: &str,
+    exclude: Option<&InstanceId>,
+) -> bool {
+    let wanted = normalize_profile_name(raw_name);
+    listing
+        .instances
+        .iter()
+        .filter(|i| exclude != Some(&i.id))
+        .any(|i| normalize_profile_name(&i.name) == wanted)
+}
+
 fn check_name_and_problems(
     listing: &crate::instances::Listing,
     raw_name: &str,
 ) -> Result<(), ProfileError> {
     let trimmed = raw_name.trim();
-    let wanted = trimmed.to_lowercase();
-    if listing
-        .instances
-        .iter()
-        .any(|i| i.name.trim().to_lowercase() == wanted)
-    {
+    if has_name_conflict(listing, trimmed, None) {
         return Err(ProfileError::DuplicateName(trimmed.to_owned()));
     }
     if !trimmed.is_empty() {
@@ -700,13 +712,7 @@ pub(crate) fn rename_in_store(
         .map_err(|e| ProfileError::Instance(e).coded())?;
     let listing = store.list().map_err(CodedError::storage)?;
     let trimmed = name.trim();
-    let wanted = trimmed.to_lowercase();
-    if listing
-        .instances
-        .iter()
-        .filter(|i| i.id != *iid)
-        .any(|i| i.name.trim().to_lowercase() == wanted)
-    {
+    if has_name_conflict(&listing, trimmed, Some(iid)) {
         return Err(ProfileError::DuplicateName(trimmed.to_owned()).coded());
     }
     store
@@ -790,11 +796,7 @@ pub(crate) async fn restore_profile_inner(
             _ => CodedError::new("restore_failed", e.to_string()),
         })?;
         let listing = store.list().map_err(CodedError::storage)?;
-        let final_name = if listing.instances.iter().any(|i| {
-            i.name
-                .trim()
-                .eq_ignore_ascii_case(retained.instance.name.trim())
-        }) {
+        let final_name = if has_name_conflict(&listing, &retained.instance.name, None) {
             next_duplicate_name(&retained.instance.name, &listing)
         } else {
             retained.instance.name.clone()
@@ -2255,6 +2257,37 @@ mod tests {
         assert_eq!(
             collision_snap.selected.as_deref(),
             Some(restored2.id.as_str())
+        );
+
+        // Non-ASCII (Cyrillic) case-only collision is detected consistently: restoring
+        // "Выживание" while "выживание" is active resolves to "Выживание (2)".
+        let cyrillic_orig = store
+            .create(NewInstance::vanilla("Выживание", "1.21.4").unwrap(), 300)
+            .unwrap();
+        let cyrillic_retired = store.retire(&cyrillic_orig.id).unwrap();
+        let cyrillic_folder = cyrillic_retired
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        store
+            .create(NewInstance::vanilla("выживание", "1.21.4").unwrap(), 301)
+            .unwrap();
+
+        let cyrillic_snap = restore_profile_inner(&state, &e.settings, &cyrillic_folder)
+            .await
+            .unwrap();
+        assert_eq!(cyrillic_snap.profiles.len(), 4);
+        assert!(cyrillic_snap.removed.is_empty());
+        let cyrillic_restored = cyrillic_snap
+            .profiles
+            .iter()
+            .find(|p| p.name == "Выживание (2)")
+            .unwrap();
+        assert_eq!(
+            cyrillic_snap.selected.as_deref(),
+            Some(cyrillic_restored.id.as_str())
         );
 
         // Missing or traversal folders fail with `not_found`.

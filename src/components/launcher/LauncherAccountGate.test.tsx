@@ -1,6 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Account, AccountsSnapshot } from "@/lib/accounts/api";
+import {
+  skinSize,
+  type Account,
+  type AccountsApi,
+  type AccountsSnapshot,
+} from "@/lib/accounts/api";
 import { readyAccountsClient } from "@/test/testAccounts";
 import { testSkin } from "@/test/testSkin";
 import { setLocale } from "@/lib/i18n";
@@ -31,20 +36,30 @@ const account = (
   name: string,
   needsSignIn = false,
   skin: string | null = null,
-): Account => ({
-  id,
-  username: name,
-  uuid: `00000000-0000-4000-8000-00000000000${id === "a" ? 1 : 2}`,
-  needsSignIn,
-  skin,
-});
+): Account => {
+  const skinDimensions = skin ? skinSize(skin) : null;
+  return {
+    id,
+    username: name,
+    uuid: `00000000-0000-4000-8000-00000000000${id === "a" ? 1 : 2}`,
+    needsSignIn,
+    skin: skinDimensions ? skin : null,
+    skinDimensions,
+  };
+};
 const accountsOf = (active: string | null, ...accounts: Account[]): AccountsSnapshot => ({
   accounts,
   active,
-  capabilities: { signIn: true, skin: false, cape: false },
+  capabilities: { signIn: true, skin: true, cape: true },
 });
 
-function setup(profiles: ProfilesSnapshot, accounts: AccountsSnapshot) {
+type TestAccountsClient = ReturnType<typeof readyAccountsClient> & Pick<AccountsApi, "onChanged">;
+
+function setup(
+  profiles: ProfilesSnapshot,
+  accounts: AccountsSnapshot,
+  accountsClient?: TestAccountsClient,
+) {
   const api = {
     list: vi.fn<ProfilesApi["list"]>(() => Promise.resolve(profiles)),
     select: vi.fn<ProfilesApi["select"]>(() => Promise.resolve()),
@@ -94,12 +109,11 @@ function setup(profiles: ProfilesSnapshot, accounts: AccountsSnapshot) {
     openLogs: vi.fn<LaunchApi["openLogs"]>(() => Promise.resolve()),
     onState: vi.fn<LaunchApi["onState"]>(() => Promise.resolve(() => undefined)),
   } satisfies LaunchApi;
-  const acc = readyAccountsClient(accounts);
+  const acc = accountsClient ?? readyAccountsClient(accounts);
   render(<LauncherHome api={api} accountsClient={acc} launchClient={launch} />);
   return { api, launch, acc };
 }
 
-const flush = async () => act(async () => void (await Promise.resolve()));
 const button = (name: string | RegExp) => screen.getByRole("button", { name });
 
 beforeEach(() => {
@@ -128,18 +142,50 @@ afterEach(() => cleanup());
 describe("without an account that can play", () => {
   it("no accounts and no profiles: creating a profile works", async () => {
     const { api } = setup(snap(), accountsOf(null));
-    await flush();
-    fireEvent.click(button("Create a profile"));
+    fireEvent.click(await screen.findByRole("button", { name: "Create a profile" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("New profile")).toBeTruthy();
     await waitFor(() => expect(api.versionCatalog).toHaveBeenCalled()); // version lookup is only metadata
     expect(api.prepare).not.toHaveBeenCalled();
   });
 
+  it("does not engage the sign-in gate before the account list settles", async () => {
+    let resolveAccounts!: (snapshot: AccountsSnapshot) => void;
+    const acc = readyAccountsClient(accountsOf(null));
+    acc.list.mockImplementationOnce(
+      () =>
+        new Promise<AccountsSnapshot>((resolve) => {
+          resolveAccounts = resolve;
+        }),
+    );
+    setup(snap(profile({ ready: true })), accountsOf(null), acc);
+    // Until accountsClient.list() settles, accountReady stays true so Play is shown instead of Sign in.
+    await screen.findByRole("button", { name: "Play" });
+    expect(screen.queryByRole("button", { name: "Sign in to continue" })).toBeNull();
+
+    await act(async () => {
+      resolveAccounts(accountsOf(null));
+      await Promise.resolve();
+    });
+    await screen.findByRole("button", { name: "Sign in to continue" });
+    expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
+  });
+
+  it("engages the sign-in gate when loading accounts fails", async () => {
+    const acc = readyAccountsClient(accountsOf(null));
+    acc.list.mockRejectedValueOnce(new Error("accounts unavailable"));
+    const { api, launch } = setup(snap(profile({ ready: true })), accountsOf(null), acc);
+    await screen.findByRole("button", { name: "Sign in to continue" });
+    expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
+    expect(button("Add an account").textContent).toContain("Sign in");
+    expect(api.prepare).not.toHaveBeenCalled();
+    expect(launch.launch).not.toHaveBeenCalled();
+  });
+
   it("a profile never starts a download: the primary action asks to sign in and opens the sign-in", async () => {
     const { api, acc } = setup(snap(profile()), accountsOf(null));
-    await flush();
-    expect(button("Sign in to continue")).toBeTruthy();
+    await screen.findByRole("button", { name: "Sign in to continue" });
     expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
     fireEvent.click(button("Sign in to continue"));
@@ -149,22 +195,40 @@ describe("without an account that can play", () => {
   });
 
   it("an account that must sign in again gates set up, verify and play, keeps the profiles and re-signs the SAME account in", async () => {
-    const { api, launch, acc } = setup(
-      snap(profile({ ready: true })),
-      accountsOf("a", account("a", "Alex", true)),
-    );
-    await flush();
-    expect(button("Sign in to continue")).toBeTruthy();
+    const needsSignIn = accountsOf("a", account("a", "Alex", true));
+    setup(snap(profile({ ready: false })), needsSignIn);
+    await screen.findByRole("button", { name: "Sign in to continue" });
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
+    expect(button(/Profile: Survival/)).toBeTruthy();
+    cleanup();
+
+    const { api, launch, acc } = setup(snap(profile({ ready: true })), needsSignIn);
+    await screen.findByRole("button", { name: "Sign in to continue" });
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
     // The profile is intact and still selectable; only game files are gated.
     fireEvent.click(button(/Profile: Survival/));
     const verify = await screen.findByRole("menuitem", { name: "Verify files" });
     expect(verify.hasAttribute("data-disabled")).toBe(true);
     fireEvent.click(verify);
-    await flush();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.prepare).not.toHaveBeenCalled();
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    // ProfileDialog's own "Verify files" button is also disabled while !accountReady.
+    fireEvent.click(button(/Profile: Survival/));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Profile settings…" }));
+    const profileDialog = await screen.findByRole("dialog");
+    const dialogVerify = within(profileDialog).getByRole<HTMLButtonElement>("button", {
+      name: "Verify files",
+    });
+    expect(dialogVerify.disabled).toBe(true);
+    fireEvent.click(dialogVerify);
+    expect(api.prepare).not.toHaveBeenCalled();
+    fireEvent.click(within(profileDialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     fireEvent.click(button("Sign in to continue"));
     await waitFor(() => expect(acc.signIn).toHaveBeenCalledWith("a")); // the same account, not a new one
@@ -174,8 +238,7 @@ describe("without an account that can play", () => {
   it("gating follows the ACTIVE account: a ready account next to it never stands in", async () => {
     const accounts = accountsOf("a", account("a", "Alex", true), account("b", "Blake"));
     const { launch, acc } = setup(snap(profile({ ready: true })), accounts);
-    await flush();
-    expect(button("Sign in to continue")).toBeTruthy();
+    await screen.findByRole("button", { name: "Sign in to continue" });
     expect(launch.launch).not.toHaveBeenCalled();
     // Choosing the account that can play is what unlocks Play (and launches with that account).
     acc.select.mockResolvedValueOnce({ ...accounts, active: "b" });
@@ -186,9 +249,39 @@ describe("without an account that can play", () => {
     await waitFor(() => expect(launch.launch).toHaveBeenCalledWith("survival"));
   });
 
+  it("rolls back optimistic account selection and re-gates when selecting an account fails", async () => {
+    const accounts = accountsOf("a", account("a", "Alex", true), account("b", "Blake"));
+    const acc = readyAccountsClient(accounts);
+    let rejectSelect!: (err: Error) => void;
+    acc.select.mockImplementationOnce(
+      () =>
+        new Promise<AccountsSnapshot>((_, reject) => {
+          rejectSelect = reject;
+        }),
+    );
+    setup(snap(profile({ ready: true })), accounts, acc);
+    await screen.findByRole("button", { name: "Sign in to continue" });
+
+    fireEvent.click(button(/Account: Alex/));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Blake/ }));
+    // Optimistically switches to Blake and unlocks Play while select() is in flight.
+    await screen.findByRole("button", { name: /Account: Blake/ });
+    expect(button("Play")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign in to continue" })).toBeNull();
+
+    await act(async () => {
+      rejectSelect(new Error("select failed"));
+      await Promise.resolve();
+    });
+    await screen.findByRole("button", { name: /Account: Alex/ });
+    await screen.findByRole("button", { name: "Sign in to continue" });
+    expect(screen.queryByRole("button", { name: "Play" })).toBeNull();
+    expect(acc.list).toHaveBeenCalledTimes(2);
+  });
+
   it("signing in updates the dock at once, without restarting", async () => {
     const { acc, api } = setup(snap(profile()), accountsOf(null));
-    await flush();
+    await screen.findByRole("button", { name: "Sign in to continue" });
     acc.signIn.mockResolvedValueOnce(accountsOf("a", account("a", "Alex")));
     fireEvent.click(button("Sign in to continue"));
     await waitFor(() => expect(acc.signIn).toHaveBeenCalledWith(null));
@@ -200,8 +293,7 @@ describe("without an account that can play", () => {
   it("is worded in Russian too", async () => {
     setLocale("ru");
     setup(snap(profile()), accountsOf(null));
-    await flush();
-    expect(button("Войти для продолжения")).toBeTruthy();
+    await screen.findByRole("button", { name: "Войти для продолжения" });
   });
 });
 
@@ -209,14 +301,16 @@ describe("with an account that can play", () => {
   it("an unprepared profile sets up, a prepared one plays", async () => {
     const a = accountsOf("a", account("a", "Alex"));
     const unprepared = setup(snap(profile()), a);
-    await flush();
+    await screen.findByRole("button", { name: "Set up" });
+    await screen.findByRole("button", { name: /Account: Alex/ });
     fireEvent.click(button("Set up"));
     await waitFor(() => expect(unprepared.api.prepare).toHaveBeenCalled());
     expect(unprepared.api.prepare.mock.calls[0][0]).toBe("survival");
     cleanup();
 
     const prepared = setup(snap(profile({ ready: true })), a);
-    await flush();
+    await screen.findByRole("button", { name: "Play" });
+    await screen.findByRole("button", { name: /Account: Alex/ });
     fireEvent.click(button("Play"));
     await waitFor(() => expect(prepared.launch.launch).toHaveBeenCalledWith("survival"));
     expect(prepared.api.prepare).not.toHaveBeenCalled();
@@ -224,7 +318,8 @@ describe("with an account that can play", () => {
 
   it("Verify files is available and runs the verification", async () => {
     const { api } = setup(snap(profile({ ready: true })), accountsOf("a", account("a", "Alex")));
-    await flush();
+    await screen.findByRole("button", { name: /Profile: Survival/ });
+    await screen.findByRole("button", { name: /Account: Alex/ });
     fireEvent.click(button(/Profile: Survival/));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Verify files" }));
     await waitFor(() => expect(api.prepare).toHaveBeenCalled());
@@ -245,9 +340,8 @@ describe("the account avatar", () => {
       account("b", "Blake", false, skinB),
     );
     const { acc } = setup(snap(profile()), accounts);
-    await flush();
     const trigger = () => button(/Account: /);
-    expect(head(trigger())).toBe(skinA);
+    await waitFor(() => expect(head(trigger())).toBe(skinA));
     acc.select.mockResolvedValueOnce({ ...accounts, active: "b" });
     fireEvent.click(trigger());
     // In the menu every account shows its own avatar.
@@ -264,8 +358,8 @@ describe("the account avatar", () => {
       account("b", "Blake", false, testSkin()),
     );
     setup(snap(profile()), accounts);
-    await flush();
-    const trigger = button(/Account: Alex/);
+    const trigger = await screen.findByRole("button", { name: /Account: Alex/ });
+    await screen.findByRole("button", { name: "Set up" });
     expect(placeholder(trigger)).toBe(true);
     fireEvent.click(trigger);
     const items = await screen.findAllByRole("menuitemradio");
@@ -285,12 +379,9 @@ describe("the account avatar", () => {
       }),
     };
     acc.list.mockResolvedValueOnce(before).mockResolvedValue(after);
-    const { api, launch } = setup(snap(profile()), before);
-    cleanup(); // only the apis are reused; the app below gets its own accounts client
-    render(<LauncherHome api={api} accountsClient={acc} launchClient={launch} />);
-    await flush();
-    expect(acc.onChanged).toHaveBeenCalled();
-    const trigger = button(/Account: Alex/);
+    setup(snap(profile()), before, acc);
+    await waitFor(() => expect(acc.onChanged).toHaveBeenCalled());
+    const trigger = await screen.findByRole("button", { name: /Account: Alex/ });
     expect(placeholder(trigger)).toBe(true);
     act(() => changed?.());
     await waitFor(() => expect(head(trigger)).toBe(testSkin(64, 64, 7)));

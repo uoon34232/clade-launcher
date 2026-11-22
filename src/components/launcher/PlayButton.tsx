@@ -72,7 +72,7 @@ export function PlayButton({ onClick, state = "play" }: Props) {
         playSound("primary");
         onClick?.();
       }}
-      className={`dock-item dock-item--primary group bg-clay focus-visible:ring-clay-soft focus-visible:ring-offset-graphite active:bg-clay-deep disabled:hover:bg-clay data-[state=playing]:bg-clay/55 relative flex h-12 min-w-[7.75rem] shrink-0 cursor-default items-center justify-center gap-2 overflow-visible rounded-[1.25rem] px-6 text-[0.9375rem] leading-none font-semibold tracking-[0.01em] whitespace-nowrap text-[#fbf6ee] shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_6px_18px_-6px_rgb(163_82_61/0.7)] outline-none hover:bg-[#944834] hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_10px_26px_-8px_rgb(163_82_61/0.85)] focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-80 disabled:hover:scale-100 ${state === "launching" ? "play-launching-glow" : "disabled:shadow-none"}`}
+      className={`dock-item dock-item--primary group bg-clay focus-visible:ring-clay-soft active:bg-clay-active disabled:not-data-[state=playing]:hover:bg-clay data-[state=playing]:bg-clay/55 hover:bg-clay-hover relative flex h-12 min-w-[7.75rem] shrink-0 cursor-default items-center justify-center gap-2 overflow-visible rounded-[1.25rem] px-6 text-[0.9375rem] leading-none font-semibold tracking-[0.01em] whitespace-nowrap text-[#fbf6ee] shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_6px_18px_-6px_rgb(163_82_61/0.7)] outline-hidden hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_10px_26px_-8px_rgb(163_82_61/0.85)] focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--dock-ring-offset)] disabled:cursor-default disabled:opacity-80 disabled:hover:scale-100 ${state === "launching" ? "play-launching-glow" : "disabled:shadow-none"}`}
     >
       {pulseSeq > 0 && (
         <span
@@ -92,7 +92,10 @@ export function PlayButton({ onClick, state = "play" }: Props) {
           className="size-3.5 shrink-0 animate-spin"
         />
       ) : state === "playing" ? (
-        <span aria-hidden className="size-2 shrink-0 rounded-full bg-[#fbf6ee]/80" />
+        <span
+          aria-hidden
+          className="play-playing-dot size-2 shrink-0 rounded-full bg-[#fbf6ee]/80"
+        />
       ) : (
         <PlayIcon aria-hidden fill="currentColor" strokeWidth={0} className="size-3.5 shrink-0" />
       )}

@@ -65,14 +65,25 @@ impl InstallerRunner for FakeRunner {
     fn run<'a>(
         &'a self,
         cmd: &'a InstallerCommand,
-        _cancel: &'a Cancel,
+        cancel: &'a Cancel,
     ) -> impl Future<Output = io::Result<RunResult>> + Send + 'a {
         self.seen.lock().unwrap().push(cmd.clone());
-        let result = match &*self.on_run.lock().unwrap() {
-            Some(f) => f(cmd),
-            None => Err(io::Error::other("no installer scripted")),
+        let result = if cancel.is_cancelled() {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        } else {
+            match &*self.on_run.lock().unwrap() {
+                Some(f) => f(cmd),
+                None => Err(io::Error::other("no installer scripted")),
+            }
         };
-        async move { result }
+        let cancelled_during = cancel.is_cancelled();
+        async move {
+            if cancelled_during {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+            } else {
+                result
+            }
+        }
     }
 }
 
@@ -460,12 +471,18 @@ async fn a_ready_profile_needs_no_network_to_stay_ready() {
     let requests = w.streamer.total_calls();
     // The network disappears completely.
     w.fetcher.fail_all();
+    w.events.lock().unwrap().clear();
     let again = prepare_instance(&ctx(&w), &id).await.unwrap();
     assert!(again.is_ready());
     assert_eq!(
         w.streamer.total_calls(),
         requests,
         "no file was requested again"
+    );
+    assert_eq!(
+        stages(&w),
+        [Stage::Planning, Stage::Done],
+        "already-ready fast path must short-circuit before running preparation stages"
     );
 }
 
@@ -1043,7 +1060,8 @@ async fn a_generated_file_the_installer_failed_to_produce_blocks_ready() {
         )
         .unwrap(),
     );
-    assert!(prepare_instance(&ctx(&w), &id).await.is_err());
+    let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+    assert!(matches!(err, PrepareError::Loader(_)), "{err:?}");
     assert!(matches!(setup_of(&w, &id), SetupState::Pending));
 }
 
@@ -1219,13 +1237,11 @@ async fn everything_preparation_writes_stays_inside_the_folder() {
         "assets",
         "cache",
         "data",
-        "downloads",
         "instances",
         "libraries",
         "logs",
         "minecraft",
         "runtimes",
-        "updates",
     ];
     for f in &found {
         assert!(
@@ -1461,6 +1477,18 @@ async fn verify_all_detects_and_repairs_tampered_vanilla_and_loader_profile_json
 
     // Ordinary run skips re-fetching valid-looking local JSONs, whereas `verify_all` checks
     // Mojang's SHA-1 and refreshes the official loader profile.
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_ne!(
+        fs::read(&vanilla_json_file).unwrap(),
+        good_vanilla,
+        "ordinary run must leave valid-looking tampered <mc>.json untouched"
+    );
+    assert_ne!(
+        fs::read(&fabric_json_file).unwrap(),
+        good_fabric,
+        "ordinary run must leave valid-looking tampered loader profile untouched"
+    );
+
     let mut deep = ctx(&w);
     deep.verify_all = true;
     prepare_instance(&deep, &id).await.unwrap();
@@ -1950,4 +1978,906 @@ async fn bytes_to_download_rounds_up_to_cluster_slack_counts_legacy_asset_copies
         &[],
     );
     assert_eq!(after, 0, "all files present on disk require 0 extra bytes");
+}
+
+// ================================================================================ JavaChoice::Runtime, failure paths & cross-file contracts
+
+#[cfg(test)]
+fn write_custom_runtime(
+    root: &PortableRoot,
+    id: &str,
+    java_major: u32,
+    with_cli_exe: bool,
+) -> ManagedJava {
+    let dir = crate::runtimes::runtime_dir(root, id).unwrap();
+    fs::create_dir_all(dir.join("bin")).unwrap();
+    let javaw_bytes = b"MZ custom javaw";
+    fs::write(dir.join("bin/javaw.exe"), javaw_bytes).unwrap();
+    let cli_bytes = b"MZ custom java cli";
+    if with_cli_exe {
+        fs::write(dir.join("bin/java.exe"), cli_bytes).unwrap();
+    }
+    let manifest = crate::runtimes::RuntimeManifest {
+        schema: 1,
+        id: id.to_owned(),
+        vendor: "temurin".to_owned(),
+        java_major,
+        arch: "x64".to_owned(),
+        java_exe: RelPath::new("bin/javaw.exe").unwrap(),
+        java_exe_sha256: sha256_of(javaw_bytes),
+        java_cli_exe: with_cli_exe.then(|| RelPath::new("bin/java.exe").unwrap()),
+        java_cli_exe_sha256: with_cli_exe.then(|| sha256_of(cli_bytes)),
+    };
+    crate::runtimes::write_manifest(root, &manifest).unwrap();
+    resolve_java(root, id).unwrap()
+}
+
+#[cfg(all(test, windows))]
+fn create_junction(link: &Path, target: &Path) {
+    let link_win = link.to_string_lossy().replace('/', "\\");
+    let target_win = target.to_string_lossy().replace('/', "\\");
+    let out = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link_win)
+        .arg(target_win)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn java_choice_runtime_resolves_verifies_and_reports_missing_runtime() {
+    // 1. Valid custom runtime (no runtime-files.json): skips Mojang's runtime index and succeeds.
+    let w = world("1.21.4", Era::Modern);
+    write_custom_runtime(&w.root, "custom-temurin-21", 21, true);
+    w.fetcher.fail(RUNTIME_INDEX_URL);
+
+    let mut new = NewInstance::vanilla("CustomJava", &w.mc).unwrap();
+    new.java = JavaChoice::Runtime {
+        id: "custom-temurin-21".into(),
+    };
+    let id = create(&w, new);
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert!(inst.is_ready());
+    assert!(check_installed(&w.root, &inst).is_ok());
+    assert!(
+        java_install::find_installed(&w.root, "java-runtime-delta").is_none(),
+        "explicit JavaChoice::Runtime must not install Mojang's default runtime"
+    );
+    assert!(
+        !w.fetcher.calls().iter().any(|u| u == RUNTIME_INDEX_URL),
+        "JavaChoice::Runtime must skip plan_runtime"
+    );
+    let snap = w.tracker.progress.snapshot();
+    assert_eq!(snap.bytes_done, snap.bytes_total);
+
+    // 2. `verify_all = true` passes `component = None` to `verification_files` and succeeds without
+    //    consulting Mojang's runtime index when the chosen runtime has no `runtime-files.json`.
+    let events_verify = Arc::new(Mutex::new(Vec::new()));
+    let sink_verify = events_verify.clone();
+    let tracker_verify = Tracker::new(
+        &id,
+        Progress::new(),
+        Box::new(move |p| sink_verify.lock().unwrap().push(p)),
+    );
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    deep.tracker = &tracker_verify;
+    prepare_instance(&deep, &id).await.unwrap();
+    assert!(
+        !w.fetcher.calls().iter().any(|u| u == RUNTIME_INDEX_URL),
+        "verify_all on JavaChoice::Runtime must not fall back to Mojang's runtime index"
+    );
+    let snap_verify = tracker_verify.progress.snapshot();
+    assert_eq!(snap_verify.bytes_done, snap_verify.bytes_total);
+
+    // 3. If the chosen runtime WAS installed by Mojang (has `runtime-files.json`), `verify_all`
+    //    still checks and repairs damaged files locally even though `component = None`.
+    let w2 = world("1.21.4", Era::Modern);
+    let auto_id = vanilla(&w2);
+    prepare_instance(&ctx(&w2), &auto_id).await.unwrap();
+    let delta = java_install::find_installed(&w2.root, "java-runtime-delta").unwrap();
+    let mut new_rt = NewInstance::vanilla("PinnedMojangJava", &w2.mc).unwrap();
+    new_rt.java = JavaChoice::Runtime {
+        id: delta.id.clone(),
+    };
+    let rt_id = create(&w2, new_rt);
+    prepare_instance(&ctx(&w2), &rt_id).await.unwrap();
+
+    let modules = delta.home.join("lib/modules");
+    let good_modules = fs::read(&modules).unwrap();
+    let mut bad_modules = good_modules.clone();
+    bad_modules[3] ^= 0x5A;
+    fs::write(&modules, &bad_modules).unwrap();
+    w2.fetcher.fail(RUNTIME_INDEX_URL);
+    let mut deep2 = ctx(&w2);
+    deep2.verify_all = true;
+    prepare_instance(&deep2, &rt_id).await.unwrap();
+    assert_eq!(
+        fs::read(&modules).unwrap(),
+        good_modules,
+        "verify_all must repair runtime-files.json entries for JavaChoice::Runtime even with component = None"
+    );
+
+    // 4. Missing chosen runtime fails `prepare_instance` with `PrepareError::Java` and fails
+    //    `check_installed` when removed after setup.
+    let mut missing_new = NewInstance::vanilla("MissingJava", &w.mc).unwrap();
+    missing_new.java = JavaChoice::Runtime {
+        id: "missing-jdk-21".into(),
+    };
+    let missing_id = create(&w, missing_new);
+    let err = prepare_instance(&ctx(&w), &missing_id).await.unwrap_err();
+    assert!(matches!(err, PrepareError::Java(_)), "{err:?}");
+    assert!(matches!(setup_of(&w, &missing_id), SetupState::Pending));
+
+    fs::remove_file(
+        crate::runtimes::runtime_dir(&w.root, "custom-temurin-21")
+            .unwrap()
+            .join("runtime.json"),
+    )
+    .unwrap();
+    let err_check = check_installed(&w.root, &inst).unwrap_err();
+    assert!(
+        err_check.contains("chosen Java runtime"),
+        "check_installed must report missing chosen runtime: {err_check}"
+    );
+}
+
+#[tokio::test]
+async fn java_choice_runtime_below_17_uses_java_21_for_forge_installer_and_keeps_chosen_runtime() {
+    let (w, _) = forge_world();
+    write_custom_runtime(&w.root, "custom-java-8", 8, true);
+
+    let mut new = NewInstance::modded(
+        "ForgeRuntime8",
+        "1.21.4",
+        LoaderKind::Forge,
+        LoaderVersionSpec::Pinned {
+            version: LoaderVersion::new("54.1.14").unwrap(),
+        },
+    )
+    .unwrap();
+    new.java = JavaChoice::Runtime {
+        id: "custom-java-8".into(),
+    };
+    let id = create(&w, new);
+
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert!(inst.is_ready());
+    assert_eq!(
+        inst.java,
+        JavaChoice::Runtime {
+            id: "custom-java-8".into()
+        }
+    );
+    assert!(check_installed(&w.root, &inst).is_ok());
+
+    let delta = java_install::find_installed(&w.root, "java-runtime-delta")
+        .expect("java-runtime-delta must be installed for the Forge installer");
+    let seen = w.runner.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].program.starts_with(&delta.home),
+        "installer JVM must use Java 21 when JavaChoice::Runtime has java_major < 17, got {}",
+        seen[0].program.display()
+    );
+}
+
+#[tokio::test]
+async fn unhashed_library_sidecar_rejects_missing_malformed_and_mismatched_sha1() {
+    struct Status404SidecarFetcher<'a> {
+        inner: &'a FakeFetcher,
+    }
+    impl Fetcher for Status404SidecarFetcher<'_> {
+        fn get(
+            &self,
+            url: &Url,
+            max_bytes: usize,
+        ) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send {
+            let is_sha1 = url.as_str().ends_with(".sha1");
+            let inner = self.inner;
+            let url = url.clone();
+            async move {
+                if is_sha1 {
+                    Err(FetchError::Status(404))
+                } else {
+                    inner.get(&url, max_bytes).await
+                }
+            }
+        }
+    }
+
+    let jar = bytes(900, 17);
+    let path = "org/quiltmc/quilt-loader/0.27.0/quilt-loader-0.27.0.jar";
+    let url = format!("https://maven.quiltmc.org/repository/release/{path}");
+    let setup_quilt = |w: &World| {
+        w.streamer.add(&url, &jar);
+        w.fetcher.ok(
+            "https://meta.quiltmc.org/v3/versions/loader/1.21.4/0.27.0/profile/json",
+            json!({
+                "id": "quilt-loader-0.27.0-1.21.4",
+                "inheritsFrom": "1.21.4",
+                "mainClass": "org.quiltmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{"name": "org.quiltmc:quilt-loader:0.27.0", "url": "https://maven.quiltmc.org/repository/release/"}]
+            })
+            .to_string(),
+        );
+        create(
+            w,
+            NewInstance::modded(
+                "Quilt",
+                "1.21.4",
+                LoaderKind::Quilt,
+                LoaderVersionSpec::Pinned {
+                    version: LoaderVersion::new("0.27.0").unwrap(),
+                },
+            )
+            .unwrap(),
+        )
+    };
+
+    // 1. Missing `.sha1` sidecar (404 HTTP status and offline route failure).
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = setup_quilt(&w);
+        let err_offline = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(
+            matches!(err_offline, PrepareError::Offline(_)),
+            "{err_offline:?}"
+        );
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+
+        let status_fetcher = Status404SidecarFetcher { inner: &w.fetcher };
+        let c404 = Ctx {
+            root: &w.root,
+            meta: &status_fetcher,
+            loader_meta: &status_fetcher,
+            streamer: &w.streamer,
+            loader_streamer: &w.streamer,
+            runner: &w.runner,
+            sys: SystemEnv::from_process(),
+            concurrency: 4,
+            now: 1_000,
+            backoff: Duration::ZERO,
+            cancel: w.cancel.clone(),
+            tracker: &w.tracker,
+            verify_all: false,
+            free_space: Arc::new(|_| None),
+        };
+        let err_404 = prepare_instance(&c404, &id).await.unwrap_err();
+        assert!(matches!(err_404, PrepareError::Network(_)), "{err_404:?}");
+        assert!(!w.root.libraries_dir().join(path).exists());
+    }
+
+    // 2. Malformed `.sha1` sidecar.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = setup_quilt(&w);
+        w.fetcher.ok(&format!("{url}.sha1"), "not-a-valid-sha1");
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Unsupported(_)), "{err:?}");
+        assert!(!w.root.libraries_dir().join(path).exists());
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+    }
+
+    // 3. Mismatched `.sha1` sidecar.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = setup_quilt(&w);
+        w.fetcher.ok(&format!("{url}.sha1"), "0".repeat(40));
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Verification(_)), "{err:?}");
+        assert!(!w.root.libraries_dir().join(path).exists());
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+    }
+}
+
+#[tokio::test]
+async fn mid_flight_cancellation_during_download_and_installer_leaves_profile_pending() {
+    use crate::net::{StreamHead, StreamSink};
+
+    // 1. Mid-flight cancellation during client.jar download chunking leaves `.part` and resumes.
+    struct CancellingStreamer<'a> {
+        inner: &'a FakeStreamer,
+        target_url: String,
+        cancel: Arc<Cancel>,
+    }
+    struct CancelAfterFirstChunk<'a> {
+        inner: &'a mut dyn StreamSink,
+        cancel: &'a Cancel,
+        trigger: bool,
+        fired: bool,
+    }
+    impl StreamSink for CancelAfterFirstChunk<'_> {
+        fn begin(&mut self, head: &StreamHead) -> io::Result<()> {
+            self.inner.begin(head)
+        }
+        fn chunk(&mut self, data: &[u8]) -> io::Result<()> {
+            self.inner.chunk(data)?;
+            if self.trigger && !self.fired {
+                self.fired = true;
+                self.cancel.cancel();
+            }
+            Ok(())
+        }
+    }
+    impl Streamer for CancellingStreamer<'_> {
+        fn stream<'a>(
+            &'a self,
+            url: &'a Url,
+            from: u64,
+            sink: &'a mut dyn StreamSink,
+        ) -> impl Future<Output = Result<(), FetchError>> + Send + 'a {
+            let trigger = url.as_str() == self.target_url;
+            let mut wrapped = CancelAfterFirstChunk {
+                inner: sink,
+                cancel: &self.cancel,
+                trigger,
+                fired: false,
+            };
+            async move { self.inner.stream(url, from, &mut wrapped).await }
+        }
+    }
+
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        let cancelling = CancellingStreamer {
+            inner: &w.streamer,
+            target_url: w.client_url.clone(),
+            cancel: w.cancel.clone(),
+        };
+        let c = Ctx {
+            root: &w.root,
+            meta: &w.fetcher,
+            loader_meta: &w.fetcher,
+            streamer: &cancelling,
+            loader_streamer: &cancelling,
+            runner: &w.runner,
+            sys: SystemEnv::from_process(),
+            concurrency: 1,
+            now: 1_000,
+            backoff: Duration::ZERO,
+            cancel: w.cancel.clone(),
+            tracker: &w.tracker,
+            verify_all: false,
+            free_space: Arc::new(|_| None),
+        };
+        let err = prepare_instance(&c, &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Cancelled), "{err:?}");
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+        let jar_dest = client_jar_path(&w.root, "1.21.4");
+        assert!(!jar_dest.exists());
+        assert!(
+            crate::download::part_path(&jar_dest).is_file(),
+            "mid-flight cancelled download keeps partial `.part` file for resume"
+        );
+
+        let mut resumed_ctx = ctx(&w);
+        resumed_ctx.cancel = Cancel::new();
+        let inst = prepare_instance(&resumed_ctx, &id).await.unwrap();
+        assert!(inst.is_ready());
+    }
+
+    // 2. Mid-flight cancellation at Stage::Assets preserves verified client.jar.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        let cancel_on_assets = Cancel::new();
+        let cancel_hook = cancel_on_assets.clone();
+        let tracker = Tracker::new(
+            &id,
+            Progress::new(),
+            Box::new(move |p| {
+                if p.stage == Stage::Assets {
+                    cancel_hook.cancel();
+                }
+            }),
+        );
+        let mut c = ctx(&w);
+        c.cancel = cancel_on_assets;
+        c.tracker = &tracker;
+        let err = prepare_instance(&c, &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Cancelled), "{err:?}");
+        assert!(client_jar_path(&w.root, "1.21.4").is_file());
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+    }
+
+    // 3. Mid-flight cancellation during FakeRunner::run cleans up staging and leaves Pending.
+    {
+        let (w, _) = forge_world();
+        let cancel_in_runner = w.cancel.clone();
+        let original = w.runner.on_run.lock().unwrap().take().unwrap();
+        *w.runner.on_run.lock().unwrap() = Some(Box::new(move |cmd| {
+            let res = original(cmd)?;
+            cancel_in_runner.cancel();
+            Ok(res)
+        }));
+        let id = create(
+            &w,
+            NewInstance::modded(
+                "ForgeCancel",
+                "1.21.4",
+                LoaderKind::Forge,
+                LoaderVersionSpec::Pinned {
+                    version: LoaderVersion::new("54.1.14").unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Cancelled), "{err:?}");
+        assert!(matches!(setup_of(&w, &id), SetupState::Pending));
+        let stage_dir = w.root.cache_dir().join("loader-install");
+        assert!(!stage_dir.exists() || fs::read_dir(stage_dir).unwrap().count() == 0);
+    }
+}
+
+#[tokio::test]
+async fn link_and_unsafe_path_guards_block_generated_files_asset_copies_and_unsafe_asset_names() {
+    #[cfg(windows)]
+    {
+        // 1. `verify_generated_file` rejects an ancestor junction.
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path().join("root"));
+        root.ensure_layout().unwrap();
+        let outside = d.path().join("outside");
+        fs::create_dir_all(outside.join("forge/1.21.4")).unwrap();
+        fs::write(outside.join("forge/1.21.4/client.jar"), b"patched").unwrap();
+        let net_dir = root.libraries_dir().join("net");
+        fs::create_dir_all(&net_dir).unwrap();
+        create_junction(&net_dir.join("minecraftforge"), &outside);
+
+        let gf = GeneratedFile {
+            dest: root
+                .libraries_dir()
+                .join("net/minecraftforge/forge/1.21.4/client.jar"),
+            expected: Some(Expected::Sha1(sha1_hex(b"patched"))),
+            size: Some(7),
+        };
+        assert!(matches!(
+            verify_generated_file(&gf, &root),
+            Err(PrepareError::Storage(_))
+        ));
+
+        // 2. `copy_named` rejects an ancestor junction on destination and a link at `.copy.tmp`.
+        let src = root.assets_dir().join("objects/aa/aabbcc");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, b"icon-bytes").unwrap();
+        let out_outside = d.path().join("out_outside");
+        fs::create_dir_all(&out_outside).unwrap();
+        let virt = root.assets_dir().join("virtual/legacy");
+        fs::create_dir_all(&virt).unwrap();
+        create_junction(&virt.join("linked_dir"), &out_outside);
+
+        let mut checked = HashSet::new();
+        assert!(copy_named(
+            &src,
+            &virt.join("linked_dir/icon.png"),
+            10,
+            None,
+            &mut checked,
+            root.path(),
+        )
+        .is_err());
+        assert!(!out_outside.join("icon.png").exists());
+
+        create_junction(&virt.join("real.png.copy.tmp"), &out_outside);
+        assert!(copy_named(
+            &src,
+            &virt.join("real.png"),
+            10,
+            None,
+            &mut checked,
+            root.path(),
+        )
+        .is_err());
+    }
+
+    // 3. `ensure_assets` rejects an unsafe `RelPath` asset name in virtual/mapped layouts.
+    let w = world("1.6.4", Era::Virtual);
+    let data = b"evil-asset".to_vec();
+    let hash = sha1_hex(&data);
+    let obj_url = format!("{CDN}/{}/{hash}", &hash[..2]);
+    w.streamer.add(&obj_url, &data);
+    let bad_index = json!({
+        "virtual": true,
+        "objects": {
+            "../escape.txt": {"hash": hash, "size": data.len()}
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let bad_index_url = format!(
+        "https://piston-meta.mojang.com/v1/packages/{}/legacy-bad.json",
+        sha1_hex(&bad_index)
+    );
+    w.streamer.add(&bad_index_url, &bad_index);
+
+    let mut vjson: Value = serde_json::from_slice(
+        &w.fetcher_get(
+            serde_json::from_slice::<Value>(&w.fetcher_get(MANIFEST_URL)).unwrap()["versions"][0]
+                ["url"]
+                .as_str()
+                .unwrap(),
+        ),
+    )
+    .unwrap();
+    vjson["assetIndex"] = json!({
+        "id": "legacy-bad",
+        "sha1": sha1_hex(&bad_index),
+        "size": bad_index.len(),
+        "totalSize": data.len(),
+        "url": bad_index_url
+    });
+    let vbytes = vjson.to_string().into_bytes();
+    let vurl = format!(
+        "https://piston-meta.mojang.com/v1/packages/{}/1.6.4.json",
+        sha1_hex(&vbytes)
+    );
+    w.fetcher.ok(&vurl, &vbytes);
+    w.fetcher.ok(
+        MANIFEST_URL,
+        json!({"latest": {"release": "1.6.4", "snapshot": "1.6.4"}, "versions": [
+            {"id": "1.6.4", "type": "release", "url": vurl, "time": "t", "releaseTime": "2024-12-03T10:12:57+00:00", "sha1": sha1_hex(&vbytes), "complianceLevel": 1}
+        ]})
+        .to_string(),
+    );
+
+    let id = create(&w, NewInstance::vanilla("UnsafeAsset", "1.6.4").unwrap());
+    let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+    assert!(matches!(err, PrepareError::Unsupported(_)), "{err:?}");
+    assert!(!w.root.assets_dir().join("virtual/escape.txt").exists());
+}
+
+#[tokio::test]
+async fn version_json_recovery_rejection_missing_client_unhosted_lib_and_unknown_instance() {
+    let serve_modified_version = |w: &World, mutate: &dyn Fn(&mut Value)| {
+        let manifest: Value = serde_json::from_slice(&w.fetcher_get(MANIFEST_URL)).unwrap();
+        let orig_url = manifest["versions"][0]["url"].as_str().unwrap().to_owned();
+        let mut vjson: Value = serde_json::from_slice(&w.fetcher_get(&orig_url)).unwrap();
+        mutate(&mut vjson);
+        let bytes = vjson.to_string().into_bytes();
+        let url = format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+            sha1_hex(&bytes),
+            w.mc
+        );
+        w.fetcher.ok(&url, &bytes);
+        w.fetcher.ok(
+            MANIFEST_URL,
+            json!({"latest": {"release": w.mc, "snapshot": w.mc}, "versions": [
+                {"id": w.mc, "type": "release", "url": url, "time": "t", "releaseTime": "2024-12-03T10:12:57+00:00", "sha1": sha1_hex(&bytes), "complianceLevel": 1}
+            ]})
+            .to_string(),
+        );
+    };
+
+    // 1. Corrupt local `<mc>.json` and mismatched-id local `<mc>.json` recover from network.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        let vpath = version_json_path(&w.root, "1.21.4");
+        fs::create_dir_all(vpath.parent().unwrap()).unwrap();
+        fs::write(&vpath, b"{not valid json").unwrap();
+        let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+        assert!(inst.is_ready());
+
+        // Mismatched id in local JSON forces re-fetch on a fresh Pending profile.
+        let w2 = world("1.21.4", Era::Modern);
+        let id2 = vanilla(&w2);
+        let vpath2 = version_json_path(&w2.root, "1.21.4");
+        let manifest: Value = serde_json::from_slice(&w2.fetcher_get(MANIFEST_URL)).unwrap();
+        let orig_url = manifest["versions"][0]["url"].as_str().unwrap().to_owned();
+        let mut wrong_local: Value = serde_json::from_slice(&w2.fetcher_get(&orig_url)).unwrap();
+        wrong_local["id"] = json!("1.20.1");
+        fs::create_dir_all(vpath2.parent().unwrap()).unwrap();
+        fs::write(&vpath2, wrong_local.to_string()).unwrap();
+        let inst2 = prepare_instance(&ctx(&w2), &id2).await.unwrap();
+        assert!(inst2.is_ready());
+        let saved: Value = serde_json::from_slice(&fs::read(&vpath2).unwrap()).unwrap();
+        assert_eq!(saved["id"], json!("1.21.4"));
+    }
+
+    // 2. Remote `<mc>.json` with `parsed.id != mc` (even with matching manifest SHA-1) is rejected.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        serve_modified_version(&w, &|v| {
+            v["id"] = json!("1.20.1");
+        });
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Metadata(_)), "{err:?}");
+        assert!(!version_json_path(&w.root, "1.21.4").exists());
+    }
+
+    // 3. Missing `client` download in version JSON returns `PrepareError::Unsupported`.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        serve_modified_version(&w, &|v| {
+            v["downloads"] = json!({});
+        });
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Unsupported(_)), "{err:?}");
+    }
+
+    // 4. Vanilla library with `url: None` (`url: ""`) returns `PrepareError::Unsupported`.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let id = vanilla(&w);
+        serve_modified_version(&w, &|v| {
+            v["libraries"].as_array_mut().unwrap().push(json!({
+                "name": "com.example:local-only:1.0",
+                "downloads": {"artifact": {"path": "com/example/local-only/1.0/local-only-1.0.jar", "url": "", "sha1": sha1_hex(b"x"), "size": 1}}
+            }));
+        });
+        let err = prepare_instance(&ctx(&w), &id).await.unwrap_err();
+        assert!(matches!(err, PrepareError::Unsupported(_)), "{err:?}");
+    }
+
+    // 5. Unknown `InstanceId` returns `PrepareError::NotFound`.
+    {
+        let w = world("1.21.4", Era::Modern);
+        let ghost = InstanceId::new("unknown-profile").unwrap();
+        let err = prepare_instance(&ctx(&w), &ghost).await.unwrap_err();
+        assert!(matches!(err, PrepareError::NotFound), "{err:?}");
+        assert_eq!(err.code(), "not_found");
+    }
+}
+
+#[tokio::test]
+async fn verify_all_on_installed_forge_reuses_installer_and_repairs_libraries() {
+    let (w, universal) = forge_world();
+    let lv = LoaderVersion::new("54.1.14").unwrap();
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "ForgeVerify",
+            "1.21.4",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Pinned { version: lv },
+        )
+        .unwrap(),
+    );
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(w.runner.seen.lock().unwrap().len(), 1);
+
+    // Same-size corruption on a downloaded Forge library: `verify_all = true` must reuse the
+    // installed Forge profile (`PlannedLoader::ReusedInstaller`) and repair the jar without
+    // spawning the installer again.
+    let uni_path = w
+        .root
+        .libraries_dir()
+        .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-universal.jar");
+    let mut damaged = universal.clone();
+    damaged[12] ^= 0xFF;
+    fs::write(&uni_path, &damaged).unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let tracker = Tracker::new(
+        &id,
+        Progress::new(),
+        Box::new(move |p| sink.lock().unwrap().push(p)),
+    );
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    deep.tracker = &tracker;
+    let inst = prepare_instance(&deep, &id).await.unwrap();
+    assert!(inst.is_ready());
+    assert_eq!(fs::read(&uni_path).unwrap(), universal);
+    assert_eq!(
+        w.runner.seen.lock().unwrap().len(),
+        1,
+        "verify_all on intact Forge generated files must reuse installer output without re-running JVM"
+    );
+    let labels: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.label.clone())
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "Verifying Forge"),
+        "expected Verifying Forge stage label in {labels:?}"
+    );
+    let snap = tracker.progress.snapshot();
+    assert_eq!(snap.bytes_done, snap.bytes_total);
+}
+
+#[tokio::test]
+async fn auto_loader_pins_installed_version_during_repair_and_verify_even_when_catalog_updates() {
+    // 1. Fabric Auto: pins the installed version during offline/repair AND verify_all even when
+    //    the catalog updates to advertise a newer version.
+    let w = world("1.21.4", Era::Modern);
+    let jar_old = bytes(1100, 13);
+    let path_old = "net/fabricmc/fabric-loader/0.16.8/fabric-loader-0.16.8.jar";
+    let id_old = "fabric-loader-0.16.8-1.21.4";
+    w.streamer
+        .add(&format!("https://maven.fabricmc.net/{path_old}"), &jar_old);
+    w.fetcher.ok(
+        "https://meta.fabricmc.net/v2/versions/loader/1.21.4/0.16.8/profile/json",
+        json!({
+            "id": id_old,
+            "inheritsFrom": "1.21.4",
+            "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "libraries": [{"name": "net.fabricmc:fabric-loader:0.16.8", "url": "https://maven.fabricmc.net/", "sha1": sha1_hex(&jar_old), "size": jar_old.len()}]
+        })
+        .to_string(),
+    );
+    fabric_profile(&w, "1.21.4"); // registers 0.16.9 profile too, to catch any unintended switch
+    w.fetcher.ok(
+        "https://meta.fabricmc.net/v2/versions/loader/1.21.4",
+        r#"[{"loader":{"version":"0.16.8","stable":true}}]"#,
+    );
+
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "AutoFab",
+            "1.21.4",
+            LoaderKind::Fabric,
+            LoaderVersionSpec::Auto,
+        )
+        .unwrap(),
+    );
+    let inst = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(
+        inst.setup,
+        SetupState::Ready {
+            version_id: VersionId::new(id_old).unwrap(),
+            loader_version: Some(LoaderVersion::new("0.16.8").unwrap()),
+        }
+    );
+
+    // Catalog now promotes 0.16.9 as the sole/newest stable release.
+    w.fetcher.ok(
+        "https://meta.fabricmc.net/v2/versions/loader/1.21.4",
+        r#"[{"loader":{"version":"0.16.9","stable":true}}]"#,
+    );
+
+    // Delete the 0.16.8 loader jar so `already_ready` is false and full repair runs.
+    let jar_old_path = w.root.libraries_dir().join(path_old);
+    fs::remove_file(&jar_old_path).unwrap();
+    let repaired = prepare_instance(&ctx(&w), &id).await.unwrap();
+    assert_eq!(
+        repaired.setup, inst.setup,
+        "repairing an Auto instance must keep the already-installed loader version pinned"
+    );
+    assert_eq!(fs::read(&jar_old_path).unwrap(), jar_old);
+
+    // Full verification (`verify_all = true`) also preserves the pinned version.
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    let verified = prepare_instance(&deep, &id).await.unwrap();
+    assert_eq!(
+        verified.setup, inst.setup,
+        "verifying an Auto instance must not switch loader versions"
+    );
+    assert!(
+        !w.fetcher
+            .calls()
+            .iter()
+            .any(|u| u.contains("/0.16.9/profile/json")),
+        "0.16.9 profile must never be fetched while 0.16.8 is pinned"
+    );
+
+    // 2. Forge Auto: pins installed 54.1.14 across repair/verify even when promotions_slim.json
+    //    advances to 54.1.18.
+    let (wf, universal) = forge_world();
+    wf.fetcher.ok(
+        "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+        json!({"promos": {"1.21.4-recommended": "54.1.14", "1.21.4-latest": "54.1.14"}})
+            .to_string(),
+    );
+    let forge_id = create(
+        &wf,
+        NewInstance::modded(
+            "AutoForge",
+            "1.21.4",
+            LoaderKind::Forge,
+            LoaderVersionSpec::Auto,
+        )
+        .unwrap(),
+    );
+    let forge_inst = prepare_instance(&ctx(&wf), &forge_id).await.unwrap();
+    assert_eq!(
+        forge_inst.setup,
+        SetupState::Ready {
+            version_id: VersionId::new(FORGE_ID).unwrap(),
+            loader_version: Some(LoaderVersion::new("54.1.14").unwrap()),
+        }
+    );
+
+    wf.fetcher.ok(
+        "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+        json!({"promos": {"1.21.4-recommended": "54.1.18", "1.21.4-latest": "54.1.18"}})
+            .to_string(),
+    );
+    let uni_path = wf
+        .root
+        .libraries_dir()
+        .join("net/minecraftforge/forge/1.21.4-54.1.14/forge-1.21.4-54.1.14-universal.jar");
+    let mut bad_uni = universal.clone();
+    bad_uni[0] ^= 0xFF;
+    fs::write(&uni_path, &bad_uni).unwrap();
+
+    let mut deep_forge = ctx(&wf);
+    deep_forge.verify_all = true;
+    let verified_forge = prepare_instance(&deep_forge, &forge_id).await.unwrap();
+    assert_eq!(verified_forge.setup, forge_inst.setup);
+    assert_eq!(fs::read(&uni_path).unwrap(), universal);
+    assert_eq!(
+        wf.runner.seen.lock().unwrap().len(),
+        1,
+        "Forge Auto verify must reuse 54.1.14 without spawning an installer for 54.1.18"
+    );
+}
+
+#[tokio::test]
+async fn progress_plan_bytes_is_not_double_counted_across_fresh_and_verify_runs() {
+    let w = world("1.21.4", Era::Modern);
+    let (fabric_jar, _) = fabric_profile(&w, "1.21.4");
+    let id = create(
+        &w,
+        NewInstance::modded(
+            "PlanBytes",
+            "1.21.4",
+            LoaderKind::Fabric,
+            LoaderVersionSpec::Pinned {
+                version: LoaderVersion::new("0.16.9").unwrap(),
+            },
+        )
+        .unwrap(),
+    );
+
+    // Compute exact expected bytes independently from served metadata.
+    let manifest: Value = serde_json::from_slice(&w.fetcher_get(MANIFEST_URL)).unwrap();
+    let vurl = manifest["versions"][0]["url"].as_str().unwrap().to_owned();
+    let vplan = parse_version(&w.fetcher_get(&vurl), &WINDOWS_X64).unwrap();
+    let asset_index_size = vplan.asset_index.as_ref().unwrap().download.size;
+    let client_size = vplan.client.as_ref().unwrap().size;
+    let logging_size = vplan.logging.as_ref().unwrap().download.size;
+    let vanilla_libs_size: u64 = vplan.libraries.iter().filter_map(|l| l.artifact.size).sum();
+    // `world()` serves 3 object entries where 2 share the same 400-byte hash + 1 is 900 bytes.
+    let unique_assets_size = 400u64 + 900u64;
+    // `add_runtime()` serves 300 + 200 + 2000 = 2500 bytes.
+    let java_runtime_size = 2500u64;
+    let expected_total = asset_index_size
+        + client_size
+        + logging_size
+        + vanilla_libs_size
+        + unique_assets_size
+        + java_runtime_size
+        + fabric_jar.len() as u64;
+
+    // 1. Fresh run: every planned byte is counted once and matches bytes_done at completion.
+    prepare_instance(&ctx(&w), &id).await.unwrap();
+    let snap_fresh = w.tracker.progress.snapshot();
+    assert_eq!(
+        snap_fresh.bytes_total, expected_total,
+        "fresh run must not double-count planned bytes"
+    );
+    assert_eq!(snap_fresh.bytes_done, snap_fresh.bytes_total);
+
+    // 2. Full verification run on a fresh Progress/Tracker: java_verify + asset index + vanilla +
+    //    assets + loader libraries are each planned once and match bytes_done.
+    let tracker_verify = Tracker::new(&id, Progress::new(), Box::new(|_| {}));
+    let mut deep = ctx(&w);
+    deep.verify_all = true;
+    deep.tracker = &tracker_verify;
+    prepare_instance(&deep, &id).await.unwrap();
+    let snap_verify = tracker_verify.progress.snapshot();
+    assert_eq!(
+        snap_verify.bytes_total, expected_total,
+        "verify_all run must not double-count planned bytes"
+    );
+    assert_eq!(snap_verify.bytes_done, snap_verify.bytes_total);
 }

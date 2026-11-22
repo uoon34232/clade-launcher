@@ -59,6 +59,8 @@ pub struct UiSettingsDto {
     pub system_locale: Option<String>,
     /// `simple` or `advanced`.
     pub ui_mode: String,
+    /// `system`, `light` or `dark`.
+    pub theme: String,
     /// `system`, `on` or `off`.
     pub reduced_motion: String,
     /// `system`, `on` or `off`: the window-material ("Transparency effects") choice.
@@ -98,6 +100,7 @@ impl UiSettingsDto {
             language: s.ui.language.clone(),
             system_locale: crate::system::system_locale(),
             ui_mode: s.ui.ui_mode.clone(),
+            theme: s.ui.theme.clone(),
             reduced_motion: s.ui.reduced_motion.clone(),
             transparency: s.ui.transparency.clone(),
             onboarding_done: s.ui.onboarding_done,
@@ -132,6 +135,11 @@ impl SettingsState {
     /// How many files may download at once (1 to 16).
     pub fn max_concurrent_downloads(&self) -> usize {
         usize::from(self.read().max_concurrent_downloads).clamp(1, 16)
+    }
+
+    /// The theme choice (`system`, `light` or `dark`).
+    pub fn theme(&self) -> String {
+        self.read().ui.theme.clone()
     }
 
     /// The transparency-effects choice (`system`, `on` or `off`).
@@ -186,6 +194,17 @@ impl SettingsState {
         &self,
         change: impl FnOnce(&mut LauncherSettings) -> bool,
     ) -> Result<(UiSettingsDto, bool), String> {
+        self.update_and_then(change, |_| {})
+    }
+
+    /// Like `update`, but runs `after_commit` before releasing `writer` when `changed` is true so
+    /// downstream side effects (`glass::refresh` and `ui-settings-changed` emission) happen in
+    /// exact commit order without interleaving across concurrent updates.
+    fn update_and_then(
+        &self,
+        change: impl FnOnce(&mut LauncherSettings) -> bool,
+        after_commit: impl FnOnce(&UiSettingsDto),
+    ) -> Result<(UiSettingsDto, bool), String> {
         let _writer = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = self.settings_copy();
         let changed = change(&mut next);
@@ -194,7 +213,11 @@ impl SettingsState {
                 .map_err(|e| format!("could not save settings: {e}"))?;
             *self.write() = next.clone();
         }
-        Ok((UiSettingsDto::from_settings(&next), changed))
+        let dto = UiSettingsDto::from_settings(&next);
+        if changed {
+            after_commit(&dto);
+        }
+        Ok((dto, changed))
     }
 }
 
@@ -211,13 +234,17 @@ pub async fn set_sound_settings(
     volume: Option<f32>,
 ) -> Result<UiSettingsDto, String> {
     let st = state.inner().clone();
-    let (dto, changed) =
-        tokio::task::spawn_blocking(move || st.update(|s| s.set_sound(enabled, volume)))
-            .await
-            .map_err(|e| format!("settings task failed: {e}"))??;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto.clone());
-    }
+    let app_for_emit = app.clone();
+    let (dto, _changed) = tokio::task::spawn_blocking(move || {
+        st.update_and_then(
+            |s| s.set_sound(enabled, volume),
+            |dto| {
+                let _ = app_for_emit.emit(CHANGED_EVENT, dto.clone());
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("settings task failed: {e}"))??;
     Ok(dto)
 }
 
@@ -228,22 +255,25 @@ pub async fn set_last_phrase(
     id: String,
 ) -> Result<(), String> {
     let st = state.inner().clone();
-    let (dto, changed) = tokio::task::spawn_blocking(move || {
-        st.update(|s| {
-            let before = s.ui.last_phrase.clone();
-            s.set_last_phrase(&id) && s.ui.last_phrase != before
-        })
+    let app_for_emit = app.clone();
+    tokio::task::spawn_blocking(move || {
+        st.update_and_then(
+            |s| {
+                let before = s.ui.last_phrase.clone();
+                s.set_last_phrase(&id) && s.ui.last_phrase != before
+            },
+            |dto| {
+                let _ = app_for_emit.emit(CHANGED_EVENT, dto.clone());
+            },
+        )
     })
     .await
     .map_err(|e| format!("settings task failed: {e}"))??;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto);
-    }
     Ok(())
 }
 
-/// Saves on a blocking worker, announces on change, and refreshes the window backdrop only when
-/// `refresh_glass` is true (`set_transparency` and `reset_settings`).
+/// Saves on a blocking worker, refreshes glass and announces on change while holding `writer` so
+/// concurrent commands (`set_transparency`, `set_language`, `reset_settings`, etc.) stay ordered.
 async fn apply_blocking(
     app: &AppHandle,
     state: &SettingsState,
@@ -251,20 +281,18 @@ async fn apply_blocking(
     change: impl FnOnce(&mut LauncherSettings) -> bool + Send + 'static,
 ) -> Result<(), CodedError> {
     let st = state.clone();
-    let app_for_glass = app.clone();
-    let (dto, changed) = tokio::task::spawn_blocking(move || {
-        let out = st.update(change)?;
-        if out.1 && refresh_glass {
-            crate::glass::refresh(&app_for_glass);
-        }
-        Ok::<_, String>(out)
+    let app_for_side_effects = app.clone();
+    tokio::task::spawn_blocking(move || {
+        st.update_and_then(change, |dto| {
+            if refresh_glass {
+                crate::glass::refresh(&app_for_side_effects);
+            }
+            let _ = app_for_side_effects.emit(CHANGED_EVENT, dto.clone());
+        })
     })
     .await
     .map_err(|e| CodedError::storage(format!("settings task failed: {e}")))?
     .map_err(CodedError::storage)?;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto);
-    }
     Ok(())
 }
 
@@ -303,6 +331,22 @@ pub async fn set_ui_mode(
     apply_blocking(&app, &state, false, move |s| {
         let before = s.ui.ui_mode.clone();
         s.set_ui_mode(&mode) && s.ui.ui_mode != before
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_theme(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    mode: String,
+) -> Result<(), CodedError> {
+    if !crate::settings::THEME_MODES.contains(&mode.as_str()) {
+        return Err(unsupported());
+    }
+    apply_blocking(&app, &state, true, move |s| {
+        let before = s.ui.theme.clone();
+        s.set_theme(&mode) && s.ui.theme != before
     })
     .await
 }
@@ -348,16 +392,22 @@ pub async fn set_memory(
     mb: Option<u32>,
 ) -> Result<(), CodedError> {
     let st = state.inner().clone();
+    let app_for_emit = app.clone();
     let (res, refused) = tokio::task::spawn_blocking(move || {
         let total = crate::system::total_memory_mb();
         let mut refused = None;
-        let res = st.update(|s| match s.set_memory(mb, total) {
-            Ok(changed) => changed,
-            Err(range) => {
-                refused = Some(range);
-                false
-            }
-        });
+        let res = st.update_and_then(
+            |s| match s.set_memory(mb, total) {
+                Ok(changed) => changed,
+                Err(range) => {
+                    refused = Some(range);
+                    false
+                }
+            },
+            |dto| {
+                let _ = app_for_emit.emit(CHANGED_EVENT, dto.clone());
+            },
+        );
         (res, refused)
     })
     .await
@@ -369,10 +419,7 @@ pub async fn set_memory(
             ),
         );
     }
-    let (dto, changed) = res.map_err(CodedError::storage)?;
-    if changed {
-        let _ = app.emit(CHANGED_EVENT, dto);
-    }
+    res.map_err(CodedError::storage)?;
     Ok(())
 }
 
@@ -442,6 +489,7 @@ mod tests {
                 language: None,
                 system_locale: dto.system_locale.clone(),
                 ui_mode: "simple".into(),
+                theme: "system".into(),
                 reduced_motion: "system".into(),
                 transparency: "system".into(),
                 onboarding_done: false,
@@ -551,6 +599,7 @@ mod tests {
             language: Some("ru".into()),
             system_locale: Some("ru-RU".into()),
             ui_mode: "advanced".into(),
+            theme: "dark".into(),
             reduced_motion: "on".into(),
             transparency: "off".into(),
             onboarding_done: true,
@@ -567,6 +616,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["uiMode"], "advanced");
+        assert_eq!(json["theme"], "dark");
         assert_eq!(json["reducedMotion"], "on");
         assert_eq!(json["transparency"], "off");
         assert_eq!(json["onboardingDone"], true);
@@ -580,5 +630,72 @@ mod tests {
         assert_eq!(json["soundEnabled"], true);
         assert_eq!(json["soundVolume"], 0.5);
         assert_eq!(json["lastPhrase"], "welcome-back");
+    }
+
+    #[test]
+    fn concurrent_updates_run_post_commit_emissions_in_strict_commit_order() {
+        let d = tempfile::tempdir().unwrap();
+        let st = state(d.path());
+        let emitted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let st1 = st.clone();
+        let em1 = std::sync::Arc::clone(&emitted);
+        let b1 = std::sync::Arc::clone(&barrier);
+        let h1 = std::thread::spawn(move || {
+            b1.wait();
+            st1.update_and_then(
+                |s| s.set_sound(Some(true), Some(0.15)),
+                |dto| {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    em1.lock().unwrap().push(dto.sound_volume);
+                },
+            )
+            .unwrap();
+        });
+
+        let st2 = st.clone();
+        let em2 = std::sync::Arc::clone(&emitted);
+        let b2 = std::sync::Arc::clone(&barrier);
+        let h2 = std::thread::spawn(move || {
+            b2.wait();
+            st2.update_and_then(
+                |s| s.set_sound(Some(true), Some(0.85)),
+                |dto| {
+                    em2.lock().unwrap().push(dto.sound_volume);
+                },
+            )
+            .unwrap();
+        });
+
+        h1.join().unwrap();
+        h2.join().unwrap();
+        let emitted = emitted.lock().unwrap();
+        let final_vol = st.snapshot().sound_volume;
+        assert_eq!(emitted.len(), 2);
+        assert!(
+            (emitted[1] - final_vol).abs() < f32::EPSILON,
+            "last emitted value ({}) must match final committed snapshot ({final_vol})",
+            emitted[1]
+        );
+    }
+
+    #[test]
+    fn theme_preference_is_saved_reloaded_and_reset() {
+        let d = tempfile::tempdir().unwrap();
+        let st = state(d.path());
+        assert_eq!(st.theme(), "system");
+        let (dto, changed) = st.update(|s| s.set_theme("dark")).unwrap();
+        assert!(changed && dto.theme == "dark");
+        assert_eq!(st.theme(), "dark");
+
+        let reloaded =
+            LauncherSettings::load_or_default(&d.path().join("data").join("settings.json"))
+                .unwrap();
+        assert_eq!(reloaded.ui.theme, "dark");
+
+        let (reset_dto, changed) = st.update(LauncherSettings::reset_user_prefs).unwrap();
+        assert!(changed && reset_dto.theme == "system");
+        assert_eq!(st.theme(), "system");
     }
 }

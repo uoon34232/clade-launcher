@@ -63,7 +63,10 @@ pub fn normalize_verbatim_path(p: PathBuf) -> PathBuf {
         return PathBuf::from(format!(r"\\{unc}"));
     }
     if let Some(drive) = s.strip_prefix(r"\\?\") {
-        if drive.encode_utf16().count() < 248 {
+        let b = drive.as_bytes();
+        let is_drive_path =
+            b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+        if is_drive_path && drive.encode_utf16().count() < 248 {
             return PathBuf::from(drive);
         }
     }
@@ -130,7 +133,8 @@ impl PortableRoot {
             reject_links_between(&self.root, &target).map_err(RootError::NotWritable)?;
         }
         let mut nonce = [0u8; 6];
-        let _ = getrandom::fill(&mut nonce);
+        getrandom::fill(&mut nonce)
+            .map_err(|e| RootError::NotWritable(io::Error::other(e.to_string())))?;
         let probe = self
             .data_dir()
             .join(format!(".write-test-{}.tmp", hex::encode(nonce)));
@@ -235,9 +239,39 @@ pub struct RootLock {
     _file: File,
 }
 
+fn is_not_writable_io_error(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 19))
+        || matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        )
+}
+
+fn map_lock_open_error(e: io::Error) -> RootError {
+    if matches!(e.raw_os_error(), Some(32 | 33)) {
+        RootError::AlreadyRunning
+    } else if is_not_writable_io_error(&e) {
+        RootError::NotWritable(e)
+    } else {
+        RootError::Io(e)
+    }
+}
+
 impl RootLock {
     pub fn acquire(root: &PortableRoot) -> Result<Self, RootError> {
         root.ensure_data_dir()?;
+        let lock_path = root.lock_file();
+        match is_link(&lock_path) {
+            Ok(true) => {
+                return Err(RootError::NotWritable(io::Error::other(
+                    "lock file cannot be a link or junction",
+                )));
+            }
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if is_not_writable_io_error(&e) => return Err(RootError::NotWritable(e)),
+            Err(e) => return Err(RootError::Io(e)),
+        }
         let mut opts = OpenOptions::new();
         opts.create(true).truncate(false).read(true).write(true);
         {
@@ -246,12 +280,7 @@ impl RootLock {
             // so `clade.lock` cannot be unlinked or renamed away while held.
             opts.share_mode(0x0000_0001 | 0x0000_0002);
         }
-        let file = opts
-            .open(root.lock_file())
-            .map_err(|e| match e.raw_os_error() {
-                Some(32 | 33) => RootError::AlreadyRunning,
-                _ => RootError::Io(e),
-            })?;
+        let file = opts.open(&lock_path).map_err(map_lock_open_error)?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(RootError::AlreadyRunning),
@@ -282,6 +311,26 @@ mod tests {
     fn verbatim_prefixes_are_normalized() {
         let p = normalize_verbatim_path(PathBuf::from(r"\\?\UNC\srv\share\Clade"));
         assert_eq!(p, PathBuf::from(r"\\srv\share\Clade"));
+        assert_eq!(
+            normalize_verbatim_path(PathBuf::from(r"\\?\C:\Clade")),
+            PathBuf::from(r"C:\Clade")
+        );
+        assert_eq!(
+            normalize_verbatim_path(PathBuf::from(r"\\?\d:\Clade")),
+            PathBuf::from(r"d:\Clade")
+        );
+
+        let volume = PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789012}\Clade");
+        assert_eq!(normalize_verbatim_path(volume.clone()), volume);
+
+        let non_drive = PathBuf::from(r"\\?\C:relative");
+        assert_eq!(normalize_verbatim_path(non_drive.clone()), non_drive);
+
+        let digit_drive = PathBuf::from(r"\\?\1:\Clade");
+        assert_eq!(normalize_verbatim_path(digit_drive.clone()), digit_drive);
+
+        let long = PathBuf::from(format!(r"\\?\C:\{}", "a".repeat(250)));
+        assert_eq!(normalize_verbatim_path(long.clone()), long);
     }
 
     #[test]
@@ -326,5 +375,78 @@ mod tests {
         ));
         drop(first);
         assert!(RootLock::acquire(&root).is_ok());
+    }
+
+    #[test]
+    fn map_lock_open_error_classifies_sharing_permission_and_other_errors() {
+        assert!(matches!(
+            map_lock_open_error(io::Error::from_raw_os_error(32)),
+            RootError::AlreadyRunning
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::from_raw_os_error(33)),
+            RootError::AlreadyRunning
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::from_raw_os_error(5)),
+            RootError::NotWritable(_)
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::from_raw_os_error(19)),
+            RootError::NotWritable(_)
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            RootError::NotWritable(_)
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "ro")),
+            RootError::NotWritable(_)
+        ));
+        assert!(matches!(
+            map_lock_open_error(io::Error::other("other")),
+            RootError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn acquire_maps_readonly_lock_file_to_not_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_data_dir().unwrap();
+        let lock_path = root.lock_file();
+        fs::write(&lock_path, b"").unwrap();
+        let mut perms = fs::metadata(&lock_path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&lock_path, perms).unwrap();
+
+        let res = RootLock::acquire(&root);
+
+        let mut reset = fs::metadata(&lock_path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        reset.set_readonly(false);
+        let _ = fs::set_permissions(&lock_path, reset);
+
+        assert!(matches!(res, Err(RootError::NotWritable(_))));
+    }
+
+    #[test]
+    fn acquire_rejects_symlink_lock_file() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path().join("portable"));
+        root.ensure_data_dir().unwrap();
+        let outside = d.path().join("outside.lock");
+
+        if let Err(e) = std::os::windows::fs::symlink_file(&outside, root.lock_file()) {
+            // Creating file symlinks requires Developer Mode or elevation on Windows.
+            if e.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("unexpected symlink_file error: {e}");
+        }
+
+        let res = RootLock::acquire(&root);
+        assert!(matches!(res, Err(RootError::NotWritable(_))));
+        assert!(!outside.exists());
     }
 }

@@ -19,6 +19,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -26,9 +27,10 @@ use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::mpsc;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::instances::InstanceId;
 use crate::playtime::{PlaytimeStore, SessionTracker};
@@ -47,9 +49,15 @@ const LINE_CHANNEL_CAPACITY: usize = 512;
 // ------------------------------------------------------------------------------ redaction
 
 /// Replaces secret values in text. Built from the session's secrets (the access token).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, Zeroize, ZeroizeOnDrop)]
 pub struct Redactor {
     secrets: Vec<String>,
+}
+
+impl fmt::Debug for Redactor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Redactor({} secrets, <redacted>)", self.secrets.len())
+    }
 }
 
 impl Redactor {
@@ -71,7 +79,9 @@ impl Redactor {
         let mut out = line.to_owned();
         for s in &self.secrets {
             if out.contains(s.as_str()) {
-                out = out.replace(s.as_str(), "<redacted>");
+                let next = out.replace(s.as_str(), "<redacted>");
+                out.zeroize();
+                out = next;
             }
         }
         Cow::Owned(out)
@@ -252,10 +262,50 @@ pub struct Supervised {
 }
 
 async fn pump<R: AsyncRead + Unpin>(r: R, tx: mpsc::Sender<String>) {
-    let mut lines = BufReader::new(r).lines();
-    while let Ok(Some(l)) = lines.next_line().await {
-        if tx.send(l).await.is_err() {
-            break;
+    let mut reader = BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        let limit = MAX_PENDING_BYTES.saturating_sub(buf.len()) as u64;
+        if limit == 0 {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            buf.clear();
+            if tx.send(text).await.is_err() {
+                break;
+            }
+            continue;
+        }
+        match (&mut reader).take(limit).read_until(b'\n', &mut buf).await {
+            Ok(0) => {
+                if !buf.is_empty() {
+                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    buf.clear();
+                    let _ = tx.send(text).await;
+                }
+                break;
+            }
+            Ok(_) => {
+                let mut slice = buf.as_slice();
+                if slice.last() == Some(&b'\n') {
+                    slice = &slice[..slice.len() - 1];
+                    if slice.last() == Some(&b'\r') {
+                        slice = &slice[..slice.len() - 1];
+                    }
+                }
+                let text = String::from_utf8_lossy(slice).into_owned();
+                buf.clear();
+                if tx.send(text).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                if !buf.is_empty() {
+                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    buf.clear();
+                    let _ = tx.send(text).await;
+                }
+                break;
+            }
         }
     }
 }
@@ -497,15 +547,20 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
     let grace = tokio::time::sleep(watch.grace);
     tokio::pin!(grace);
     let mut playing = false;
-    let feed = |line: String, log: &mut Option<SessionLog>, tail: &mut VecDeque<String>| {
-        let tail_line = match redactor.apply(&line) {
-            Cow::Borrowed(_) => {
+    let feed = |mut line: String, log: &mut Option<SessionLog>, tail: &mut VecDeque<String>| {
+        let redacted = match redactor.apply(&line) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(r) => Some(r),
+        };
+        let tail_line = match redacted {
+            None => {
                 if let Some(l) = log.as_mut() {
                     l.line(&line);
                 }
                 line
             }
-            Cow::Owned(redacted) => {
+            Some(redacted) => {
+                line.zeroize();
                 if let Some(l) = log.as_mut() {
                     l.line(&redacted);
                 }
@@ -587,3 +642,58 @@ pub async fn supervise(mut child: Child, watch: Watch<'_>, on_playing: impl Fn()
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn redactor_implements_zeroize_on_drop_and_redacts_debug() {
+        fn assert_zeroize_on_drop<T: Zeroize + ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<Redactor>();
+
+        let secret = "SECRET-ACCESS-TOKEN-XYZ".to_owned();
+        let mut redactor = Redactor::new(std::slice::from_ref(&secret));
+        let debug = format!("{redactor:?}");
+        assert!(!debug.contains(&secret), "Debug leaked secret: {debug}");
+        assert!(debug.contains("<redacted>"));
+
+        redactor.zeroize();
+        assert!(redactor.secrets.is_empty());
+        assert!(matches!(redactor.apply(&secret), Cow::Borrowed(_)));
+    }
+
+    #[tokio::test]
+    async fn pump_decodes_non_utf8_bytes_lossily_without_stopping() {
+        let input: &[u8] = b"first line\r\noem \xff\xfe bytes\nthird line\r\ntrailing";
+        let (tx, mut rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
+        pump(input, tx).await;
+
+        let mut got = Vec::new();
+        while let Some(line) = rx.recv().await {
+            got.push(line);
+        }
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[0], "first line");
+        assert!(got[1].starts_with("oem ") && got[1].contains('\u{FFFD}'));
+        assert_eq!(got[2], "third line");
+        assert_eq!(got[3], "trailing");
+    }
+
+    #[tokio::test]
+    async fn pump_bounds_unterminated_lines_to_max_pending_bytes() {
+        let mut input = vec![b'a'; MAX_PENDING_BYTES + 10];
+        input.extend_from_slice(b"\nnext\n");
+        let (tx, mut rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
+        pump(input.as_slice(), tx).await;
+
+        let mut got = Vec::new();
+        while let Some(line) = rx.recv().await {
+            got.push(line);
+        }
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0].len(), MAX_PENDING_BYTES);
+        assert_eq!(got[1].len(), 10);
+        assert_eq!(got[2], "next");
+    }
+}

@@ -537,12 +537,17 @@ pub fn persist(
         .and_then(|r| r)
 }
 
+struct RefreshSlot {
+    mutex: tokio::sync::Mutex<()>,
+    revision: AtomicU64,
+}
+
 type RefreshLockKey = (usize, String);
-type RefreshLockMap = HashMap<RefreshLockKey, Weak<tokio::sync::Mutex<()>>>;
+type RefreshLockMap = HashMap<RefreshLockKey, Weak<RefreshSlot>>;
 
 static REFRESH_LOCKS: OnceLock<Mutex<RefreshLockMap>> = OnceLock::new();
 
-fn refresh_lock_for(vault: &Mutex<Option<Vault>>, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn refresh_lock_for(vault: &Mutex<Option<Vault>>, id: &str) -> Arc<RefreshSlot> {
     let map = REFRESH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = lock(map);
     let key = (std::ptr::from_ref(vault) as usize, id.to_owned());
@@ -552,9 +557,60 @@ fn refresh_lock_for(vault: &Mutex<Option<Vault>>, id: &str) -> Arc<tokio::sync::
     if guard.len() > 64 {
         guard.retain(|_, v| v.strong_count() > 0);
     }
-    let created = Arc::new(tokio::sync::Mutex::new(()));
+    let created = Arc::new(RefreshSlot {
+        mutex: tokio::sync::Mutex::new(()),
+        revision: AtomicU64::new(0),
+    });
     guard.insert(key, Arc::downgrade(&created));
     created
+}
+
+fn bump_account_revision(vault: &Mutex<Option<Vault>>, id: &str) {
+    let Some(map) = REFRESH_LOCKS.get() else {
+        return;
+    };
+    let mut guard = lock(map);
+    let key = (std::ptr::from_ref(vault) as usize, id.to_owned());
+    if let Some(slot) = guard.get(&key).and_then(Weak::upgrade) {
+        slot.revision.fetch_add(1, Ordering::SeqCst);
+    }
+    if guard.len() > 64 {
+        guard.retain(|_, v| v.strong_count() > 0);
+    }
+}
+
+fn same_secrets(a: &AccountSecrets, b: &AccountSecrets) -> bool {
+    a.ms_refresh_token == b.ms_refresh_token
+        && a.minecraft_access_token == b.minecraft_access_token
+        && a.minecraft_token_expires_at == b.minecraft_token_expires_at
+}
+
+fn was_superseded(
+    v: &Vault,
+    id: &str,
+    generation: [u8; 16],
+    acct_slot: &RefreshSlot,
+    start_rev: u64,
+    expected_secrets: &AccountSecrets,
+) -> bool {
+    v.generation() == generation
+        && (acct_slot.revision.load(Ordering::SeqCst) != start_rev
+            || v.account(id)
+                .is_some_and(|cur| !same_secrets(cur, expected_secrets)))
+}
+
+fn check_superseded_locked(
+    vault: &Mutex<Option<Vault>>,
+    id: &str,
+    generation: [u8; 16],
+    acct_slot: &RefreshSlot,
+    start_rev: u64,
+    expected_secrets: &AccountSecrets,
+) -> bool {
+    let guard = lock(vault);
+    guard
+        .as_ref()
+        .is_some_and(|v| was_superseded(v, id, generation, acct_slot, start_rev, expected_secrets))
 }
 
 /// Makes sure an account has a usable Minecraft access token (for a launch that is about to
@@ -589,125 +645,254 @@ async fn ensure_fresh_inner<T: Transport>(
     accounts: &AccountsState,
     id: &str,
     now: i64,
-    force: bool,
+    mut force: bool,
 ) -> Result<Secret, AuthError> {
-    let acct_lock = refresh_lock_for(vault, id);
-    let _acct_guard = acct_lock.lock().await;
+    const MAX_SIGN_IN_RETRIES: usize = 3;
+    let acct_slot = refresh_lock_for(vault, id);
+    let _acct_guard = acct_slot.mutex.lock().await;
 
-    // Which vault this refresh belongs to. The network steps below take a while; if the vault is
-    // replaced meanwhile (it was archived by "Start fresh" and a new one created), the results of this
-    // refresh must not be written into it.
-    let (secrets, generation) = {
-        let guard = lock(vault);
-        let v = guard.as_ref().ok_or(AuthError::VaultLocked)?;
-        (v.account(id).cloned(), v.generation())
-    };
-    let expected_uuid = accounts
-        .load()
-        .map_err(storage)?
-        .accounts
-        .into_iter()
-        .find(|a| a.id == id)
-        .ok_or(AuthError::UnknownAccount)?
-        .minecraft_uuid;
+    for attempt in 0..=MAX_SIGN_IN_RETRIES {
+        // Which vault and credential revision this refresh belongs to. The network steps below take
+        // a while; if the vault is replaced ("Start fresh") or a new sign-in updates this account's
+        // credentials meanwhile, the stale refresh must never overwrite them or revert status.
+        let (mut expected_secrets, generation, start_rev, expected_uuid, old_refresh) = {
+            let guard = lock(vault);
+            let v = guard.as_ref().ok_or(AuthError::VaultLocked)?;
+            let start_rev = acct_slot.revision.load(Ordering::SeqCst);
+            let expected_uuid = accounts
+                .load()
+                .map_err(storage)?
+                .accounts
+                .into_iter()
+                .find(|a| a.id == id)
+                .ok_or(AuthError::UnknownAccount)?
+                .minecraft_uuid;
+            let Some(secrets) = v.account(id).cloned() else {
+                let _ = accounts.update(|f| f.mark_needs_reauth(id, ReauthReason::Unknown, now));
+                return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
+            };
+            if !force {
+                if let (Some(token), Some(expires)) = (
+                    &secrets.minecraft_access_token,
+                    secrets.minecraft_token_expires_at,
+                ) {
+                    if expires > now.saturating_add(TOKEN_MARGIN_SECS)
+                        && expires <= now.saturating_add(MAX_CACHED_TTL_SECS)
+                    {
+                        return Ok(Secret::new(token.clone()));
+                    }
+                }
+            }
+            let Some(old_refresh) = secrets
+                .ms_refresh_token
+                .as_ref()
+                .map(|s| Secret::new(s.clone()))
+            else {
+                let _ = accounts.update(|f| f.mark_needs_reauth(id, ReauthReason::Unknown, now));
+                return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
+            };
+            (
+                secrets,
+                v.generation(),
+                start_rev,
+                expected_uuid,
+                old_refresh,
+            )
+        };
 
-    let mark = |reason: ReauthReason| {
-        let _ = accounts.update(|f| f.mark_needs_reauth(id, reason, now));
-    };
-    let Some(secrets) = secrets else {
-        mark(ReauthReason::Unknown); // e.g. the vault came from another folder
-        return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
-    };
-    if !force {
-        if let (Some(token), Some(expires)) = (
-            &secrets.minecraft_access_token,
-            secrets.minecraft_token_expires_at,
-        ) {
-            if expires > now.saturating_add(TOKEN_MARGIN_SECS)
-                && expires <= now.saturating_add(MAX_CACHED_TTL_SECS)
-            {
-                return Ok(Secret::new(token.clone()));
+        let tokens = match refresh_ms(t, &old_refresh).await {
+            Ok(tokens) => tokens,
+            Err(AuthError::NeedsSignIn(reason)) => {
+                let superseded = {
+                    let guard = lock(vault);
+                    let v = guard.as_ref().ok_or(AuthError::VaultLocked)?;
+                    if v.generation() != generation {
+                        return Err(AuthError::VaultLocked);
+                    }
+                    if was_superseded(v, id, generation, &acct_slot, start_rev, &expected_secrets) {
+                        true
+                    } else {
+                        let in_accounts =
+                            accounts.load().map_err(storage)?.accounts.iter().any(|a| {
+                                a.id == id && same_uuid(&a.minecraft_uuid, &expected_uuid)
+                            });
+                        if !in_accounts {
+                            return Err(AuthError::UnknownAccount);
+                        }
+                        let _ = accounts.update(|f| f.mark_needs_reauth(id, reason, now));
+                        return Err(AuthError::NeedsSignIn(reason));
+                    }
+                };
+                if superseded {
+                    if attempt < MAX_SIGN_IN_RETRIES {
+                        force = false;
+                        continue;
+                    }
+                    return Err(AuthError::Storage(
+                        "account credentials changed concurrently".into(),
+                    ));
+                }
+                return Err(AuthError::NeedsSignIn(reason));
+            }
+            Err(e) => {
+                if check_superseded_locked(
+                    vault,
+                    id,
+                    generation,
+                    &acct_slot,
+                    start_rev,
+                    &expected_secrets,
+                ) {
+                    if attempt < MAX_SIGN_IN_RETRIES {
+                        force = false;
+                        continue;
+                    }
+                    return Err(AuthError::Storage(
+                        "account credentials changed concurrently".into(),
+                    ));
+                }
+                return Err(e);
+            }
+        };
+
+        // Microsoft rotates refresh tokens, and the old one may stop working once it has been used. So
+        // the new one is saved to the vault right now, before the Xbox and Minecraft steps: if one of
+        // them fails (an outage, a rate limit), the account still holds a refresh token that works. Only
+        // the refresh token is written here, and only if the account was not removed or superseded meanwhile.
+        if let Some(new_refresh) = &tokens.refresh {
+            let superseded =
+                {
+                    let mut guard = lock(vault);
+                    let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+                    if v.generation() != generation {
+                        return Err(AuthError::VaultLocked);
+                    }
+                    let Some(cur) = v.account(id) else {
+                        return Err(AuthError::UnknownAccount);
+                    };
+                    if was_superseded(v, id, generation, &acct_slot, start_rev, &expected_secrets) {
+                        true
+                    } else {
+                        let _ = cur;
+                        let still_present =
+                            accounts.load().map_err(storage)?.accounts.iter().any(|a| {
+                                a.id == id && same_uuid(&a.minecraft_uuid, &expected_uuid)
+                            });
+                        if !still_present {
+                            return Err(AuthError::UnknownAccount);
+                        }
+                        let mut updated = expected_secrets.clone();
+                        updated.ms_refresh_token = Some(new_refresh.expose().to_owned());
+                        v.set_account(id, updated.clone()).map_err(storage)?;
+                        expected_secrets = updated;
+                        false
+                    }
+                };
+            if superseded {
+                if attempt < MAX_SIGN_IN_RETRIES {
+                    force = false;
+                    continue;
+                }
+                return Err(AuthError::Storage(
+                    "account credentials changed concurrently".into(),
+                ));
             }
         }
+
+        let (session, profile) = match complete_chain(t, &tokens.access).await {
+            Ok(res) => res,
+            Err(e) => {
+                if check_superseded_locked(
+                    vault,
+                    id,
+                    generation,
+                    &acct_slot,
+                    start_rev,
+                    &expected_secrets,
+                ) {
+                    if attempt < MAX_SIGN_IN_RETRIES {
+                        force = false;
+                        continue;
+                    }
+                    return Err(AuthError::Storage(
+                        "account credentials changed concurrently".into(),
+                    ));
+                }
+                return Err(e);
+            }
+        };
+        if !same_uuid(&expected_uuid, &profile.uuid) {
+            if check_superseded_locked(
+                vault,
+                id,
+                generation,
+                &acct_slot,
+                start_rev,
+                &expected_secrets,
+            ) {
+                if attempt < MAX_SIGN_IN_RETRIES {
+                    force = false;
+                    continue;
+                }
+                return Err(AuthError::Storage(
+                    "account credentials changed concurrently".into(),
+                ));
+            }
+            return Err(AuthError::WrongAccount);
+        }
+
+        // The refresh token to keep: the new one, or the old one if none came back.
+        let refresh = tokens.refresh.unwrap_or(old_refresh);
+        let superseded = {
+            let mut guard = lock(vault);
+            let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
+            if v.generation() != generation {
+                return Err(AuthError::VaultLocked); // the vault changed: nothing of this refresh is kept
+            }
+            if v.account(id).is_none() {
+                return Err(AuthError::UnknownAccount);
+            }
+            if was_superseded(v, id, generation, &acct_slot, start_rev, &expected_secrets) {
+                true
+            } else {
+                let current = accounts.load().map_err(storage)?;
+                match current.accounts.iter().find(|a| a.id == id) {
+                    Some(a) if same_uuid(&a.minecraft_uuid, &profile.uuid) => {}
+                    Some(_) => return Err(AuthError::WrongAccount),
+                    None => return Err(AuthError::UnknownAccount),
+                }
+                v.set_account(id, secrets_for(&refresh, &session, now))
+                    .map_err(storage)?;
+                accounts.update(|f| match f.accounts.iter_mut().find(|a| a.id == id) {
+                    Some(a) if same_uuid(&a.minecraft_uuid, &profile.uuid) => {
+                        a.username = profile.name.clone();
+                        a.status = AccountStatus::Ready;
+                        Ok(())
+                    }
+                    Some(_) => Err(AuthError::WrongAccount),
+                    None => Err(AuthError::UnknownAccount),
+                })??;
+                false
+            }
+        };
+        if superseded {
+            if attempt < MAX_SIGN_IN_RETRIES {
+                force = false;
+                continue;
+            }
+            return Err(AuthError::Storage(
+                "account credentials changed concurrently".into(),
+            ));
+        }
+
+        // The profile just reported the current skin: note it (the download happens off this path).
+        accounts.record_skin(&profile.uuid, profile.skin_url.as_deref());
+        return Ok(session.access_token);
     }
-    let Some(old_refresh) = secrets
-        .ms_refresh_token
-        .as_ref()
-        .map(|s| Secret::new(s.clone()))
-    else {
-        mark(ReauthReason::Unknown);
-        return Err(AuthError::NeedsSignIn(ReauthReason::Unknown));
-    };
-    let tokens = match refresh_ms(t, &old_refresh).await {
-        Ok(tokens) => tokens,
-        Err(AuthError::NeedsSignIn(reason)) => {
-            mark(reason);
-            return Err(AuthError::NeedsSignIn(reason));
-        }
-        Err(e) => return Err(e),
-    };
-    // Microsoft rotates refresh tokens, and the old one may stop working once it has been used. So
-    // the new one is saved to the vault right now, before the Xbox and Minecraft steps: if one of
-    // them fails (an outage, a rate limit), the account still holds a refresh token that works. Only
-    // the refresh token is written here, and only if the account was not removed meanwhile.
-    if let Some(new_refresh) = &tokens.refresh {
-        let mut guard = lock(vault);
-        let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
-        if v.generation() != generation {
-            return Err(AuthError::VaultLocked);
-        }
-        if v.account(id).is_none() {
-            return Err(AuthError::UnknownAccount);
-        }
-        let still_present = accounts
-            .load()
-            .map_err(storage)?
-            .accounts
-            .iter()
-            .any(|a| a.id == id && same_uuid(&a.minecraft_uuid, &expected_uuid));
-        if !still_present {
-            return Err(AuthError::UnknownAccount);
-        }
-        let mut updated = secrets.clone();
-        updated.ms_refresh_token = Some(new_refresh.expose().to_owned());
-        v.set_account(id, updated).map_err(storage)?;
-    }
-    let (session, profile) = complete_chain(t, &tokens.access).await?;
-    if !same_uuid(&expected_uuid, &profile.uuid) {
-        return Err(AuthError::WrongAccount);
-    }
-    // The refresh token to keep: the new one, or the old one if none came back.
-    let refresh = tokens.refresh.unwrap_or(old_refresh);
-    {
-        let mut guard = lock(vault);
-        let v = guard.as_mut().ok_or(AuthError::VaultLocked)?;
-        if v.generation() != generation {
-            return Err(AuthError::VaultLocked); // the vault changed: nothing of this refresh is kept
-        }
-        if v.account(id).is_none() {
-            return Err(AuthError::UnknownAccount);
-        }
-        let current = accounts.load().map_err(storage)?;
-        match current.accounts.iter().find(|a| a.id == id) {
-            Some(a) if same_uuid(&a.minecraft_uuid, &profile.uuid) => {}
-            Some(_) => return Err(AuthError::WrongAccount),
-            None => return Err(AuthError::UnknownAccount),
-        }
-        v.set_account(id, secrets_for(&refresh, &session, now))
-            .map_err(storage)?;
-    }
-    accounts.update(|f| match f.accounts.iter_mut().find(|a| a.id == id) {
-        Some(a) if same_uuid(&a.minecraft_uuid, &profile.uuid) => {
-            a.username = profile.name.clone();
-            a.status = AccountStatus::Ready;
-            Ok(())
-        }
-        Some(_) => Err(AuthError::WrongAccount),
-        None => Err(AuthError::UnknownAccount),
-    })??;
-    // The profile just reported the current skin: note it (the download happens off this path).
-    accounts.record_skin(&profile.uuid, profile.skin_url.as_deref());
-    Ok(session.access_token)
+
+    Err(AuthError::Storage(
+        "account credentials changed concurrently".into(),
+    ))
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -851,13 +1036,16 @@ pub(crate) async fn create_vault_with(
     auth: &AuthState,
     passphrase: String,
 ) -> Result<(), CodedError> {
-    let _kdf = auth.kdf_gate.lock().await;
-    if lock(&auth.vault).is_some() {
-        return Err(CodedError::new("vault_exists", "a vault already exists"));
-    }
     let passphrase = zeroize::Zeroizing::new(passphrase);
+    let _kdf = auth.kdf_gate.lock().await;
+    let started = {
+        let slot = lock(&auth.vault);
+        if slot.is_some() {
+            return Err(CodedError::new("vault_exists", "a vault already exists"));
+        }
+        auth.epoch.load(Ordering::SeqCst)
+    };
     let path = auth.vault_path.clone();
-    let started = auth.epoch.load(Ordering::SeqCst);
     let vault = tokio::task::spawn_blocking(move || Vault::derive_empty(&path, &passphrase))
         .await
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
@@ -930,13 +1118,16 @@ pub(crate) async fn unlock_vault_with(
     accounts: &AccountsState,
     passphrase: String,
 ) -> Result<(), CodedError> {
-    let _kdf = auth.kdf_gate.lock().await;
-    if lock(&auth.vault).is_some() {
-        return Ok(());
-    }
     let passphrase = zeroize::Zeroizing::new(passphrase);
+    let _kdf = auth.kdf_gate.lock().await;
+    let started = {
+        let slot = lock(&auth.vault);
+        if slot.is_some() {
+            return Ok(());
+        }
+        auth.epoch.load(Ordering::SeqCst)
+    };
     let path = auth.vault_path.clone();
-    let started = auth.epoch.load(Ordering::SeqCst);
     let vault = tokio::task::spawn_blocking(move || Vault::unlock(&path, &passphrase))
         .await
         .map_err(|_| CodedError::new("vault_unreadable", "the vault task failed"))?
@@ -988,7 +1179,9 @@ fn persist_signed_in(
         return Err(AuthError::Cancelled);
     }
     let vault = guard.as_mut().ok_or(AuthError::VaultLocked)?;
-    persist(vault, accounts, signed, reauth_for, now)
+    let id = persist(vault, accounts, signed, reauth_for, now)?;
+    bump_account_revision(&auth.vault, &id);
+    Ok(id)
 }
 
 pub(crate) fn cancel_sign_in_with(auth: &AuthState) {

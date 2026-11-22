@@ -43,9 +43,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).ProviderPath
 $target = 'x86_64-pc-windows-msvc'
-$outDir = [System.IO.Path]::GetFullPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
+$outDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($(if ($OutDir) { $OutDir } else { Join-Path $repo 'dist-portable' }))
 $rel = Join-Path $repo 'scripts\release'
 function Run-Node { & node @args; if ($LASTEXITCODE) { throw "node $($args -join ' ') failed" } }
 function ConvertTo-TomlString([string] $value) {
@@ -61,7 +61,7 @@ $version = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | Con
 # ---- 1b. the pinned WebView2 runtime is checked FIRST, so a missing pin or a wrong CAB fails in seconds, not after a build
 if (-not $WithoutWebView2) {
   Run-Node (Join-Path $rel 'webview2.mjs') status                  # says exactly what is not configured yet
-  $cab = (Resolve-Path -LiteralPath $WebView2Cab).Path
+  $cab = (Resolve-Path -LiteralPath $WebView2Cab).ProviderPath
   Run-Node (Join-Path $rel 'webview2.mjs') verify --cab $cab       # SHA-256 against the pin, before anything is extracted
 }
 

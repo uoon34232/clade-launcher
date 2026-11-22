@@ -31,28 +31,58 @@ describe("input modality", () => {
     key("Tab");
     pointer("touchstart");
     expect(mode()).toBe("pointer");
+    key("Tab", { shiftKey: true });
+    expect(mode()).toBe("keyboard");
   });
 
   it("ignores bare modifiers and shortcuts", () => {
-    for (const k of ["Shift", "Control", "Alt", "Meta"]) key(k);
+    for (const k of [
+      "Shift",
+      "Control",
+      "Alt",
+      "Meta",
+      "AltGraph",
+      "CapsLock",
+      "NumLock",
+      "ScrollLock",
+    ]) {
+      key(k);
+    }
     key("c", { ctrlKey: true });
+    key("c", { metaKey: true });
     key("Tab", { altKey: true });
     expect(mode()).toBe("pointer");
   });
 
   it("cleans up its listeners", () => {
+    key("Tab");
+    expect(mode()).toBe("keyboard");
     uninstall();
-    pointer();
+    for (const type of ["pointerdown", "mousedown", "touchstart"]) {
+      pointer(type);
+      expect(mode()).toBe("keyboard"); // pointer listeners removed
+    }
+
+    uninstall = installInputModality();
+    expect(mode()).toBe("pointer");
+    uninstall();
     key("Tab");
     expect(mode()).toBe("pointer"); // no longer tracking: left as it was
   });
 
-  it("registers pointer listeners as passive capture so pointer events never block scrolling", () => {
+  it("registers capture listeners and marks pointer listeners passive so scrolling is never blocked", () => {
     uninstall();
     const addSpy = vi.spyOn(document, "addEventListener");
-    uninstall = installInputModality(document);
-    const pointerCall = addSpy.mock.calls.find(([type]) => type === "pointerdown");
-    expect(pointerCall?.[2]).toEqual({ capture: true, passive: true });
-    addSpy.mockRestore();
+    try {
+      uninstall = installInputModality(document);
+      const optionsFor = (eventType: string) =>
+        addSpy.mock.calls.find(([type]) => type === eventType)?.[2];
+      expect(optionsFor("keydown")).toBe(true);
+      for (const type of ["pointerdown", "mousedown", "touchstart"]) {
+        expect(optionsFor(type)).toEqual({ capture: true, passive: true });
+      }
+    } finally {
+      addSpy.mockRestore();
+    }
   });
 });

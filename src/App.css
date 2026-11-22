@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 @font-face {
   font-family: "Fraunces Variable";
   font-style: normal;
@@ -75,17 +77,21 @@
   --font-heading: var(--clade-font-serif);
   --font-serif: var(--clade-font-serif);
 
-  --color-ivory: #f3ede3;
-  --color-cream: #f6f0e6;
-  --color-sand: #e4d5be;
+  --color-ivory: var(--clade-ivory);
+  --color-cream: var(--clade-cream);
+  --color-sand: var(--clade-sand);
   /* Secondary action buttons: what sand at 60% looks like on the opaque card, as a solid colour, so an
      action never takes on whatever is behind a translucent surface. */
-  --color-sand-soft: #ebe0ce;
-  --color-graphite: #2b2622;
-  --color-clay: #a3523d;
-  --color-clay-deep: #9c5039;
-  --color-clay-soft: #e2a18b;
-  --color-ink-muted: #52493f;
+  --color-sand-soft: var(--clade-sand-soft);
+  --color-graphite: var(--clade-graphite);
+  --color-clay: var(--clade-clay);
+  --color-clay-hover: var(--clade-clay-hover);
+  --color-clay-active: var(--clade-clay-active);
+  --color-clay-deep: var(--clade-clay-deep);
+  --color-clay-soft: var(--clade-clay-soft);
+  --color-sand-border: var(--clade-sand-border);
+  --color-progress-fill: var(--clade-progress-fill);
+  --color-ink-muted: var(--clade-ink-muted);
 
   --color-ring: var(--ring);
   --color-border: var(--border);
@@ -134,9 +140,37 @@
 }
 
 :root {
+  color-scheme: light;
   --clade-font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
   --clade-font-serif: "Fraunces Variable", ui-serif, Georgia, serif;
   --radius: 0.75rem;
+  --clade-ivory: #f3ede3;
+  --clade-cream: #f6f0e6;
+  --clade-sand: #e4d5be;
+  --clade-sand-soft: #ebe0ce;
+  --clade-graphite: #2b2622;
+  --clade-clay: #a3523d;
+  --clade-clay-hover: #944834;
+  --clade-clay-active: #853d2b;
+  --clade-clay-deep: #8a412d;
+  --clade-clay-soft: #e2a18b;
+  --clade-sand-border: #8c7f6f;
+  --clade-progress-fill: #a3523d;
+  --clade-ink-muted: #52493f;
+  --hero-hover: #43362f;
+  --dock-ring-offset: #2b2622;
+  --segmented-active: #f6f0e6;
+  --segmented-shadow: 0 1px 2px rgb(43 38 34 / 0.12);
+  --segmented-hover: rgb(43 38 34 / 0.09);
+  --quiet-hover: rgb(43 38 34 / 0.08);
+  --soft-hover: #ddd0ba;
+  --bg-field-1: rgb(228 213 190 / 0.95);
+  --bg-field-2: rgb(233 196 168 / 0.95);
+  --bg-field-3: rgb(221 184 172 / 0.85);
+  --bg-field-4: rgb(196 122 98 / 0.34);
+  --bg-vignette: radial-gradient(70% 100% at 50% 100%, rgb(43 38 34 / 0.13), transparent 70%);
+  --bg-grain-opacity: 0.07;
+  --bg-grain-filter: none;
   --background: #f3ede3;
   --foreground: #2b2622;
   --card: #f6f0e6;
@@ -155,7 +189,16 @@
   --destructive: #b3412f;
   --border: rgb(43 38 34 / 0.12);
   --input: rgb(43 38 34 / 0.12);
-  --ring: #e2a18b;
+  --ring: #a3523d;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    color-scheme: dark;
+    --background: #1c1917;
+    --foreground: #efe8dd;
+    --page-base: #1c1917;
+  }
 }
 
 html[lang="ru"] {
@@ -192,6 +235,49 @@ html[lang="ru"] {
   .font-serif,
   .font-heading {
     text-rendering: optimizeLegibility;
+  }
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    border-radius: 9999px;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 0.5rem;
+    border-radius: 9999px;
+    background: var(--clade-sand);
+    border: 1px solid var(--clade-sand-border);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 1rem;
+    height: 1rem;
+    margin-top: -0.3125rem;
+    border-radius: 9999px;
+    background: var(--clade-clay);
+    border: 2px solid var(--card);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+  }
+  input[type="range"]:not(:disabled):hover::-webkit-slider-thumb {
+    background: var(--clade-clay-hover);
+  }
+  input[type="range"]::-moz-range-track {
+    height: 0.5rem;
+    border-radius: 9999px;
+    background: var(--clade-sand);
+    border: 1px solid var(--clade-sand-border);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 1rem;
+    height: 1rem;
+    border-radius: 9999px;
+    background: var(--clade-clay);
+    border: 2px solid var(--card);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+  }
+  input[type="range"]:disabled {
+    opacity: 0.55;
   }
 }
 
@@ -236,7 +322,6 @@ html[lang="ru"] {
 
 .bg-sway,
 .bg-bob {
-  will-change: transform;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-direction: alternate;
@@ -298,7 +383,8 @@ html[lang="ru"] {
 /* Quiet scrollbars on the dark popups (profile menu, version lists) instead of the bright system one. */
 [data-slot="dropdown-menu-content"],
 [data-slot="dropdown-menu-content"] .menu-scroll,
-[data-slot="select-content"] {
+[data-slot="select-content"],
+[data-slot="select-list"] {
   scrollbar-width: thin;
   scrollbar-color: rgb(246 240 230 / 0.28) transparent;
 }
@@ -339,27 +425,29 @@ html[lang="ru"] {
   text-wrap: balance;
   cursor: pointer;
   touch-action: manipulation;
-  /* No browser-default ring ever: the only ring is the keyboard-modality one below. */
-  outline: none;
+  /* Keep outline geometry intact (`outline-hidden` equivalent) so Windows Forced Colors keeps focus visibility. */
+  outline: 2px solid transparent;
+  outline-offset: 0.16em;
   transition:
     color 190ms var(--ease-out-soft),
     translate 190ms var(--ease-out-soft);
 }
 .hero-link:hover {
-  color: #43362f;
+  color: var(--hero-hover);
   translate: 0 -2px;
 }
 /* Keyboard navigation only: `data-input` is set by lib/inputModality.ts, so the ring does not
    linger after a normal mouse click on an element that was focused with the keyboard. */
 html[data-input="keyboard"] .hero-link:focus-visible {
-  outline: 2px solid rgb(181 96 74 / 0.5);
+  outline: 2px solid var(--ring);
   outline-offset: 0.16em;
   border-radius: 0.14em;
 }
 html[data-input="keyboard"] .window-btn:focus-visible,
 html[data-input="keyboard"] .wordmark:focus-visible {
   opacity: 1;
-  box-shadow: 0 0 0 2px var(--color-clay);
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
 }
 .hero-text {
   display: inline-block;
@@ -388,16 +476,12 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 @keyframes play-launch-breathe {
   0%,
   100% {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.2),
-      0 0 0 1px rgb(163 82 61 / 0.35),
-      0 6px 18px -6px rgb(163 82 61 / 0.68);
+    opacity: 0.35;
+    transform: scale3d(1, 1, 1);
   }
   50% {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.26),
-      0 0 0 6px rgb(163 82 61 / 0.26),
-      0 12px 28px -6px rgb(163 82 61 / 0.85);
+    opacity: 0.9;
+    transform: scale3d(1.05, 1.1, 1);
   }
 }
 @keyframes stage-veil-in {
@@ -480,10 +564,18 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 }
 
 .play-click-ring {
-  border: 2px solid rgb(163 82 61 / 0.8);
+  border: 2px solid color-mix(in srgb, var(--clade-clay) 80%, transparent);
   animation: play-click-ring-out 540ms var(--ease-out-soft) forwards;
 }
-.play-launching-glow {
+.play-launching-glow::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: calc(1.25rem + 2px);
+  border: 2px solid color-mix(in srgb, var(--clade-clay) 55%, transparent);
+  box-shadow: 0 0 18px -2px color-mix(in srgb, var(--clade-clay) 55%, transparent);
+  opacity: 0.65;
+  pointer-events: none;
   animation: play-launch-breathe 1.5s var(--ease-out-soft) infinite;
 }
 .launch-stage-veil {
@@ -497,7 +589,7 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 }
 .game-stage-exit {
   transform-origin: 50% 42%;
-  animation: game-stage-fold-out 380ms var(--ease-out-soft) 130ms forwards;
+  animation: game-stage-fold-out 380ms var(--ease-out-soft) 130ms both;
 }
 .hero-return {
   animation: hero-return-in 400ms var(--ease-out-soft) 130ms both;
@@ -511,6 +603,10 @@ html[data-input="keyboard"] .wordmark:focus-visible {
 .chrome-closing-pulse {
   animation: chrome-closing-soft 1.2s ease-in-out infinite;
 }
+.chrome-closing-pulse:hover {
+  animation-play-state: paused;
+  opacity: 1;
+}
 .hero-stage {
   transition:
     transform 300ms var(--ease-out-soft),
@@ -522,15 +618,19 @@ html[data-input="keyboard"] .wordmark:focus-visible {
   pointer-events: none;
 }
 
-/* When WebView2 shrinks to the 44px framed header strip, hide full-window home layers on the very
-   first Chromium layout pass before React receives the async embed-state event, preventing Hero
-   or LauncherDock from appearing clipped inside the titlebar strip. */
+/* When WebView2 shrinks to the 44px framed header strip, hide full-window home layers and
+   background fields/veils on the very first Chromium layout pass before React receives the async
+   embed-state event, keeping only `--page-base` in the titlebar strip. */
 @media (max-height: 120px) {
   .hero-stage,
   .launcher-dock-wrap,
   .launch-stage-veil,
   .game-stage-exit,
-  .launcher-notice {
+  .launcher-notice,
+  .bg-sway,
+  .bg-bob,
+  .bg-grain,
+  .page-base > .bottom-0 {
     display: none !important;
   }
 }
@@ -539,6 +639,10 @@ html[data-input="keyboard"] .wordmark:focus-visible {
    "Follow Windows" (`system`, the default) the operating system's preference decides. */
 @media (prefers-reduced-motion: reduce) {
   html:not([data-motion="full"]) .bg-sway,
+  html:not([data-motion="full"]) .bg-bob {
+    will-change: auto;
+  }
+  html:not([data-motion="full"]) .bg-sway,
   html:not([data-motion="full"]) .bg-bob,
   html:not([data-motion="full"]) .hero-rise,
   html:not([data-motion="full"]) .dock-rise,
@@ -546,6 +650,7 @@ html[data-input="keyboard"] .wordmark:focus-visible {
   html:not([data-motion="full"]) .dock-return,
   html:not([data-motion="full"]) .play-click-ring,
   html:not([data-motion="full"]) .play-launching-glow,
+  html:not([data-motion="full"]) .play-launching-glow::after,
   html:not([data-motion="full"]) .launch-stage-veil,
   html:not([data-motion="full"]) .launch-portal-card,
   html:not([data-motion="full"]) .launch-orb-pulse,
@@ -575,9 +680,13 @@ html[data-input="keyboard"] .wordmark:focus-visible {
     translate: none;
   }
   html:not([data-motion="full"]) .group:hover .settings-gear {
-    transform: none;
-    rotate: none;
+    transform: none !important;
+    rotate: 0deg !important;
   }
+}
+html[data-motion="reduce"] .bg-sway,
+html[data-motion="reduce"] .bg-bob {
+  will-change: auto;
 }
 html[data-motion="reduce"] .bg-sway,
 html[data-motion="reduce"] .bg-bob,
@@ -587,6 +696,7 @@ html[data-motion="reduce"] .hero-return,
 html[data-motion="reduce"] .dock-return,
 html[data-motion="reduce"] .play-click-ring,
 html[data-motion="reduce"] .play-launching-glow,
+html[data-motion="reduce"] .play-launching-glow::after,
 html[data-motion="reduce"] .launch-stage-veil,
 html[data-motion="reduce"] .launch-portal-card,
 html[data-motion="reduce"] .launch-orb-pulse,
@@ -616,8 +726,8 @@ html[data-motion="reduce"] .hero-link:hover {
   translate: none;
 }
 html[data-motion="reduce"] .group:hover .settings-gear {
-  transform: none;
-  rotate: none;
+  transform: none !important;
+  rotate: 0deg !important;
 }
 
 /* Setup progress when the total cannot be measured: a slow, quiet sweep (static under reduced motion). */
@@ -765,7 +875,7 @@ html[data-motion="system"] .cat:hover .cat-ear-r {
 }
 .wordmark-line {
   height: 1px;
-  background: rgb(176 88 66 / 0.45);
+  background: color-mix(in srgb, var(--clade-clay) 55%, transparent);
   transform: scaleX(0);
   transform-origin: right;
   opacity: 0;
@@ -837,6 +947,7 @@ html[data-motion="reduce"] .wordmark .wm-fade {
   --glass-modal-bg: #f6f0e6;
   --glass-modal-filter: none;
   --glass-overlay-filter: none;
+  --glass-overlay-bg: rgb(43 38 34 / 0.3);
   --glass-modal-edge: 0 0 0 1px rgb(43 38 34 / 0.1);
   --glass-modal-shadow: 0 40px 90px -30px rgb(43 38 34 / 0.55);
   /* the account menu: the dock's graphite, as a popover (portaled, but still inside <html>, so it
@@ -844,13 +955,23 @@ html[data-motion="reduce"] .wordmark .wm-fade {
   --glass-menu-bg: #2f2a26;
   --glass-menu-edge: 0 0 0 1px rgb(246 240 230 / 0.06);
   --glass-menu-shadow: 0 24px 60px -18px rgb(43 38 34 / 0.55);
+  --launch-card-bg: #f6f0e6;
+  --launch-card-shadow: 0 24px 60px -22px rgb(43 38 34 / 0.35);
+  --scrollbar-thumb: rgb(43 38 34 / 0.2);
+  --scrollbar-thumb-hover: rgb(43 38 34 / 0.36);
   /* tiny light response on hover */
   --glass-spec: none;
 }
 /* Dock and dock popovers skip CSS backdrop-filter: the blur comes from the window material itself,
-   which the compositor draws for free. Open modals (`glass-overlay` + `glass-modal`) apply CSS blur
-   so the main-screen headline behind a translucent dialog is frosted instead of bleeding sharply
-   through. */
+   which the compositor draws for free. Open modals apply CSS blur on `glass-overlay` so the
+   main-screen headline behind a translucent dialog is frosted instead of bleeding sharply through,
+   while `glass-modal` relies on its opaque-leaning surface without stacking a second backdrop pass. */
+html[data-glass="on"]:not([data-theme="dark"]) {
+  --bg-field-1: rgb(228 213 190 / 0.65);
+  --bg-field-2: rgb(233 196 168 / 0.65);
+  --bg-field-3: rgb(221 184 172 / 0.55);
+  --bg-field-4: rgb(196 122 98 / 0.25);
+}
 html[data-glass="on"] {
   --page-base: rgb(243 237 227 / 0.8);
   --glass-dock-bg: rgb(43 38 34 / 0.76);
@@ -858,7 +979,7 @@ html[data-glass="on"] {
   --glass-dock-edge: inset 0 1px 0 rgb(255 255 255 / 0.2), inset 0 0 0 1px rgb(255 255 255 / 0.09);
   --glass-dock-shadow: 0 26px 60px -26px rgb(43 38 34 / 0.55), 0 2px 8px -2px rgb(43 38 34 / 0.2);
   --glass-modal-bg: rgb(246 240 230 / 0.95);
-  --glass-modal-filter: blur(24px);
+  --glass-modal-filter: none;
   --glass-overlay-filter: blur(14px);
   --glass-modal-edge:
     inset 0 1px 0 rgb(255 255 255 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.5),
@@ -873,13 +994,102 @@ html[data-glass="on"] {
 }
 /* Windows is showing its solid fallback instead of the live material (its own "Transparency effects"
    switch is off, but glass was requested): the page cannot rely on what is behind it, so every surface
-   is denser. */
+   is denser and CSS backdrop blurs are disabled. */
 html[data-glass="on"][data-glass-live="false"] {
   --page-base: rgb(243 237 227 / 0.94);
   --glass-dock-bg: rgb(43 38 34 / 0.93);
   --glass-modal-bg: rgb(246 240 230 / 0.96);
+  --glass-modal-filter: none;
+  --glass-overlay-filter: none;
   --glass-menu-bg: rgb(43 38 34 / 0.99);
 }
+
+/* Warm Graphite Paper theme: dark charcoal paper surfaces, warm cream typography, muted clay. */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --clade-ivory: #1c1917;
+  --clade-cream: #f6f0e6;
+  --clade-sand: #3a342e;
+  --clade-sand-soft: #322c27;
+  --clade-graphite: #efe8dd;
+  --clade-clay: #ab563f;
+  --clade-clay-hover: #964733;
+  --clade-clay-active: #863e2c;
+  --clade-clay-deep: #e2917a;
+  --clade-clay-soft: #e6a994;
+  --clade-sand-border: #7e7366;
+  --clade-progress-fill: #d4795f;
+  --clade-ink-muted: #b2a696;
+  --hero-hover: #fbf6ee;
+  --dock-ring-offset: #27221e;
+  --segmented-active: #3e3730;
+  --segmented-shadow: 0 1px 2px rgb(0 0 0 / 0.38), inset 0 1px 0 rgb(246 240 230 / 0.08);
+  --segmented-hover: rgb(246 240 230 / 0.07);
+  --quiet-hover: rgb(246 240 230 / 0.08);
+  --soft-hover: #433c35;
+  --bg-field-1: rgb(74 56 44 / 0.58);
+  --bg-field-2: rgb(92 61 45 / 0.44);
+  --bg-field-3: rgb(78 49 42 / 0.46);
+  --bg-field-4: rgb(156 82 59 / 0.2);
+  --bg-vignette: radial-gradient(70% 100% at 50% 100%, rgb(8 7 6 / 0.48), transparent 70%);
+  --bg-grain-opacity: 0.04;
+  --bg-grain-filter: invert(1);
+  --background: #1c1917;
+  --foreground: #efe8dd;
+  --card: #24201c;
+  --card-foreground: #efe8dd;
+  --popover: #2c2722;
+  --popover-foreground: #f6f0e6;
+  --primary: #ab563f;
+  --primary-foreground: #fbf6ee;
+  --secondary: #3a342e;
+  --secondary-foreground: #efe8dd;
+  --muted: #3a342e;
+  --muted-foreground: #b2a696;
+  --accent: rgb(246 240 230 / 0.1);
+  --accent-foreground: #f6f0e6;
+  --destructive: #cf634d;
+  --border: rgb(239 232 221 / 0.12);
+  --input: rgb(239 232 221 / 0.14);
+  --ring: #e6a994;
+  --page-base: #1c1917;
+  --glass-dock-bg: rgb(39 34 30 / 0.96);
+  --glass-dock-edge: inset 0 1px 0 rgb(246 240 230 / 0.1), 0 0 0 1px rgb(246 240 230 / 0.08);
+  --glass-dock-shadow: 0 28px 68px -20px rgb(0 0 0 / 0.72), 0 4px 12px -2px rgb(0 0 0 / 0.45);
+  --glass-modal-bg: #24201c;
+  --glass-modal-edge: 0 0 0 1px rgb(246 240 230 / 0.1);
+  --glass-modal-shadow: 0 40px 90px -26px rgb(0 0 0 / 0.75);
+  --glass-menu-bg: #2c2722;
+  --glass-menu-edge: 0 0 0 1px rgb(246 240 230 / 0.1);
+  --glass-menu-shadow: 0 24px 60px -16px rgb(0 0 0 / 0.72);
+  --glass-overlay-bg: rgb(10 9 8 / 0.62);
+  --launch-card-bg: #24201c;
+  --launch-card-shadow: 0 28px 68px -18px rgb(0 0 0 / 0.68);
+  --scrollbar-thumb: rgb(239 232 221 / 0.22);
+  --scrollbar-thumb-hover: rgb(239 232 221 / 0.38);
+}
+html[data-theme="dark"][data-glass="on"] {
+  --page-base: rgb(28 25 23 / 0.78);
+  --glass-dock-bg: rgb(39 34 30 / 0.8);
+  --glass-dock-edge: inset 0 1px 0 rgb(246 240 230 / 0.16), inset 0 0 0 1px rgb(246 240 230 / 0.1);
+  --glass-dock-shadow: 0 26px 60px -20px rgb(0 0 0 / 0.68), 0 4px 12px -2px rgb(0 0 0 / 0.4);
+  --glass-modal-bg: rgb(36 32 28 / 0.94);
+  --glass-modal-edge:
+    inset 0 1px 0 rgb(246 240 230 / 0.14), 0 0 0 1px rgb(246 240 230 / 0.1),
+    0 0 0 2px rgb(0 0 0 / 0.25);
+  --glass-modal-shadow: 0 34px 80px -24px rgb(0 0 0 / 0.72);
+  --glass-menu-bg: rgb(44 39 34 / 0.97);
+  --glass-menu-edge: inset 0 1px 0 rgb(246 240 230 / 0.12), 0 0 0 1px rgb(246 240 230 / 0.09);
+  --glass-menu-shadow: 0 22px 54px -18px rgb(0 0 0 / 0.68);
+  --glass-spec: linear-gradient(to bottom, rgb(246 240 230 / 0.1), rgb(246 240 230 / 0) 62%);
+}
+html[data-theme="dark"][data-glass="on"][data-glass-live="false"] {
+  --page-base: rgb(28 25 23 / 0.94);
+  --glass-dock-bg: rgb(39 34 30 / 0.94);
+  --glass-modal-bg: rgb(36 32 28 / 0.96);
+  --glass-menu-bg: rgb(44 39 34 / 0.99);
+}
+
 html[data-glass="on"],
 html[data-glass="on"] body {
   background: transparent;
@@ -896,21 +1106,18 @@ html[data-glass="on"] body {
 }
 .glass-modal {
   background: var(--glass-modal-bg);
-  -webkit-backdrop-filter: var(--glass-modal-filter);
-  backdrop-filter: var(--glass-modal-filter);
   box-shadow: var(--glass-modal-edge), var(--glass-modal-shadow);
 }
 .glass-launch-card {
-  background: #f6f0e6;
-  box-shadow:
-    var(--glass-modal-edge),
-    0 24px 60px -22px rgb(43 38 34 / 0.35);
+  background: var(--launch-card-bg);
+  box-shadow: var(--glass-modal-edge), var(--launch-card-shadow);
 }
 .glass-overlay {
+  background: var(--glass-overlay-bg);
   -webkit-backdrop-filter: var(--glass-overlay-filter);
   backdrop-filter: var(--glass-overlay-filter);
 }
-/* Quiet scrollbars on the light surfaces (dialogs, the cape list): a thin rounded graphite thumb
+/* Quiet scrollbars on paper surfaces (dialogs, the cape list): a thin rounded thumb
    inset from the edge, no track, no arrows, no bright system look. Only colour changes on hover. */
 .glass-modal::-webkit-scrollbar,
 .quiet-scroll::-webkit-scrollbar {
@@ -927,14 +1134,14 @@ html[data-glass="on"] body {
 }
 .glass-modal::-webkit-scrollbar-thumb,
 .quiet-scroll::-webkit-scrollbar-thumb {
-  background-color: rgb(43 38 34 / 0.2);
+  background-color: var(--scrollbar-thumb);
   background-clip: padding-box;
   border: 4px solid transparent;
   border-radius: 999px;
 }
 .glass-modal::-webkit-scrollbar-thumb:hover,
 .quiet-scroll::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(43 38 34 / 0.36);
+  background-color: var(--scrollbar-thumb-hover);
 }
 .glass-modal::-webkit-scrollbar-corner,
 .quiet-scroll::-webkit-scrollbar-corner {
@@ -945,7 +1152,7 @@ html[data-glass="on"] body {
   box-shadow: var(--glass-menu-edge), var(--glass-menu-shadow);
 }
 /* a soft specular catch on hover: a static gradient, no glow, nothing moves */
-html[data-glass="on"] .dock-item:hover:not(:disabled) {
+html[data-glass="on"] .glass-dock .dock-item:hover:not(:disabled) {
   background-image: var(--glass-spec);
 }
 /* Windows High Contrast: always the plain, opaque, system-coloured look */
@@ -955,5 +1162,252 @@ html[data-glass="on"] .dock-item:hover:not(:disabled) {
   .glass-overlay {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+
+  .play-launching-glow::after,
+  .bg-grain {
+    display: none;
+  }
+
+  .glass-dock,
+  .glass-modal,
+  .glass-menu,
+  .glass-launch-card,
+  .launcher-notice > div,
+  [data-slot="dialog-content"],
+  [data-slot="dropdown-menu-content"],
+  [data-slot="dropdown-menu-sub-content"],
+  [data-slot="select-content"],
+  [data-slot="tooltip-content"] {
+    border: 1px solid CanvasText;
+  }
+
+  .window-btn {
+    opacity: 1;
+    border: 1px solid transparent;
+  }
+
+  .window-btn:hover {
+    opacity: 1;
+    border-color: ButtonText;
+  }
+
+  .dock-item:not([role="switch"]),
+  [data-slot="button"] {
+    border: 1px solid ButtonText;
+  }
+
+  .dock-item:not([role="switch"]):hover:not(:disabled),
+  [data-slot="button"]:hover:not(:disabled) {
+    border-color: Highlight;
+  }
+
+  .dock-item:not([role="switch"]):disabled,
+  [data-slot="button"]:disabled {
+    opacity: 1;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+  textarea,
+  select,
+  [data-slot="select-trigger"] {
+    border: 1px solid ButtonText;
+  }
+
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not(
+      [type="hidden"]
+    ):disabled,
+  textarea:disabled,
+  select:disabled,
+  [data-slot="select-trigger"]:disabled,
+  [data-slot="select-trigger"][data-disabled] {
+    opacity: 1;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  input[type="range"] {
+    appearance: auto;
+    accent-color: Highlight;
+  }
+
+  input[type="range"]:disabled {
+    opacity: 1;
+    accent-color: GrayText;
+  }
+
+  .play-playing-dot {
+    forced-color-adjust: none;
+    background-color: ButtonText;
+    border: 1px solid ButtonText;
+  }
+
+  [role="switch"] {
+    forced-color-adjust: none;
+    background-color: ButtonFace;
+    border: 1px solid ButtonText;
+  }
+
+  [role="switch"] > span {
+    forced-color-adjust: none;
+    top: calc(0.25rem - 1px);
+    left: calc(0.25rem - 1px);
+    background-color: ButtonText;
+    border: 1px solid ButtonText;
+  }
+
+  [role="switch"][aria-checked="true"] {
+    background-color: Highlight;
+    border-color: Highlight;
+  }
+
+  [role="switch"][aria-checked="true"] > span {
+    background-color: HighlightText;
+    border-color: HighlightText;
+  }
+
+  [role="switch"]:disabled {
+    opacity: 1;
+    background-color: ButtonFace;
+    border-color: GrayText;
+  }
+
+  [role="switch"]:disabled > span {
+    background-color: GrayText;
+    border-color: GrayText;
+  }
+
+  [role="radiogroup"]:has(> [role="radio"].truncate) {
+    border: 1px solid ButtonText;
+  }
+
+  [role="radiogroup"] [role="radio"] {
+    border: 1px solid transparent;
+  }
+
+  [role="radiogroup"] [role="radio"]:not(.truncate) {
+    padding-inline: 0.375rem;
+  }
+
+  [role="radiogroup"] [role="radio"]:hover:not(:disabled):not([aria-checked="true"]) {
+    border-color: ButtonText;
+  }
+
+  [role="radiogroup"] [role="radio"][aria-checked="true"] {
+    forced-color-adjust: none;
+    background-color: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+
+  [role="radiogroup"] [role="radio"]:disabled {
+    opacity: 1;
+    color: GrayText;
+  }
+
+  [role="radiogroup"] [role="radio"][aria-checked="true"]:disabled {
+    background-color: ButtonFace;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  [data-slot="dropdown-menu-separator"],
+  [data-slot="select-separator"] {
+    border-top: 1px solid CanvasText;
+    background-color: transparent;
+  }
+
+  [role="progressbar"] {
+    border: 1px solid CanvasText;
+  }
+
+  [role="progressbar"] > div,
+  .indeterminate-bar {
+    forced-color-adjust: none;
+    background-color: Highlight;
+  }
+
+  html[data-input="keyboard"] .window-btn:focus-visible,
+  html[data-input="keyboard"] .wordmark:focus-visible,
+  .window-btn:focus-visible,
+  .wordmark:focus-visible,
+  .dock-item:focus-visible,
+  .cat:focus-visible,
+  button:focus-visible,
+  a[href]:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [role="button"]:focus-visible,
+  [role="switch"]:focus-visible,
+  [role="radio"]:focus-visible,
+  [data-slot="button"]:focus-visible,
+  [data-slot="select-trigger"]:focus-visible,
+  [data-slot="dropdown-menu-trigger"]:focus-visible,
+  [tabindex]:not([tabindex="-1"]):focus-visible {
+    opacity: 1;
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  .window-btn:focus-visible {
+    outline-offset: 1px;
+  }
+
+  html[data-input="keyboard"] .hero-link:focus-visible,
+  .hero-link:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 0.16em;
+    border-radius: 0.14em;
+  }
+
+  [data-slot="dropdown-menu-item"]:focus,
+  [data-slot="dropdown-menu-item"]:focus-visible,
+  [data-slot="dropdown-menu-item"][data-highlighted],
+  [data-slot="dropdown-menu-radio-item"]:focus,
+  [data-slot="dropdown-menu-radio-item"]:focus-visible,
+  [data-slot="dropdown-menu-radio-item"][data-highlighted],
+  [data-slot="dropdown-menu-checkbox-item"]:focus,
+  [data-slot="dropdown-menu-checkbox-item"]:focus-visible,
+  [data-slot="dropdown-menu-checkbox-item"][data-highlighted],
+  [data-slot="dropdown-menu-sub-trigger"]:focus,
+  [data-slot="dropdown-menu-sub-trigger"]:focus-visible,
+  [data-slot="dropdown-menu-sub-trigger"][data-highlighted],
+  [data-slot="select-item"]:focus,
+  [data-slot="select-item"]:focus-visible,
+  [data-slot="select-item"][data-highlighted] {
+    forced-color-adjust: none;
+    background-color: Highlight !important;
+    color: HighlightText !important;
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  :is(
+      [data-slot="dropdown-menu-item"],
+      [data-slot="dropdown-menu-radio-item"],
+      [data-slot="dropdown-menu-checkbox-item"],
+      [data-slot="dropdown-menu-sub-trigger"],
+      [data-slot="select-item"]
+    ):is(:focus, :focus-visible, [data-highlighted])
+    * {
+    color: HighlightText !important;
+  }
+
+  [data-slot="dropdown-menu-item"][data-disabled],
+  [data-slot="dropdown-menu-radio-item"][data-disabled],
+  [data-slot="dropdown-menu-checkbox-item"][data-disabled],
+  [data-slot="select-item"][data-disabled] {
+    opacity: 1 !important;
+    color: GrayText !important;
+  }
+
+  [data-slot="dropdown-menu-item"][data-disabled] *,
+  [data-slot="dropdown-menu-radio-item"][data-disabled] *,
+  [data-slot="dropdown-menu-checkbox-item"][data-disabled] *,
+  [data-slot="select-item"][data-disabled] * {
+    color: GrayText !important;
   }
 }

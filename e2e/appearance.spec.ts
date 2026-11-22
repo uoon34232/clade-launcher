@@ -1,27 +1,56 @@
 import type { Locator, Page } from "@playwright/test";
 import type { FixtureAppearance } from "./support/fixtures";
-import { ALEX, DEFAULT_CONFIG } from "./support/fixtures";
+import { ALEX, BLAKE, DEFAULT_CONFIG } from "./support/fixtures";
 import { expect, test } from "./support/test";
-import { accountTrigger, text } from "./support/ui";
+import { accountTrigger, text, textRu } from "./support/ui";
 
 // The skin and cape sections of the account dialog, against the fake backend: no Minecraft
 // service is ever contacted, and nothing here can change a real account.
 
 const CAPE_A = "11111111-2222-4333-8444-555555555555";
 const CAPE_B = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const MAX_SKIN_BYTES = 256 * 1024;
+const VALID_SKIN_DATA_URI =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAZklEQVR42u3QQREAAAQAMFHFEFAvcjh7rMCiK+ezECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAu4HLPSxsmj7bLHgAAAAAElFTkSuQmCC";
 
 const u32 = (n: number) =>
   Buffer.from([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
-/** A file with a genuine PNG header of the given size (the fake only reads the header, like the UI). */
-const png = (w = 64, h = 64) =>
-  Buffer.concat([
-    Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
-    ]),
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+const crc32 = (bytes: Uint8Array) => {
+  let c = 0xffffffff;
+  for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+/** A minimal valid PNG with IHDR (plus CRC) and trailing IEND, matching `SkinPng::validate`. */
+const png = (w = 64, h = 64) => {
+  const ihdr = Buffer.concat([
+    Buffer.from("IHDR", "ascii"),
     u32(w),
     u32(h),
     Buffer.from([8, 6, 0, 0, 0]),
   ]);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    u32(13),
+    ihdr,
+    u32(crc32(ihdr)),
+    Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]),
+  ]);
+};
+const paddedPng = (totalBytes: number, w = 64, h = 64) => {
+  const base = png(w, h);
+  if (totalBytes <= base.length) return base;
+  const pad = Buffer.alloc(totalBytes - base.length);
+  return Buffer.concat([base.subarray(0, base.length - 12), pad, base.subarray(base.length - 12)]);
+};
 const file = (name: string, buffer: Buffer) => ({ name, mimeType: "image/png", buffer });
 
 const look = (over: Partial<FixtureAppearance> = {}): Record<string, FixtureAppearance> => ({
@@ -86,29 +115,72 @@ test.describe("skin", () => {
     }) => {
       await openApp();
       const dialog = await openAlex(page);
+      await expect(chooseButton(dialog)).toBeEnabled();
       await fileInput(dialog).setInputFiles(
         file("notes.png", Buffer.from("this is not a png at all")),
       );
       await expect(dialog.getByRole("alert")).toHaveText(text("error.appearance.invalid_skin"));
+      await expect(dialog.getByRole("button", { name: text("common.tryAgain") })).toHaveCount(0);
       await fileInput(dialog).setInputFiles(file("big.png", png(128, 128)));
       await expect(dialog.getByRole("alert")).toHaveText(text("error.appearance.invalid_skin"));
+      await expect(dialog.getByRole("button", { name: text("common.tryAgain") })).toHaveCount(0);
       await expect(model(dialog, "Classic")).toBeChecked();
       await expect(dialog.locator("[data-skin-head]")).toHaveCount(0);
+      await expect
+        .poll(async () =>
+          (await backend.calls("set_account_skin")).map((c) => {
+            const a = c.args as { id: string; variant: string; png: number[] };
+            return { id: a.id, variant: a.variant, bytes: a.png.length };
+          }),
+        )
+        .toEqual([
+          { id: ALEX.id, variant: "classic", bytes: 24 },
+          { id: ALEX.id, variant: "classic", bytes: png(128, 128).length },
+        ]);
       expect(await backend.calls("reset_account_skin")).toHaveLength(0);
     });
 
-    test("a file over the size limit is refused before anything is sent", async ({
+    test("a file over the size limit is refused before anything is sent, while the exact limit is accepted", async ({
       page,
       backend,
       openApp,
     }) => {
       await openApp();
       const dialog = await openAlex(page);
-      await fileInput(dialog).setInputFiles(
-        file("huge.png", Buffer.concat([png(), Buffer.alloc(300 * 1024)])),
-      );
+      await expect(chooseButton(dialog)).toBeEnabled();
+      await fileInput(dialog).setInputFiles(file("too-big.png", paddedPng(MAX_SKIN_BYTES + 1)));
       await expect(dialog.getByRole("alert")).toHaveText(text("error.appearance.invalid_skin"));
+      await expect(dialog.getByRole("button", { name: text("common.tryAgain") })).toHaveCount(0);
       expect(await backend.calls("set_account_skin")).toHaveLength(0);
+
+      await fileInput(dialog).setInputFiles(file("exact-limit.png", paddedPng(MAX_SKIN_BYTES)));
+      await expect
+        .poll(async () =>
+          (await backend.calls("set_account_skin")).map((c) => {
+            const a = c.args as { id: string; variant: string; png: number[] };
+            return { id: a.id, variant: a.variant, bytes: a.png.length };
+          }),
+        )
+        .toEqual([{ id: ALEX.id, variant: "classic", bytes: MAX_SKIN_BYTES }]);
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(dialog.locator("[data-skin-head]")).toHaveCount(1);
+    });
+
+    test("accepts a 64x32 legacy skin PNG", async ({ page, backend, openApp }) => {
+      await openApp();
+      const dialog = await openAlex(page);
+      await expect(chooseButton(dialog)).toBeEnabled();
+      const legacy = png(64, 32);
+      await fileInput(dialog).setInputFiles(file("legacy.png", legacy));
+      await expect
+        .poll(async () =>
+          (await backend.calls("set_account_skin")).map((c) => {
+            const a = c.args as { id: string; variant: string; png: number[] };
+            return { id: a.id, variant: a.variant, bytes: a.png.length };
+          }),
+        )
+        .toEqual([{ id: ALEX.id, variant: "classic", bytes: legacy.length }]);
+      await expect(dialog.locator("[data-skin-head]")).toHaveCount(1);
     });
 
     test("while a change is running the controls are busy and a second one cannot start", async ({
@@ -134,24 +206,37 @@ test.describe("skin", () => {
       expect(await backend.calls("set_account_skin")).toHaveLength(1);
     });
 
-    test("the server refusing a change keeps the current look and says why", async ({
+    test("the server refusing a change keeps the current look, allows retry, and lets the same file be chosen again", async ({
       page,
       backend,
       openApp,
     }) => {
       await openApp();
       const dialog = await openAlex(page);
+      await expect(chooseButton(dialog)).toBeEnabled();
       await backend.failNext("set_account_skin", "rate_limited");
       await fileInput(dialog).setInputFiles(file("a.png", png()));
       await expect(dialog.getByRole("alert")).toHaveText(text("error.appearance.rate_limited"));
+      await expect(dialog.getByRole("button", { name: text("common.tryAgain") })).toBeVisible();
       await expect(model(dialog, "Classic")).toBeChecked();
       await expect(chooseButton(dialog)).toBeEnabled();
       await expect(dialog).toBeVisible();
+
+      // Re-selecting the exact same file works because the input value is cleared after selection.
+      await fileInput(dialog).setInputFiles(file("a.png", png()));
+      await expect.poll(async () => (await backend.calls("set_account_skin")).length).toBe(2);
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(dialog.locator("[data-skin-head]")).toHaveCount(1);
     });
   });
 
   test.describe("a Slim skin", () => {
-    test.use({ backendConfig: { appearance: look({ skinModel: "slim" }) } });
+    test.use({
+      backendConfig: {
+        accounts: [{ ...ALEX, skin: VALID_SKIN_DATA_URI }, BLAKE],
+        appearance: look({ skinModel: "slim" }),
+      },
+    });
 
     const restore = (dialog: Locator) =>
       dialog.getByRole("button", { name: text("accountModal.restoreDefault") });
@@ -176,11 +261,18 @@ test.describe("skin", () => {
       openApp,
     }) => {
       await openApp();
+      await expect(accountTrigger(page).locator("[data-skin-head]")).toHaveCount(1);
       const dialog = await openAlex(page);
       await expect(model(dialog, "Slim")).toBeChecked();
+      await expect(dialog.locator("[data-skin-head]")).toHaveCount(1);
 
       await restore(dialog).click();
       await expect(question(dialog)).toBeVisible();
+      await expect(keep(dialog)).toBeFocused();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeDisabled();
+      await expect(
+        dialog.getByRole("button", { name: text("accountModal.signOutRemove") }),
+      ).toBeDisabled();
       expect(await backend.calls("reset_account_skin")).toHaveLength(0);
 
       // only the explicit confirmation changes the account
@@ -191,10 +283,16 @@ test.describe("skin", () => {
       await expect(question(dialog)).toHaveCount(0);
       // no model is reported for a default skin: the choice stays where it was, nothing is invented
       await expect(chooseButton(dialog)).toBeEnabled();
+      await expect(restore(dialog)).toBeFocused();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeEnabled();
+      await expect(
+        dialog.getByRole("button", { name: text("accountModal.signOutRemove") }),
+      ).toBeEnabled();
       await expect(dialog.locator("[data-skin-head]")).toHaveCount(0);
+      await expect(accountTrigger(page).locator("[data-skin-head]")).toHaveCount(0);
     });
 
-    test("Keep current skin, Escape and the backdrop all leave the skin alone", async ({
+    test("Keep current skin, Escape and the backdrop all leave the skin alone and restore focus", async ({
       page,
       backend,
       openApp,
@@ -203,6 +301,7 @@ test.describe("skin", () => {
       const dialog = await openAlex(page);
       await restore(dialog).click();
       await expect(question(dialog)).toBeVisible();
+      await expect(keep(dialog)).toBeFocused();
 
       // Escape and a click on the backdrop do not dismiss the question or the dialog
       await page.keyboard.press("Escape");
@@ -214,7 +313,9 @@ test.describe("skin", () => {
 
       await keep(dialog).click();
       await expect(question(dialog)).toHaveCount(0);
+      await expect(restore(dialog)).toBeFocused();
       await expect(model(dialog, "Slim")).toBeChecked();
+      await expect(dialog.locator("[data-skin-head]")).toHaveCount(1);
       expect(await backend.calls("reset_account_skin")).toHaveLength(0);
       // with the question answered, Escape closes the dialog as usual
       await page.keyboard.press("Escape");
@@ -273,10 +374,58 @@ test.describe("skin", () => {
     });
   });
 
-  test.describe("locked accounts", () => {
-    test.use({ backendConfig: { appearance: look() } });
+  test.describe("appearance loading errors and recovery", () => {
+    test.use({ backendConfig: { appearance: look({ skinModel: "slim" }) } });
 
-    test("explain themselves and unlock right there, then load the look", async ({
+    test("offers Try again on service errors and recovers when the next load succeeds", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      await backend.failNext("account_appearance", "offline");
+      const dialog = await openAlex(page);
+      await expect(dialog.getByRole("alert")).toHaveText(text("error.appearance.offline"));
+      await expect(chooseButton(dialog)).toBeDisabled();
+      const retry = dialog.getByRole("button", { name: text("common.tryAgain") });
+      await expect(retry).toBeEnabled();
+
+      await backend.failNext("account_appearance", "service_unavailable");
+      await retry.click();
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.appearance.service_unavailable"),
+      );
+
+      await retry.click();
+      await expect(chooseButton(dialog)).toBeEnabled();
+      await expect(model(dialog, "Slim")).toBeChecked();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      expect(await backend.calls("account_appearance")).toHaveLength(3);
+    });
+
+    for (const code of ["unauthorized", "no_profile"] as const) {
+      test(`shows ${code} error with Try again and reloads on click`, async ({
+        page,
+        backend,
+        openApp,
+      }) => {
+        await openApp();
+        await backend.failNext("account_appearance", code);
+        const dialog = await openAlex(page);
+        await expect(dialog.getByRole("alert")).toHaveText(text(`error.appearance.${code}`));
+        const retry = dialog.getByRole("button", { name: text("common.tryAgain") });
+        await expect(retry).toBeVisible();
+        await retry.click();
+        await expect(chooseButton(dialog)).toBeEnabled();
+        await expect(dialog.getByRole("alert")).toHaveCount(0);
+      });
+    }
+  });
+
+  test.describe("locked accounts", () => {
+    test.use({ backendConfig: { vault: { exists: true, unlocked: false }, appearance: look() } });
+
+    test("explain themselves, handle a wrong passphrase, and unlock right there to load the look", async ({
       page,
       backend,
       openApp,
@@ -288,11 +437,31 @@ test.describe("skin", () => {
         text("error.appearance.vault_locked"),
       );
       await expect(chooseButton(dialog)).toBeDisabled();
-      await dialog.getByLabel(text("common.passphrase")).fill("fake test passphrase");
-      await dialog.getByRole("button", { name: text("common.unlock") }).click();
+
+      const passInput = dialog.getByLabel(text("common.passphrase"));
+      const unlockButton = dialog.getByRole("button", { name: text("common.unlock") });
+      await expect(unlockButton).toBeDisabled();
+
+      await backend.failNext("unlock_vault", "passphrase_mismatch");
+      await passInput.fill("wrong passphrase");
+      await expect(unlockButton).toBeEnabled();
+      await unlockButton.click();
+
+      const unlockError = dialog.locator("#appearance-unlock-error");
+      await expect(unlockError).toHaveText(text("error.vault.passphrase_mismatch"));
+      await expect(passInput).toHaveValue("");
+      await expect(passInput).toHaveAttribute("aria-invalid", "true");
+      await expect(passInput).toHaveAttribute("aria-describedby", "appearance-unlock-error");
+      await expect(unlockButton).toBeDisabled();
+      await expect(chooseButton(dialog)).toBeDisabled();
+
+      await passInput.fill("fake test passphrase");
+      await expect(unlockButton).toBeEnabled();
+      await unlockButton.click();
       await expect(chooseButton(dialog)).toBeEnabled();
-      await expect(dialog.getByLabel(text("common.passphrase"))).toHaveCount(0);
-      expect(await backend.calls("unlock_vault")).toHaveLength(1);
+      await expect(passInput).toHaveCount(0);
+      await expect(unlockError).toHaveCount(0);
+      expect(await backend.calls("unlock_vault")).toHaveLength(2);
     });
   });
 });
@@ -396,6 +565,138 @@ test.describe("capes", () => {
       await expect(rows.nth(0)).toContainText(text("appearance.equipped"));
       await expect(rows.nth(1)).not.toContainText(text("appearance.equipped"));
     });
+
+    test("a refused Hide cape keeps the active cape equipped and says why", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openAlex(page);
+      const hide = dialog.getByRole("button", { name: text("appearance.hideCape") });
+      await expect(hide).toBeEnabled();
+      await backend.failNext("set_account_cape", "service_unavailable");
+      await hide.click();
+      await expect
+        .poll(async () => (await backend.calls("set_account_cape")).map((c) => c.args))
+        .toEqual([{ id: ALEX.id, capeId: null }]);
+      await expect(dialog.getByRole("alert")).toHaveText(
+        text("error.appearance.service_unavailable"),
+      );
+      await expect(dialog.getByRole("listitem").nth(0)).toContainText(text("appearance.equipped"));
+      await expect(hide).toBeVisible();
+      await expect(hide).toBeEnabled();
+    });
+
+    test("while a cape change is running all controls are busy and a second change cannot start", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openAlex(page);
+      const equipSecond = dialog.getByRole("button", {
+        name: text("appearance.equipNamed", { name: text("appearance.capeUnnamed", { n: 2 }) }),
+      });
+      const hide = dialog.getByRole("button", { name: text("appearance.hideCape") });
+      await expect(equipSecond).toBeEnabled();
+
+      await backend.holdNext("set_account_cape");
+      await equipSecond.click();
+
+      await expect(equipSecond).toBeDisabled();
+      await expect(hide).toBeDisabled();
+      await expect(chooseButton(dialog)).toBeDisabled();
+      await expect(model(dialog, "Slim")).toBeDisabled();
+      await expect(
+        dialog.getByRole("button", { name: text("accountModal.restoreDefault") }),
+      ).toBeDisabled();
+      expect(await backend.calls("set_account_cape")).toHaveLength(1);
+
+      await backend.release();
+      await expect(chooseButton(dialog)).toBeEnabled();
+      await expect(dialog.getByRole("listitem").nth(1)).toContainText(text("appearance.equipped"));
+      expect(await backend.calls("set_account_cape")).toHaveLength(1);
+    });
+
+    test("cape controls are disabled during skin upload, reset confirmation, and skin reset", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openAlex(page);
+      const equipSecond = dialog.getByRole("button", {
+        name: text("appearance.equipNamed", { name: text("appearance.capeUnnamed", { n: 2 }) }),
+      });
+      const hide = dialog.getByRole("button", { name: text("appearance.hideCape") });
+      const restore = dialog.getByRole("button", { name: text("accountModal.restoreDefault") });
+      await expect(equipSecond).toBeEnabled();
+
+      // During reset confirmation, cape controls and modal footer are locked.
+      await restore.click();
+      await expect(equipSecond).toBeDisabled();
+      await expect(hide).toBeDisabled();
+      await expect(dialog.getByRole("button", { name: text("common.done") })).toBeDisabled();
+      await expect(
+        dialog.getByRole("button", { name: text("accountModal.signOutRemove") }),
+      ).toBeDisabled();
+
+      // Confirming reset holds cape controls disabled until reset finishes.
+      await backend.holdNext("reset_account_skin");
+      await restore.last().click();
+      await expect(equipSecond).toBeDisabled();
+      await expect(hide).toBeDisabled();
+      await backend.release();
+      await expect(equipSecond).toBeEnabled();
+      await expect(hide).toBeEnabled();
+
+      // During skin upload, cape controls are also disabled.
+      await backend.holdNext("set_account_skin");
+      await fileInput(dialog).setInputFiles(file("skin.png", png()));
+      await expect(equipSecond).toBeDisabled();
+      await expect(hide).toBeDisabled();
+      await backend.release();
+      await expect(equipSecond).toBeEnabled();
+      await expect(hide).toBeEnabled();
+    });
+  });
+
+  test.describe("owned with none active", () => {
+    test.use({
+      backendConfig: {
+        appearance: look({
+          capes: [
+            { id: CAPE_A, alias: "Migrator", active: false },
+            { id: CAPE_B, alias: "Pan", active: false },
+          ],
+        }),
+      },
+    });
+
+    test("equipping a cape when none is active marks it and reveals Hide cape", async ({
+      page,
+      backend,
+      openApp,
+    }) => {
+      await openApp();
+      const dialog = await openAlex(page);
+      const rows = dialog.getByRole("listitem");
+      await expect(rows).toHaveCount(2);
+      await expect(dialog.getByText(text("appearance.equipped"))).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: text("appearance.hideCape") })).toHaveCount(
+        0,
+      );
+
+      await dialog
+        .getByRole("button", { name: text("appearance.equipNamed", { name: "Migrator" }) })
+        .click();
+      await expect
+        .poll(async () => (await backend.calls("set_account_cape")).map((c) => c.args))
+        .toEqual([{ id: ALEX.id, capeId: CAPE_A }]);
+      await expect(rows.nth(0)).toContainText(text("appearance.equipped"));
+      await expect(dialog.getByRole("button", { name: text("appearance.hideCape") })).toBeVisible();
+    });
   });
 });
 
@@ -419,12 +720,17 @@ test.describe("a long cape list", () => {
     // the 12th of 14 is equipped: the list was scrolled inside itself to show it
     await expect(rows.nth(11)).toContainText(text("appearance.equipped"));
     // ... which is checked against the list's own box, not the window (the dialog scrolls too)
-    const inList = await rows.nth(11).evaluate((li) => {
-      const row = li.getBoundingClientRect();
-      const list = (li.parentElement as HTMLElement).getBoundingClientRect();
-      return row.top >= list.top - 1 && row.bottom <= list.bottom + 1;
-    });
-    expect(inList).toBe(true);
+    await expect
+      .poll(() =>
+        rows.nth(11).evaluate((li) => {
+          const parent = li.parentElement;
+          if (!parent) return false;
+          const row = li.getBoundingClientRect();
+          const list = parent.getBoundingClientRect();
+          return row.top >= list.top - 1 && row.bottom <= list.bottom + 1;
+        }),
+      )
+      .toBe(true);
     await expect(dialog.getByRole("button", { name: text("appearance.hideCape") })).toBeVisible();
   });
 
@@ -435,25 +741,31 @@ test.describe("a long cape list", () => {
     await openApp();
     const dialog = await openAlex(page);
     await expect(dialog.getByRole("listitem")).toHaveCount(14);
-    const m = await dialog.evaluate((d) => {
-      const list = d.querySelector("ul") as HTMLElement;
-      const l = list.getBoundingClientRect();
-      const footer = (list.nextElementSibling as HTMLElement).getBoundingClientRect();
-      const rows = [...list.children].map((li) => li.getBoundingClientRect());
-      const whole = rows.filter((r) => r.top >= l.top - 1 && r.bottom <= l.bottom + 1).length;
-      return {
-        wholeRows: whole,
-        footerTop: footer.top,
-        listBottom: l.bottom,
-        listScrolls: list.scrollHeight > list.clientHeight,
-        // the footer is not part of the scrolling rows
-        footerInsideList: list.contains(list.nextElementSibling),
-      };
-    });
-    expect(m.wholeRows).toBeGreaterThanOrEqual(5);
-    expect(m.listScrolls).toBe(true);
-    expect(m.footerInsideList).toBe(false);
-    expect(m.footerTop).toBeGreaterThanOrEqual(m.listBottom - 0.5);
+    await expect
+      .poll(() =>
+        dialog.evaluate((d) => {
+          const list = d.querySelector("ul");
+          const footer = list?.nextElementSibling ?? null;
+          if (!list || !footer) return null;
+          const l = list.getBoundingClientRect();
+          const f = footer.getBoundingClientRect();
+          const rows = [...list.children].map((li) => li.getBoundingClientRect());
+          const whole = rows.filter((r) => r.top >= l.top - 1 && r.bottom <= l.bottom + 1).length;
+          return {
+            atLeastFiveRows: whole >= 5,
+            listScrolls: list.scrollHeight > list.clientHeight,
+            // the footer is not part of the scrolling rows
+            footerInsideList: list.contains(footer),
+            footerBelowList: f.top >= l.bottom - 0.5,
+          };
+        }),
+      )
+      .toEqual({
+        atLeastFiveRows: true,
+        listScrolls: true,
+        footerInsideList: false,
+        footerBelowList: true,
+      });
   });
 
   test("the dialog scrolls to the footer, and the rows scroll on their own", async ({
@@ -462,16 +774,20 @@ test.describe("a long cape list", () => {
   }) => {
     await openApp();
     const dialog = await openAlex(page);
+    await expect(dialog.getByRole("listitem")).toHaveCount(14);
     const hide = dialog.getByRole("button", { name: text("appearance.hideCape") });
+    await expect(hide).toBeVisible();
     // reaching the footer is the dialog's own scroll...
     await hide.scrollIntoViewIfNeeded();
     await expect(hide).toBeInViewport({ ratio: 1 });
-    expect(await dialog.evaluate((d) => d.scrollTop)).toBeGreaterThan(0);
+    await expect.poll(() => dialog.evaluate((d) => d.scrollTop)).toBeGreaterThan(0);
     // ...and scrolling the rows moves only the rows
     const before = await dialog.evaluate((d) => d.scrollTop);
     const rows = dialog.locator("ul");
-    await rows.evaluate((ul) => (ul.scrollTop = ul.scrollHeight));
-    expect(await rows.evaluate((ul) => ul.scrollTop)).toBeGreaterThan(0);
+    await rows.evaluate((ul) => {
+      ul.scrollTop = ul.scrollHeight;
+    });
+    await expect.poll(() => rows.evaluate((ul) => ul.scrollTop)).toBeGreaterThan(0);
     expect(await dialog.evaluate((d) => d.scrollTop)).toBe(before);
     await expect(hide).toBeVisible();
   });
@@ -487,38 +803,49 @@ for (const language of ["en", "ru"] as const) {
       page,
       openApp,
     }) => {
+      const t = language === "ru" ? textRu : text;
       await openApp();
       await accountTrigger(page).click();
-      await page.getByRole("menuitem").first().click();
-      const dialog = page.getByRole("dialog");
+      await page
+        .getByRole("menuitem", { name: t("account.manage", { name: ALEX.username }) })
+        .click();
+      const dialog = page.getByRole("dialog", { name: ALEX.username });
       await expect(dialog).toBeVisible();
-      const m = await dialog.evaluate((d) => {
-        const seg = d.querySelector('[role="radiogroup"]') as HTMLElement;
-        const buttons = [...d.querySelectorAll("button")];
-        const choose = buttons.find((b) => /PNG/.test(b.textContent ?? "")) as HTMLElement;
-        const restore = buttons.find((b) =>
-          /Restore default|Вернуть стандартный/.test(b.textContent ?? ""),
-        ) as HTMLElement;
-        const s = seg.getBoundingClientRect();
-        const c = choose.getBoundingClientRect();
-        const r = restore.getBoundingClientRect();
-        return {
-          // first row: the model and the upload side by side
-          sameFirstRow:
-            Math.abs(s.top + s.height / 2 - (c.top + c.height / 2)) < 4 && c.left > s.right,
-          // second row: below the first, never beside it
-          below: r.top >= Math.max(s.bottom, c.bottom) - 1,
-          // its outline starts where the controls above start
-          left: r.left,
-          segLeft: s.left,
-          // and it looks like a button: a visible outline, not bare text
-          outlined: getComputedStyle(restore).boxShadow !== "none",
-        };
-      });
-      expect(m.sameFirstRow).toBe(true);
-      expect(m.below).toBe(true);
-      expect(Math.abs(m.left - m.segLeft)).toBeLessThanOrEqual(1);
-      expect(m.outlined).toBe(true);
+
+      const seg = dialog.getByRole("radiogroup", { name: t("accountModal.skinModel") });
+      const choose = dialog.getByRole("button", { name: t("accountModal.choosePng") });
+      const restore = dialog.getByRole("button", { name: t("accountModal.restoreDefault") });
+      await expect(choose).toBeEnabled();
+      await expect(restore).toBeEnabled();
+      await expect.poll(() => dialog.evaluate((d) => d.getAnimations().length)).toBe(0);
+
+      await expect
+        .poll(async () => {
+          const [s, c, r, outlined] = await Promise.all([
+            seg.boundingBox(),
+            choose.boundingBox(),
+            restore.boundingBox(),
+            restore.evaluate((el) => getComputedStyle(el).boxShadow !== "none"),
+          ]);
+          if (!s || !c || !r) return null;
+          return {
+            // first row: the model and the upload side by side
+            sameFirstRow:
+              Math.abs(s.y + s.height / 2 - (c.y + c.height / 2)) < 4 && c.x > s.x + s.width,
+            // second row: below the first, never beside it
+            below: r.y >= Math.max(s.y + s.height, c.y + c.height) - 1,
+            // its outline starts where the controls above start
+            alignedLeft: Math.abs(r.x - s.x) <= 1,
+            // and it looks like a button: a visible outline, not bare text
+            outlined,
+          };
+        })
+        .toEqual({
+          sameFirstRow: true,
+          below: true,
+          alignedLeft: true,
+          outlined: true,
+        });
     });
   });
 }

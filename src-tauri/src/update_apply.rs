@@ -49,6 +49,7 @@ const LOCK_WAIT_ATTEMPTS: usize = 30;
 const LOCK_WAIT_STEP: Duration = Duration::from_millis(200);
 const WEBVIEW2_RETRY_ATTEMPTS: usize = 12;
 const WEBVIEW2_RETRY_STEP: Duration = Duration::from_millis(500);
+const PRESERVED_BACKUP_MARKER: &str = ".incomplete-rollback";
 
 const REQUIRED_FILES: [&str; 5] = [
     "Clade.exe",
@@ -696,9 +697,16 @@ fn rollback_actions(actions: Vec<SwapAction>) -> bool {
 fn copy_synced(src: &Path, dst: &Path) -> io::Result<()> {
     let mut r = File::open(src)?;
     let mut w = OpenOptions::new().write(true).create_new(true).open(dst)?;
-    io::copy(&mut r, &mut w)?;
-    w.sync_all()?;
-    Ok(())
+    let res = (|| -> io::Result<()> {
+        io::copy(&mut r, &mut w)?;
+        w.sync_all()?;
+        Ok(())
+    })();
+    drop(w);
+    if res.is_err() {
+        let _ = remove_file_with_retry(dst);
+    }
+    res
 }
 
 fn swap_file_with_backup(
@@ -713,37 +721,37 @@ fn swap_file_with_backup(
         return Err(format!("refusing to replace link at {}", dst.display()));
     }
     copy_synced(src, tmp).map_err(|e| format!("staging {}: {e}", dst.display()))?;
-    if let Some(hex) = expected_sha256 {
-        let actual = sha256_hex(tmp).map_err(|e| e.to_string())?;
-        if !actual.eq_ignore_ascii_case(hex) {
-            let _ = remove_file_with_retry(tmp);
-            return Err("copied executable failed checksum verification".into());
+    let res = (|| -> Result<(), String> {
+        if let Some(hex) = expected_sha256 {
+            let actual = sha256_hex(tmp).map_err(|e| e.to_string())?;
+            if !actual.eq_ignore_ascii_case(hex) {
+                return Err("copied executable failed checksum verification".into());
+            }
         }
-    }
-    let existed = fs::symlink_metadata(dst).is_ok();
-    if existed {
-        if let Some(bp) = backup.parent() {
-            fs::create_dir_all(bp).map_err(|e| e.to_string())?;
+        let existed = fs::symlink_metadata(dst).is_ok();
+        if existed {
+            if let Some(bp) = backup.parent() {
+                fs::create_dir_all(bp).map_err(|e| e.to_string())?;
+            }
+            rename_with_retry(dst, backup)
+                .map_err(|e| format!("backing up {}: {e}", dst.display()))?;
+            actions.push(SwapAction::ReplacedFile {
+                target: dst.to_path_buf(),
+                backup: backup.to_path_buf(),
+            });
         }
-        rename_with_retry(dst, backup).map_err(|e| {
-            let _ = remove_file_with_retry(tmp);
-            format!("backing up {}: {e}", dst.display())
-        })?;
-        actions.push(SwapAction::ReplacedFile {
-            target: dst.to_path_buf(),
-            backup: backup.to_path_buf(),
-        });
-    }
-    if let Err(e) = rename_with_retry(tmp, dst) {
+        rename_with_retry(tmp, dst).map_err(|e| format!("installing {}: {e}", dst.display()))?;
+        if !existed {
+            actions.push(SwapAction::CreatedFile {
+                target: dst.to_path_buf(),
+            });
+        }
+        Ok(())
+    })();
+    if res.is_err() {
         let _ = remove_file_with_retry(tmp);
-        return Err(format!("installing {}: {e}", dst.display()));
     }
-    if !existed {
-        actions.push(SwapAction::CreatedFile {
-            target: dst.to_path_buf(),
-        });
-    }
-    Ok(())
+    res
 }
 
 fn rename_dir_with_lock_wait(src: &Path, dst: &Path) -> io::Result<()> {
@@ -779,7 +787,9 @@ pub fn apply_update_transaction(
     reject_links_between(target_root.path(), staged_pkg_dir).map_err(|e| e.to_string())?;
 
     let nonce = random_hex(6).map_err(|e| e.to_string())?;
-    let backup_dir = target_root.updates_dir().join(format!("backup-{nonce}"));
+    let updates_dir = target_root.updates_dir();
+    let backup_dir = updates_dir.join(format!("backup-{nonce}"));
+    reject_links_between(target_root.path(), &backup_dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
     let mut actions: Vec<SwapAction> = Vec::new();
 
@@ -859,7 +869,11 @@ pub fn apply_update_transaction(
         if rollback_actions(actions) {
             let _ = remove_dir_all_with_retry(&backup_dir);
         } else {
-            tracing::warn!(backup = %backup_dir.display(), "preserving update backup after incomplete rollback");
+            let preserved = mark_preserved_backup(&backup_dir, &updates_dir, &nonce);
+            tracing::warn!(
+                backup = %preserved.display(),
+                "preserving update backup after incomplete rollback"
+            );
         }
         return Err(err);
     }
@@ -867,11 +881,34 @@ pub fn apply_update_transaction(
     Ok(())
 }
 
+fn mark_preserved_backup(backup_dir: &Path, updates_dir: &Path, nonce: &str) -> PathBuf {
+    let marker = backup_dir.join(PRESERVED_BACKUP_MARKER);
+    let wrote_marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .and_then(|f| f.sync_all());
+    if wrote_marker.is_ok()
+        || (!is_link(&marker).unwrap_or(true)
+            && fs::symlink_metadata(&marker).is_ok_and(|m| m.is_file()))
+    {
+        return backup_dir.to_path_buf();
+    }
+    let preserved_dir = updates_dir.join(format!("backup-preserved-{nonce}"));
+    if rename_with_retry(backup_dir, &preserved_dir).is_ok() {
+        return preserved_dir;
+    }
+    backup_dir.to_path_buf()
+}
+
 fn spawn_clade_exe(exe: &Path, cwd: &Path, args: &[&str]) -> io::Result<()> {
     // portability-allow: spawns only the verified staged update helper or relaunches the updated Clade executable inside the portable folder
     let mut cmd = std::process::Command::new(exe);
     cmd.current_dir(cwd)
         .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .env_remove("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")
         .env_remove("WEBVIEW2_USER_DATA_FOLDER")
         .env_remove("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
@@ -1060,23 +1097,55 @@ pub fn maybe_run_helper_mode() -> Option<i32> {
     }
 }
 
-/// Cleans finished update staging, backup directories, leftover `.tmp` files in root, and
-/// cached ZIPs belonging to the current or older releases. Preserves resumable `.part` files for
-/// releases newer than the running launcher.
+fn sweep_new_tmp_files(dir: &Path) {
+    if is_link(dir).unwrap_or(false) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.contains(".new-") && name.ends_with(".tmp") {
+            let p = entry.path();
+            let is_plain_file =
+                !is_link(&p).unwrap_or(true) && fs::symlink_metadata(&p).is_ok_and(|m| m.is_file());
+            if is_plain_file {
+                let _ = remove_file_with_retry(&p);
+            }
+        }
+    }
+}
+
+fn is_preserved_backup(dir: &Path, name: &str) -> bool {
+    if name.starts_with("backup-preserved-") || name.starts_with("recovery-") {
+        return true;
+    }
+    if is_link(dir).unwrap_or(true) {
+        return false;
+    }
+    let marker = dir.join(PRESERVED_BACKUP_MARKER);
+    !is_link(&marker).unwrap_or(true) && fs::symlink_metadata(&marker).is_ok_and(|m| m.is_file())
+}
+
+/// Cleans finished update staging, normal backup directories, leftover `.tmp` files in root and
+/// `licenses/`, and cached ZIPs belonging to the current or older releases. Preserves
+/// incomplete-rollback backups and resumable `.part` files for releases newer than the running
+/// launcher.
 pub fn sweep_updates(root: &PortableRoot) {
     sweep_updates_for_version(root, installed_version_tag());
 }
 
 fn sweep_updates_for_version(root: &PortableRoot, current_tag: &str) {
-    if let Ok(entries) = fs::read_dir(root.path()) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.contains(".new-") && name.ends_with(".tmp") {
-                let _ = remove_file_with_retry(&entry.path());
-            }
-        }
+    sweep_new_tmp_files(root.path());
+    let licenses_dir = root.path().join("licenses");
+    if reject_links_between(root.path(), &licenses_dir).is_ok() {
+        sweep_new_tmp_files(&licenses_dir);
     }
     let updates = root.updates_dir();
+    if reject_links_between(root.path(), &updates).is_err() {
+        return;
+    }
     let Ok(entries) = fs::read_dir(&updates) else {
         return;
     };
@@ -1084,8 +1153,14 @@ fn sweep_updates_for_version(root: &PortableRoot, current_tag: &str) {
     for entry in entries.flatten() {
         let p = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("stage-") || name.starts_with("backup-") {
+        if name.starts_with("stage-") {
             let _ = remove_dir_all_with_retry(&p);
+            continue;
+        }
+        if name.starts_with("backup-") {
+            if !is_preserved_backup(&p, &name) {
+                let _ = remove_dir_all_with_retry(&p);
+            }
             continue;
         }
         if let (Some(cur), Some((_, dir_ver))) = (current_ver, parse_release_tag(&name)) {
@@ -1344,6 +1419,40 @@ pub async fn install_update(
     }
 }
 
+fn verify_staged_helper_or_cleanup(
+    root: &PortableRoot,
+    staged: &StagedUpdate,
+    runtime: &ApplyRuntime,
+) -> Result<PathBuf, CodedError> {
+    if !staged.stage_dir_name.starts_with("stage-") || RelPath::new(&staged.stage_dir_name).is_err()
+    {
+        runtime.reset_idle();
+        return Err(CodedError::new(
+            "update_verify_failed",
+            "invalid staged update directory",
+        ));
+    }
+    let stage_dir = root.updates_dir().join(&staged.stage_dir_name);
+    let helper_exe = stage_dir.join(PACKAGE_ROOT_DIR).join("Clade.exe");
+    if let Err(err) = reject_links_between(root.path(), &helper_exe)
+        .map_err(|e| e.to_string())
+        .and_then(|()| verify_pe_magic(&helper_exe))
+        .and_then(|()| {
+            let actual = sha256_hex(&helper_exe).map_err(|e| e.to_string())?;
+            if actual.eq_ignore_ascii_case(&staged.exe_sha256) {
+                Ok(())
+            } else {
+                Err("staged helper executable digest mismatch".into())
+            }
+        })
+    {
+        let _ = remove_dir_all_with_retry(&stage_dir);
+        runtime.reset_idle();
+        return Err(CodedError::new("update_verify_failed", err));
+    }
+    Ok(helper_exe)
+}
+
 #[tauri::command]
 pub fn apply_staged_update(
     app: AppHandle,
@@ -1388,23 +1497,13 @@ pub fn apply_staged_update(
         staged
     };
 
-    let helper_exe = state
-        .root
-        .updates_dir()
-        .join(&staged.stage_dir_name)
-        .join(PACKAGE_ROOT_DIR)
-        .join("Clade.exe");
-    if let Err(err) = verify_pe_magic(&helper_exe).and_then(|()| {
-        let actual = sha256_hex(&helper_exe).map_err(|e| e.to_string())?;
-        if actual.eq_ignore_ascii_case(&staged.exe_sha256) {
-            Ok(())
-        } else {
-            Err("staged helper executable digest mismatch".into())
+    let helper_exe = match verify_staged_helper_or_cleanup(&state.root, &staged, &state.apply) {
+        Ok(path) => path,
+        Err(err) => {
+            let _ = app.emit(UPDATE_PROGRESS_EVENT, state.apply.snapshot());
+            return Err(err);
         }
-    }) {
-        state.apply.reset_idle();
-        return Err(CodedError::new("update_verify_failed", err));
-    }
+    };
 
     let pid_str = std::process::id().to_string();
     let root_str = state.root.path().to_string_lossy().into_owned();
@@ -1854,5 +1953,153 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "update_cancelled");
+    }
+
+    #[test]
+    fn copy_synced_preserves_preexisting_destination_file() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("src.bin");
+        let dst = d.path().join("dst.bin");
+        fs::write(&src, b"new").unwrap();
+        fs::write(&dst, b"existing").unwrap();
+
+        assert!(copy_synced(&src, &dst).is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn swap_file_with_backup_removes_tmp_when_backup_dir_or_checksum_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+
+        let licenses_dir = root.path().join("licenses");
+        fs::create_dir_all(&licenses_dir).unwrap();
+        let dst = licenses_dir.join("WebView2-Fixed-Version-License.txt");
+        fs::write(&dst, b"old-license").unwrap();
+
+        let src = root.updates_dir().join("staged.txt");
+        fs::write(&src, b"new-license").unwrap();
+
+        // Block `create_dir_all(backup.parent())` with a regular file at `backup_dir/licenses`.
+        let backup_dir = root.updates_dir().join("backup-test");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::write(backup_dir.join("licenses"), b"not-a-dir").unwrap();
+        let backup = backup_dir
+            .join("licenses")
+            .join("WebView2-Fixed-Version-License.txt");
+        let tmp = licenses_dir.join("WebView2-Fixed-Version-License.txt.new-test.tmp");
+        let mut actions = Vec::new();
+
+        let res = swap_file_with_backup(&src, &dst, &backup, &tmp, None, &mut actions);
+        assert!(res.is_err());
+        assert!(!tmp.exists(), "tmp must be removed when backup dir fails");
+        assert_eq!(fs::read(&dst).unwrap(), b"old-license");
+        assert!(actions.is_empty());
+
+        let exe_dst = root.path().join("Clade.exe");
+        let old_exe = fake_exe(b"old");
+        fs::write(&exe_dst, &old_exe).unwrap();
+        let exe_src = root.updates_dir().join("Clade.exe");
+        fs::write(&exe_src, fake_exe(b"new")).unwrap();
+        let exe_tmp = root.path().join("Clade.exe.new-test.tmp");
+        let exe_backup = backup_dir.join("Clade.exe");
+        let wrong_sha = "0".repeat(64);
+
+        let res = swap_file_with_backup(
+            &exe_src,
+            &exe_dst,
+            &exe_backup,
+            &exe_tmp,
+            Some(&wrong_sha),
+            &mut actions,
+        );
+        assert!(res.is_err());
+        assert!(
+            !exe_tmp.exists(),
+            "tmp must be removed on checksum mismatch"
+        );
+        assert_eq!(fs::read(&exe_dst).unwrap(), old_exe);
+    }
+
+    #[test]
+    fn sweep_updates_preserves_incomplete_rollback_backups_and_cleans_license_tmps() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+
+        let disposable = root.updates_dir().join("backup-disposable");
+        fs::create_dir_all(&disposable).unwrap();
+        fs::write(disposable.join("Clade.exe"), b"old").unwrap();
+
+        let marked = root.updates_dir().join("backup-incomplete");
+        fs::create_dir_all(&marked).unwrap();
+        fs::write(marked.join("Clade.exe"), b"recovery-exe").unwrap();
+        let preserved = mark_preserved_backup(&marked, &root.updates_dir(), "incomplete");
+        assert!(preserved.join("Clade.exe").is_file());
+
+        let fallback = root.updates_dir().join("backup-preserved-fallback");
+        fs::create_dir_all(&fallback).unwrap();
+        fs::write(fallback.join("README.txt"), b"recovery-readme").unwrap();
+
+        let licenses = root.path().join("licenses");
+        fs::create_dir_all(&licenses).unwrap();
+        let real_lic = licenses.join("WebView2-Fixed-Version-License.txt");
+        let stale_lic_tmp = licenses.join("WebView2-Fixed-Version-License.txt.new-abc.tmp");
+        fs::write(&real_lic, b"keep-license").unwrap();
+        fs::write(&stale_lic_tmp, b"stale-license-tmp").unwrap();
+
+        sweep_updates_for_version(&root, "v0.1.0");
+
+        assert!(!disposable.exists());
+        assert!(preserved.join("Clade.exe").is_file());
+        assert!(fallback.join("README.txt").is_file());
+        assert!(!stale_lic_tmp.exists());
+        assert_eq!(fs::read(&real_lic).unwrap(), b"keep-license");
+    }
+
+    #[test]
+    fn verify_staged_helper_or_cleanup_deletes_stage_dir_and_resets_runtime_on_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let root = PortableRoot::at(d.path());
+        root.ensure_layout().unwrap();
+
+        let stage_name = "stage-deadbeef";
+        let stage_dir = root.updates_dir().join(stage_name);
+        let pkg_dir = stage_dir.join(PACKAGE_ROOT_DIR);
+        fs::create_dir_all(&pkg_dir).unwrap();
+        let exe_bytes = fake_exe(b"helper");
+        let exe_path = pkg_dir.join("Clade.exe");
+        fs::write(&exe_path, &exe_bytes).unwrap();
+
+        let runtime = ApplyRuntime::default();
+        {
+            let mut g = runtime.inner.lock().unwrap();
+            g.stage = UpdateStage::Applying;
+            g.version = Some("v0.2.0".into());
+        }
+
+        let bad_staged = StagedUpdate {
+            version: "v0.2.0".into(),
+            stage_dir_name: stage_name.into(),
+            exe_sha256: "0".repeat(64),
+            has_webview2: false,
+        };
+        let err = verify_staged_helper_or_cleanup(&root, &bad_staged, &runtime).unwrap_err();
+        assert_eq!(err.code, "update_verify_failed");
+        assert!(!stage_dir.exists(), "failed stage dir must be deleted");
+        assert_eq!(runtime.snapshot().stage, UpdateStage::Idle);
+
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(&exe_path, &exe_bytes).unwrap();
+        let good_staged = StagedUpdate {
+            version: "v0.2.0".into(),
+            stage_dir_name: stage_name.into(),
+            exe_sha256: sha256_bytes_hex(&exe_bytes),
+            has_webview2: false,
+        };
+        let resolved = verify_staged_helper_or_cleanup(&root, &good_staged, &runtime).unwrap();
+        assert_eq!(resolved, exe_path);
+        assert!(stage_dir.exists());
     }
 }

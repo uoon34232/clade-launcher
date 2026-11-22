@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getMotionMode, prefersReducedMotion, setMotionMode } from "./motion";
 
+const REDUCED_QUERY = "(prefers-reduced-motion: reduce)";
+
 const system = (reduce: boolean) =>
-  vi.stubGlobal("matchMedia", (q: string) => ({ matches: reduce && q.includes("reduce") }));
+  vi.stubGlobal("matchMedia", (q: string) => {
+    expect(q).toBe(REDUCED_QUERY);
+    return { matches: reduce };
+  });
 
 afterEach(() => {
   setMotionMode("system");
@@ -16,6 +21,11 @@ describe("reduced motion", () => {
     system(false);
     expect(prefersReducedMotion()).toBe(false);
     expect(getMotionMode()).toBe("system");
+  });
+
+  it("returns false when matchMedia is unavailable", () => {
+    vi.stubGlobal("matchMedia", undefined);
+    expect(prefersReducedMotion()).toBe(false);
   });
 
   it("On and Off beat the system preference", () => {

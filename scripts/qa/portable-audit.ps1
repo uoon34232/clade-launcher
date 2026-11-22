@@ -88,10 +88,14 @@ function Get-RegistryValues([string] $key) {
   $out = New-Object System.Collections.Generic.List[string]
   try {
     $p = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
-    foreach ($n in $p.PSObject.Properties) {
-      if ($n.Name -like 'PS*') { continue }
-      $out.Add(('{0}={1}' -f $n.Name, $n.Value)) | Out-Null
+    if ($null -ne $p -and $null -ne $p.PSObject) {
+      foreach ($n in $p.PSObject.Properties) {
+        if ($n.Name -like 'PS*') { continue }
+        $out.Add(('{0}={1}' -f $n.Name, $n.Value)) | Out-Null
+      }
     }
+  } catch { }
+  try {
     foreach ($sub in (Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue)) { $out.Add(('[subkey] ' + $sub.PSChildName)) | Out-Null }
   } catch { }
   return @($out | Sort-Object)
@@ -159,7 +163,7 @@ function New-Snapshot {
   $snap.processes = $procs
   # The Clade folder itself: relative path + size (no contents), to show what Clade created inside it.
   if ($CladeRoot -and (Test-Path -LiteralPath $CladeRoot)) {
-    $rootFull = (Resolve-Path -LiteralPath $CladeRoot).Path.TrimEnd('\')
+    $rootFull = (Resolve-Path -LiteralPath $CladeRoot).ProviderPath.TrimEnd('\')
     $rel = foreach ($line in (Get-FileList $rootFull $MaxFiles)) {
       $parts = $line -split '\|'
       '{0}|{1}' -f $parts[0].Substring($rootFull.Length).TrimStart('\'), $parts[1]

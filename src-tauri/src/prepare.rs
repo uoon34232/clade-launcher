@@ -249,6 +249,16 @@ impl Tracker {
         self.emit();
     }
 
+    /// Updates the item total and determinacy for the active stage without overwriting its label.
+    pub fn set_items(&self, items: Option<u64>, indeterminate: bool) {
+        self.progress.begin_items(items.unwrap_or(0));
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .indeterminate = indeterminate;
+        self.emit();
+    }
+
     pub fn snapshot(&self) -> PrepareProgress {
         let cur = self.current.lock().unwrap_or_else(|e| e.into_inner());
         let s = self.progress.snapshot();
@@ -433,57 +443,85 @@ pub async fn jobs_for_libraries<F: Fetcher, S: Streamer, R: InstallerRunner>(
     recorded: &std::collections::HashMap<String, u64>,
 ) -> Result<(Vec<FileJob>, Vec<GeneratedFile>), PrepareError> {
     let base = ctx.root.libraries_dir();
+    let root_base = ctx.root.path().to_path_buf();
     let libs_owned: Vec<Library> = libs.iter().map(|l| (*l).clone()).collect();
     let recorded_owned = recorded.clone();
     let verify_all = ctx.verify_all;
 
-    let (planned, generated) = tokio::task::spawn_blocking(move || {
-        let mut seen = HashSet::new();
-        let (mut planned, mut generated) = (Vec::new(), Vec::new());
-        for lib in libs_owned {
-            let dest = lib.artifact.path.to_path(&base);
-            if !seen.insert(dest.clone()) {
-                continue;
-            }
-            let Some(url) = lib.artifact.url else {
-                generated.push(GeneratedFile {
-                    dest,
-                    expected: lib.artifact.expected,
-                    size: lib.artifact.size,
-                });
-                continue;
-            };
-            match lib.artifact.expected {
-                Some(expected) => planned.push(PlannedLib::Ready(FileJob {
-                    url,
-                    dest,
-                    expected,
-                    size: lib.artifact.size,
-                })),
-                // Nothing in the metadata to verify an existing copy against: it came through a
-                // sidecar-verified download, whose size was recorded then. A missing record, zero
-                // size, different size, or explicit full verification fetches the `.sha1` sidecar.
-                None if !verify_all
-                    && dest.is_file()
-                    && recorded_owned
-                        .get(lib.artifact.path.as_str())
-                        .is_some_and(|&n| {
-                            n > 0 && fs::metadata(&dest).map(|m| m.len() == n).unwrap_or(false)
-                        }) =>
-                {
+    let (planned, generated) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<PlannedLib>, Vec<GeneratedFile>), PrepareError> {
+            fsutil::reject_links_between(&root_base, &base).map_err(storage)?;
+            let mut checked_parents = HashSet::new();
+            let mut seen = HashSet::new();
+            let (mut planned, mut generated) = (Vec::new(), Vec::new());
+            for lib in libs_owned {
+                let dest = lib.artifact.path.to_path(&base);
+                if !seen.insert(dest.clone()) {
                     continue;
                 }
-                None => planned.push(PlannedLib::NeedsSidecar {
-                    url,
-                    dest,
-                    size: lib.artifact.size,
-                }),
+                let Some(url) = lib.artifact.url else {
+                    generated.push(GeneratedFile {
+                        dest,
+                        expected: lib.artifact.expected,
+                        size: lib.artifact.size,
+                    });
+                    continue;
+                };
+                match lib.artifact.expected {
+                    Some(expected) => planned.push(PlannedLib::Ready(FileJob {
+                        url,
+                        dest,
+                        expected,
+                        size: lib.artifact.size,
+                    })),
+                    // Nothing in the metadata to verify an existing copy against: it came through a
+                    // sidecar-verified download, whose size was recorded then. A missing record, zero
+                    // size, different size, or explicit full verification fetches the `.sha1` sidecar.
+                    None if !verify_all => {
+                        if let Some(parent) = dest.parent() {
+                            if !checked_parents.contains(parent) {
+                                fsutil::reject_links_between(&root_base, parent)
+                                    .map_err(storage)?;
+                                checked_parents.insert(parent.to_path_buf());
+                            }
+                        }
+                        let reusable = match fsutil::is_link(&dest) {
+                            Ok(true) => {
+                                return Err(storage(format!(
+                                    "refusing to follow link at {}",
+                                    lib.artifact.path.as_str()
+                                )));
+                            }
+                            Ok(false) => fs::symlink_metadata(&dest).is_ok_and(|md| {
+                                md.is_file()
+                                    && recorded_owned
+                                        .get(lib.artifact.path.as_str())
+                                        .is_some_and(|&n| n > 0 && md.len() == n)
+                            }),
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                            Err(e) => return Err(storage(e)),
+                        };
+                        if reusable {
+                            continue;
+                        }
+                        planned.push(PlannedLib::NeedsSidecar {
+                            url,
+                            dest,
+                            size: lib.artifact.size,
+                        });
+                    }
+                    None => planned.push(PlannedLib::NeedsSidecar {
+                        url,
+                        dest,
+                        size: lib.artifact.size,
+                    }),
+                }
             }
-        }
-        (planned, generated)
-    })
+            Ok((planned, generated))
+        },
+    )
     .await
-    .map_err(storage)?;
+    .map_err(storage)??;
 
     let mut jobs = Vec::with_capacity(planned.len());
     for item in planned {
@@ -505,13 +543,41 @@ pub async fn jobs_for_libraries<F: Fetcher, S: Streamer, R: InstallerRunner>(
 
 // ------------------------------------------------------------------------------ offline check
 
+fn check_regular_file_len_cached(
+    root: &PortableRoot,
+    path: &Path,
+    checked_parents: &mut HashSet<PathBuf>,
+) -> Option<u64> {
+    let parent = path.parent()?;
+    if !checked_parents.contains(parent) {
+        fsutil::reject_links_between(root.path(), parent).ok()?;
+        checked_parents.insert(parent.to_path_buf());
+    }
+    if fsutil::is_link(path).ok()? {
+        return None;
+    }
+    let md = fs::symlink_metadata(path).ok()?;
+    md.is_file().then_some(md.len())
+}
+
 fn check_natives_present(root: &PortableRoot, id: &InstanceId) -> Result<(), String> {
     let natives = InstanceStore::new(root).dirs(id).natives_dir();
-    if fs::read_dir(&natives)
-        .map(|mut d| d.next().is_none())
-        .unwrap_or(true)
-    {
-        return Err("the extracted native libraries".into());
+    let missing = || "the extracted native libraries".to_owned();
+    fsutil::reject_links_between(root.path(), &natives).map_err(|_| missing())?;
+    if fsutil::is_link(&natives).unwrap_or(true) {
+        return Err(missing());
+    }
+    let rd = fs::read_dir(&natives).map_err(|_| missing())?;
+    let mut count = 0usize;
+    for entry in rd {
+        let entry = entry.map_err(|_| missing())?;
+        if fsutil::is_link(&entry.path()).unwrap_or(true) {
+            return Err(missing());
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err(missing());
     }
     Ok(())
 }
@@ -525,30 +591,52 @@ pub fn check_files(
     loader_id: Option<&VersionId>,
 ) -> Result<(), String> {
     let mc = inst.minecraft.as_str();
-    let bytes = fsutil::read_bounded(&version_json_path(root, mc), MAX_VERSION_JSON as u64)
+    let vjson_path = version_json_path(root, mc);
+    fsutil::reject_links_between(root.path(), &vjson_path)
+        .map_err(|_| "the Minecraft version information".to_owned())?;
+    let bytes = fsutil::read_bounded(&vjson_path, MAX_VERSION_JSON as u64)
         .map_err(|_| "the Minecraft version information".to_owned())?;
     let plan = parse_version(&bytes, &WINDOWS_X64).map_err(|e| e.to_string())?;
+    if plan.id != mc {
+        return Err("the Minecraft version information".into());
+    }
 
+    let mut checked_parents = HashSet::new();
     let client = plan.client.as_ref().ok_or("the client download")?;
     let jar = client_jar_path(root, mc);
-    if fs::metadata(&jar).map(|m| m.len()).ok() != Some(client.size) {
+    if check_regular_file_len_cached(root, &jar, &mut checked_parents) != Some(client.size) {
         return Err("the Minecraft game file".into());
     }
-    check_libraries(root, &plan, &Default::default())?;
+    check_libraries(
+        root,
+        &plan,
+        &loader_prepare::read_sizes(root, mc),
+        &mut checked_parents,
+    )?;
     if let Some(log) = &plan.logging {
-        if !log_config_path(root, &log.file_name).is_file() {
+        if check_regular_file_len_cached(
+            root,
+            &log_config_path(root, &log.file_name),
+            &mut checked_parents,
+        )
+        .is_none()
+        {
             return Err("the logging configuration".into());
         }
     }
     if let Some(ai) = &plan.asset_index {
-        let idx = fsutil::read_bounded(&asset_index_path(root, &ai.id), MAX_INDEX_JSON as u64)
+        let idx_path = asset_index_path(root, &ai.id);
+        fsutil::reject_links_between(root.path(), &idx_path)
+            .map_err(|_| "the asset index".to_owned())?;
+        let idx = fsutil::read_bounded(&idx_path, MAX_INDEX_JSON as u64)
             .map_err(|_| "the asset index".to_owned())?;
         let index = parse_asset_index(&idx).map_err(|e| e.to_string())?;
         for o in &index.objects {
-            if fs::metadata(object_path(root, &o.store_path()))
-                .map(|m| m.len())
-                .ok()
-                != Some(o.size)
+            if check_regular_file_len_cached(
+                root,
+                &object_path(root, &o.store_path()),
+                &mut checked_parents,
+            ) != Some(o.size)
             {
                 return Err("a game asset".into());
             }
@@ -562,18 +650,20 @@ pub fn check_files(
             for o in &index.objects {
                 let name = RelPath::new(&o.name).map_err(|_| "a game asset".to_owned())?;
                 if index.virtual_files
-                    && fs::metadata(name.to_path(&virtual_dir))
-                        .map(|m| m.len())
-                        .ok()
-                        != Some(o.size)
+                    && check_regular_file_len_cached(
+                        root,
+                        &name.to_path(&virtual_dir),
+                        &mut checked_parents,
+                    ) != Some(o.size)
                 {
                     return Err("a game asset".into());
                 }
                 if index.map_to_resources
-                    && fs::metadata(name.to_path(&resources_dir))
-                        .map(|m| m.len())
-                        .ok()
-                        != Some(o.size)
+                    && check_regular_file_len_cached(
+                        root,
+                        &name.to_path(&resources_dir),
+                        &mut checked_parents,
+                    ) != Some(o.size)
                 {
                     return Err("a game asset".into());
                 }
@@ -602,6 +692,7 @@ pub fn check_files(
             root,
             &profile,
             &loader_prepare::read_sizes(root, id.as_str()),
+            &mut checked_parents,
         )?;
         if !vanilla_has_natives && profile.natives().next().is_some() {
             check_natives_present(root, &inst.id)?;
@@ -614,14 +705,12 @@ fn check_libraries(
     root: &PortableRoot,
     plan: &VersionPlan,
     recorded: &std::collections::HashMap<String, u64>,
+    checked_parents: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
     for lib in &plan.libraries {
         let p = lib.artifact.path.to_path(&root.libraries_dir());
-        let md = fs::metadata(&p).map_err(|_| format!("the library {}", lib.name))?;
-        if !md.is_file() {
-            return Err(format!("the library {}", lib.name));
-        }
-        let len = md.len();
+        let len = check_regular_file_len_cached(root, &p, checked_parents)
+            .ok_or_else(|| format!("the library {}", lib.name))?;
         if let Some(want) = lib.artifact.size {
             if len != want {
                 return Err(format!("the library {}", lib.name));
@@ -663,15 +752,21 @@ async fn ensure_version_json<F: Fetcher, S: Streamer, R: InstallerRunner>(
 ) -> Result<Vec<u8>, PrepareError> {
     let path = version_json_path(ctx.root, mc.as_str());
     let local_valid = {
+        let root_base = ctx.root.path().to_path_buf();
         let local_path = path.clone();
         let expected_id = mc.as_str().to_owned();
-        tokio::task::spawn_blocking(move || {
-            let b = fsutil::read_bounded(&local_path, MAX_VERSION_JSON as u64).ok()?;
-            let plan = parse_version(&b, &WINDOWS_X64).ok()?;
-            (plan.id == expected_id).then_some(b)
+        tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, PrepareError> {
+            fsutil::reject_links_between(&root_base, &local_path).map_err(storage)?;
+            let Ok(b) = fsutil::read_bounded(&local_path, MAX_VERSION_JSON as u64) else {
+                return Ok(None);
+            };
+            let Ok(plan) = parse_version(&b, &WINDOWS_X64) else {
+                return Ok(None);
+            };
+            Ok((plan.id == expected_id).then_some(b))
         })
         .await
-        .map_err(storage)?
+        .map_err(storage)??
     };
     if !ctx.verify_all {
         if let Some(b) = local_valid {
@@ -683,6 +778,14 @@ async fn ensure_version_json<F: Fetcher, S: Streamer, R: InstallerRunner>(
         .cache_dir()
         .join("catalogs")
         .join("version_manifest.json");
+    {
+        let root_base = ctx.root.path().to_path_buf();
+        let cache_check = cache.clone();
+        tokio::task::spawn_blocking(move || fsutil::reject_links_between(&root_base, &cache_check))
+            .await
+            .map_err(storage)?
+            .map_err(storage)?;
+    }
     let mut catalog = mc_catalog::load(ctx.meta, &cache, ctx.now, ctx.verify_all)
         .await
         .map_err(|e| match e {
@@ -732,10 +835,14 @@ async fn ensure_version_json<F: Fetcher, S: Streamer, R: InstallerRunner>(
         ));
     }
     let write_body = body.clone();
-    tokio::task::spawn_blocking(move || atomic_write(&path, &write_body))
-        .await
-        .map_err(storage)?
-        .map_err(storage)?;
+    let root_base = ctx.root.path().to_path_buf();
+    tokio::task::spawn_blocking(move || -> io::Result<()> {
+        fsutil::reject_links_between(&root_base, &path)?;
+        atomic_write(&path, &write_body)
+    })
+    .await
+    .map_err(storage)?
+    .map_err(storage)?;
     Ok(body)
 }
 
@@ -757,7 +864,9 @@ async fn ensure_asset_index<F: Fetcher, S: Streamer, R: InstallerRunner>(
     })
     .await?;
     let assets_name = r.assets_name.clone();
+    let root_base = ctx.root.path().to_path_buf();
     let index = tokio::task::spawn_blocking(move || -> Result<AssetIndex, PrepareError> {
+        fsutil::reject_links_between(&root_base, &dest).map_err(storage)?;
         let bytes = fsutil::read_bounded(&dest, MAX_INDEX_JSON as u64).map_err(|e| {
             if e.kind() == io::ErrorKind::InvalidData {
                 PrepareError::Unsupported("the asset index is unexpectedly large".into())
@@ -839,7 +948,7 @@ fn copy_named(
                 if fsutil::verify_file(dst, exp, Some(size)).is_ok() {
                     return Ok(());
                 }
-            } else if fs::metadata(dst)
+            } else if fs::symlink_metadata(dst)
                 .map(|m| m.is_file() && m.len() == size)
                 .unwrap_or(false)
             {
@@ -850,6 +959,12 @@ fn copy_named(
         Err(e) => return Err(e),
     }
 
+    if fsutil::is_link(src)? {
+        return Err(io::Error::other(format!(
+            "refusing to follow link at {}",
+            src.display()
+        )));
+    }
     let file_name = dst
         .file_name()
         .ok_or_else(|| io::Error::other("asset destination has no file name"))?;
@@ -912,6 +1027,8 @@ async fn ensure_assets<F: Fetcher, S: Streamer, R: InstallerRunner>(
         );
         let root = ctx.root.clone();
         tokio::task::spawn_blocking(move || -> Result<(), PrepareError> {
+            fsutil::reject_links_between(root.path(), &root.assets_dir().join("objects"))
+                .map_err(storage)?;
             let mut checked_parents = HashSet::new();
             for o in &objects {
                 if cancel.is_cancelled() {
@@ -987,18 +1104,21 @@ fn merged_natives(vanilla: &VersionPlan, loader: Option<&VersionPlan>) -> Vec<Li
     out
 }
 
+fn planned_library_bytes(plan: &VersionPlan) -> u64 {
+    let mut seen = HashSet::new();
+    plan.libraries
+        .iter()
+        .filter(|l| l.artifact.url.is_some() && seen.insert(l.artifact.path.clone()))
+        .filter_map(|l| l.artifact.size)
+        .fold(0u64, u64::saturating_add)
+}
+
 fn planned_bytes(
     plan: &VersionPlan,
     index: Option<&AssetIndex>,
     runtime: Option<&RuntimePlan>,
 ) -> u64 {
-    let mut seen = HashSet::new();
-    let libs = plan
-        .libraries
-        .iter()
-        .filter(|l| l.artifact.url.is_some() && seen.insert(l.artifact.path.clone()))
-        .filter_map(|l| l.artifact.size)
-        .fold(0u64, u64::saturating_add);
+    let libs = planned_library_bytes(plan);
     let mut hashes = HashSet::new();
     let assets = index.map_or(0u64, |i| {
         i.objects
@@ -1023,7 +1143,11 @@ fn planned_bytes(
 }
 
 fn missing(path: &Path, size: Option<u64>) -> bool {
-    match (fs::metadata(path).ok().map(|m| m.len()), size) {
+    let actual = fs::symlink_metadata(path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len());
+    match (actual, size) {
         (None, _) => true,
         (Some(len), Some(want)) => len != want,
         (Some(len), None) => len == 0,
@@ -1254,9 +1378,12 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
         );
     }
 
-    let current_ready_id = match &inst.setup {
-        SetupState::Ready { version_id, .. } => Some(version_id.clone()),
-        SetupState::Pending => None,
+    let (current_ready_id, current_ready_loader) = match &inst.setup {
+        SetupState::Ready {
+            version_id,
+            loader_version,
+        } => (Some(version_id.clone()), loader_version.clone()),
+        SetupState::Pending => (None, None),
     };
     let loader = match &inst.profile {
         Profile::Vanilla => None,
@@ -1264,8 +1391,14 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
             loader: kind,
             loader_version,
         } => {
-            let lv =
-                loader_prepare::resolve_loader_version(ctx, *kind, &mc, loader_version).await?;
+            let lv = loader_prepare::resolve_loader_for_setup(
+                ctx,
+                *kind,
+                &mc,
+                loader_version,
+                current_ready_loader.as_ref(),
+            )
+            .await?;
             match kind {
                 LoaderKind::Fabric | LoaderKind::Quilt => {
                     let profile = loader_prepare::plan_profile_loader(ctx, *kind, &mc, &lv).await?;
@@ -1363,7 +1496,7 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
         );
     }
     if let Some(lp) = loader.as_ref().and_then(PlannedLoader::preplanned) {
-        progress.plan_bytes(planned_bytes(lp, None, None));
+        progress.plan_bytes(planned_library_bytes(lp));
     }
 
     // ---- 1b. enough room? (before anything big is downloaded)
@@ -1483,8 +1616,15 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
     ctx.check_cancel()?;
 
     // ---- 4. libraries
+    let recorded = {
+        let root = ctx.root.clone();
+        let id = plan.id.clone();
+        tokio::task::spawn_blocking(move || loader_prepare::read_sizes(&root, &id))
+            .await
+            .map_err(storage)?
+    };
     let libs: Vec<&Library> = plan.libraries.iter().collect();
-    let (jobs, generated) = jobs_for_libraries(ctx, &libs, &Default::default()).await?;
+    let (jobs, generated) = jobs_for_libraries(ctx, &libs, &recorded).await?;
     if !generated.is_empty() {
         return Err(PrepareError::Unsupported(
             "a Minecraft library has no download".into(),
@@ -1497,6 +1637,13 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
         false,
     );
     dl.fetch_all(jobs, ctx.concurrency).await?;
+    {
+        let root = ctx.root.clone();
+        let plan_clone = plan.clone();
+        tokio::task::spawn_blocking(move || loader_prepare::write_sizes(&root, &plan_clone))
+            .await
+            .map_err(storage)??;
+    }
     ctx.check_cancel()?;
 
     // ---- 5. assets
@@ -1562,6 +1709,9 @@ async fn run<F: Fetcher, S: Streamer, R: InstallerRunner>(
                     .await
                     .map_err(storage)??
             };
+            ctx.tracker
+                .progress
+                .plan_bytes(planned_library_bytes(&produced));
             loader_prepare::ensure_libraries(ctx, &dl, &produced).await?;
             (id, Some(version), Some(produced))
         }

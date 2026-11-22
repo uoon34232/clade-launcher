@@ -210,14 +210,41 @@ fn a_long_log_keeps_only_its_tail_from_a_line_start() {
 fn only_the_newest_exports_are_kept() {
     let d = tempfile::tempdir().unwrap();
     let r = root(d.path());
+    let diag_dir = r.logs_dir().join("diagnostics");
+    fs::create_dir_all(&diag_dir).unwrap();
+    // Unrelated files in logs/diagnostics/ must be left untouched by prune().
+    fs::write(diag_dir.join("notes.txt"), b"keep me").unwrap();
+    fs::write(diag_dir.join("other.zip"), b"unrelated zip").unwrap();
+
     let settings = LauncherSettings::default();
     for i in 0..(KEEP as i64 + 3) {
         export(&r, &settings, &facts(1_700_000_000 + i * 60)).unwrap();
     }
-    let zips = fs::read_dir(r.logs_dir().join("diagnostics"))
+
+    let mut remaining: Vec<String> = fs::read_dir(&diag_dir)
         .unwrap()
-        .count();
-    assert_eq!(zips, KEEP);
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    remaining.sort();
+
+    let mut expected: Vec<String> = (3..(KEEP as i64 + 3))
+        .map(|i| {
+            format!(
+                "Clade-Diagnostics-{}.zip",
+                timestamp(1_700_000_000 + i * 60)
+            )
+        })
+        .collect();
+    expected.push("notes.txt".to_owned());
+    expected.push("other.zip".to_owned());
+    expected.sort();
+
+    assert_eq!(remaining, expected);
+    assert_eq!(fs::read(diag_dir.join("notes.txt")).unwrap(), b"keep me");
+    assert_eq!(
+        fs::read(diag_dir.join("other.zip")).unwrap(),
+        b"unrelated zip"
+    );
 }
 
 #[test]
@@ -332,6 +359,11 @@ fn bearer_access_and_refresh_token_forms_are_redacted() {
             "code=opaque-oauth-CODE-0123456789abcdef",
             "opaque-oauth-CODE-0123456789abcdef",
         ),
+        (
+            r#"passphrase="correct horse battery" next=1"#,
+            "correct horse battery",
+        ),
+        ("secret_key: 'alpha beta gamma' done=1", "alpha beta gamma"),
     ] {
         let out = redact(d.path(), line);
         assert!(!out.contains(secret), "{secret} survived in {out:?}");
@@ -735,16 +767,28 @@ fn profile_summary_redacts_known_identities_and_personal_paths() {
     });
     accounts.save(&r.accounts_file()).unwrap();
 
-    // A profile whose id/folder names the player, and a broken profile folder naming a user path/UUID.
+    // A profile whose id/folder names the player, and a broken profile whose manifest error
+    // echoes a personal user path and the Clade root path in `listing.problems`.
     let broken_name = format!("FixtureAlex-{uuid}");
     let broken = r.instances_dir().join(&broken_name);
     fs::create_dir_all(&broken).unwrap();
-    let root_str = r.path().display();
-    fs::write(
-        broken.join("instance.json"),
-        format!(r#"{{"bad": "C:\\Users\\Alice\\x and {root_str}"}}"#),
-    )
-    .unwrap();
+    fs::write(broken.join("instance.json"), b"{ not json").unwrap();
+
+    let broken_path = r.instances_dir().join("broken-path");
+    fs::create_dir_all(&broken_path).unwrap();
+    let root_str = r.path().display().to_string();
+    let root_escaped = root_str.replace('\\', "\\\\");
+    // `InstanceId::deserialize` echoes the invalid `id` string in `listing.problems`.
+    let payload = serde_json::json!({
+        "id": format!("C:\\Users\\Alice\\x and {root_str}")
+    });
+    fs::write(broken_path.join("instance.json"), payload.to_string()).unwrap();
+
+    let raw_summary = profile_summary(&r);
+    assert!(
+        raw_summary.contains("Alice") && raw_summary.contains(&root_escaped),
+        "expected unredacted path/user in raw problem summary: {raw_summary}"
+    );
 
     let collected = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
     let summary = &collected
@@ -763,6 +807,18 @@ fn profile_summary_redacts_known_identities_and_personal_paths() {
     assert!(
         summary.contains("<mc-name>-<mc-uuid>"),
         "expected redacted placeholders in {summary}"
+    );
+    assert!(
+        !summary.contains("Alice"),
+        "personal user folder leaked in profile-summary.txt: {summary}"
+    );
+    assert!(
+        !summary.contains(&root_str) && !summary.contains(&root_escaped),
+        "portable root path leaked in profile-summary.txt: {summary}"
+    );
+    assert!(
+        summary.contains("<user>") && summary.contains("<clade>"),
+        "expected <user> and <clade> placeholders in {summary}"
     );
 }
 
@@ -819,6 +875,55 @@ fn clade_old_log_tail_is_prepended_only_when_current_log_is_below_budget() {
         !log_full.contains("old-entry"),
         "clade.old.log must not be prepended when clade.log >= LOG_TAIL_BYTES"
     );
+
+    // 3. clade.log slightly below LOG_TAIL_BYTES -> clade.old.log is tailed to rem = LOG_TAIL_BYTES - cur_len on a line boundary.
+    let cur_line = "current-budget-line-0123456789abcdef0123456789abcdef0123456789a\n";
+    let cur_repeats = (LOG_TAIL_BYTES as usize - 1024) / cur_line.len();
+    fs::write(r.logs_dir().join("clade.log"), cur_line.repeat(cur_repeats)).unwrap();
+    let old_line = "old-line-0123456789abcdef0123456789abcdef0123456789abcdef012345\n";
+    fs::write(
+        r.logs_dir().join("clade.old.log"),
+        format!("OLD-HEAD-DROPPED\n{}old-tail-last\n", old_line.repeat(64)),
+    )
+    .unwrap();
+    let collected_trimmed = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    let log_trimmed = &collected_trimmed
+        .iter()
+        .find(|(n, _)| *n == "logs/clade.log")
+        .unwrap()
+        .1;
+    assert!(log_trimmed.len() as u64 <= LOG_TAIL_BYTES);
+    assert!(
+        !log_trimmed.contains("OLD-HEAD-DROPPED"),
+        "older head of clade.old.log should be trimmed away"
+    );
+    assert!(
+        log_trimmed.starts_with("old-line-"),
+        "trimmed clade.old.log tail must begin on a line boundary: {:?}",
+        &log_trimmed[..log_trimmed.len().min(80)]
+    );
+    assert!(
+        log_trimmed.contains("old-tail-last\ncurrent-budget-line-"),
+        "expected trimmed old tail followed by current log"
+    );
+
+    // 4. Only clade.old.log exists (clade.log absent) -> clade.old.log tail is still collected.
+    fs::remove_file(r.logs_dir().join("clade.log")).unwrap();
+    fs::write(
+        r.logs_dir().join("clade.old.log"),
+        "only-old-entry user FixtureAlex token=SECRET_OLD_ONLY\n",
+    )
+    .unwrap();
+    let collected_old_only = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    let log_old_only = &collected_old_only
+        .iter()
+        .find(|(n, _)| *n == "logs/clade.log")
+        .unwrap()
+        .1;
+    assert_eq!(
+        log_old_only,
+        "only-old-entry user <mc-name> token=<redacted>\n"
+    );
 }
 
 #[test]
@@ -840,6 +945,127 @@ fn redact_emails_handles_multibyte_utf8_delimiters_without_panicking() {
     }
 }
 
+#[test]
+fn settings_redacted_json_redacts_last_instance_identity() {
+    use crate::accounts::{AccountMeta, AccountStatus, AccountsFile};
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let uuid = "00000000-0000-4000-8000-0000000000ee";
+    let mut accounts = AccountsFile::default();
+    accounts.accounts.push(AccountMeta {
+        id: "acc1".into(),
+        username: "FixtureAlex".into(),
+        minecraft_uuid: uuid.into(),
+        added_at: 0,
+        last_used_at: None,
+        status: AccountStatus::Ready,
+    });
+    accounts.save(&r.accounts_file()).unwrap();
+
+    let id = crate::instances::InstanceId::new(&format!("fixturealex-{uuid}")).unwrap();
+    let settings = LauncherSettings {
+        last_instance: Some(id),
+        ..LauncherSettings::default()
+    };
+    let collected = collect(&r, &settings, &facts(1_700_000_000));
+    let settings_json = &collected
+        .iter()
+        .find(|(n, _)| *n == "settings-redacted.json")
+        .unwrap()
+        .1;
+    assert!(
+        !settings_json.to_ascii_lowercase().contains("fixturealex"),
+        "known username leaked in settings-redacted.json: {settings_json}"
+    );
+    assert!(
+        !settings_json.contains(uuid),
+        "known UUID leaked in settings-redacted.json: {settings_json}"
+    );
+    assert!(
+        settings_json.contains("<mc-name>-<mc-uuid>"),
+        "expected redacted identity placeholder in settings-redacted.json: {settings_json}"
+    );
+}
+
+#[test]
+fn minecraft_latest_log_falls_back_to_most_recent_instance_across_profiles() {
+    use crate::instances::NewInstance;
+    use std::time::{Duration, SystemTime};
+
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let store = InstanceStore::new(&r);
+
+    let alpha = store
+        .create(NewInstance::vanilla("Alpha", "1.21.4").unwrap(), 100)
+        .unwrap();
+    let beta = store
+        .create(NewInstance::vanilla("Beta", "1.21.4").unwrap(), 200)
+        .unwrap();
+    let gamma = store
+        .create(NewInstance::vanilla("Gamma", "1.21.4").unwrap(), 300)
+        .unwrap();
+
+    let alpha_logs = store.dirs(&alpha.id).game_dir().join("logs");
+    let beta_logs = store.dirs(&beta.id).game_dir().join("logs");
+    fs::create_dir_all(&alpha_logs).unwrap();
+    fs::create_dir_all(&beta_logs).unwrap();
+
+    let alpha_log = alpha_logs.join("latest.log");
+    let beta_log = beta_logs.join("latest.log");
+    fs::write(&alpha_log, "alpha older log\n").unwrap();
+    fs::write(&beta_log, "beta newest log\n").unwrap();
+
+    let t_old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let t_new = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_600);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&alpha_log)
+        .unwrap()
+        .set_modified(t_old)
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&beta_log)
+        .unwrap()
+        .set_modified(t_new)
+        .unwrap();
+
+    // 1. last_instance is None -> selects the most recently modified instance log (Beta).
+    let none_settings = LauncherSettings::default();
+    let collected = collect(&r, &none_settings, &facts(1_700_000_000));
+    let mc_log = &collected
+        .iter()
+        .find(|(n, _)| *n == "logs/minecraft-latest.log")
+        .unwrap()
+        .1;
+    assert_eq!(mc_log, "beta newest log\n");
+
+    // 2. last_instance points to an instance without latest.log -> falls back to Beta.
+    let missing_settings = LauncherSettings {
+        last_instance: Some(gamma.id),
+        ..LauncherSettings::default()
+    };
+    let collected_missing = collect(&r, &missing_settings, &facts(1_700_000_000));
+    let mc_log_missing = &collected_missing
+        .iter()
+        .find(|(n, _)| *n == "logs/minecraft-latest.log")
+        .unwrap()
+        .1;
+    assert_eq!(mc_log_missing, "beta newest log\n");
+}
+
+#[cfg(windows)]
+fn create_junction(link: &Path, target: &Path) {
+    let ok = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    assert!(ok, "could not create directory junction for test");
+}
+
 #[cfg(windows)]
 #[test]
 fn diagnostics_export_skips_junction_redirected_game_logs() {
@@ -852,13 +1078,7 @@ fn diagnostics_export_skips_junction_redirected_game_logs() {
     let game_dir = r.instances_dir().join("p").join("game");
     fs::create_dir_all(&game_dir).unwrap();
     let linked_logs = game_dir.join("logs");
-    let ok = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(&linked_logs)
-        .arg(&outside)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    assert!(ok, "could not create directory junction for test");
+    create_junction(&linked_logs, &outside);
 
     let settings = LauncherSettings {
         last_instance: Some(crate::instances::InstanceId::new("p").unwrap()),
@@ -872,4 +1092,133 @@ fn diagnostics_export_skips_junction_redirected_game_logs() {
         "junction-redirected game log must not be included"
     );
     let _ = fs::remove_dir(&linked_logs);
+}
+
+#[cfg(windows)]
+#[test]
+fn minecraft_latest_log_fallback_skips_junction_redirected_last_instance() {
+    use crate::instances::NewInstance;
+    use std::time::{Duration, SystemTime};
+
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let outside = d.path().join("outside-gamma");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("latest.log"), "OUTSIDE_GAMMA_SECRET\n").unwrap();
+
+    let store = InstanceStore::new(&r);
+    let alpha = store
+        .create(NewInstance::vanilla("Alpha", "1.21.4").unwrap(), 100)
+        .unwrap();
+    let beta = store
+        .create(NewInstance::vanilla("Beta", "1.21.4").unwrap(), 200)
+        .unwrap();
+    let gamma = store
+        .create(NewInstance::vanilla("Gamma", "1.21.4").unwrap(), 300)
+        .unwrap();
+
+    let alpha_logs = store.dirs(&alpha.id).game_dir().join("logs");
+    let beta_logs = store.dirs(&beta.id).game_dir().join("logs");
+    fs::create_dir_all(&alpha_logs).unwrap();
+    fs::create_dir_all(&beta_logs).unwrap();
+    let alpha_log = alpha_logs.join("latest.log");
+    let beta_log = beta_logs.join("latest.log");
+    fs::write(&alpha_log, "alpha older log\n").unwrap();
+    fs::write(&beta_log, "beta newest log\n").unwrap();
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&alpha_log)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&beta_log)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_600))
+        .unwrap();
+
+    let linked_gamma_logs = store.dirs(&gamma.id).game_dir().join("logs");
+    create_junction(&linked_gamma_logs, &outside);
+
+    let settings = LauncherSettings {
+        last_instance: Some(gamma.id),
+        ..LauncherSettings::default()
+    };
+    let collected = collect(&r, &settings, &facts(1_700_000_000));
+    let mc_log = &collected
+        .iter()
+        .find(|(n, _)| *n == "logs/minecraft-latest.log")
+        .unwrap()
+        .1;
+    assert_eq!(mc_log, "beta newest log\n");
+    assert!(!mc_log.contains("OUTSIDE_GAMMA_SECRET"));
+    let _ = fs::remove_dir(&linked_gamma_logs);
+}
+
+#[cfg(windows)]
+#[test]
+fn export_rejects_junction_at_logs_or_diagnostics_dir() {
+    // 1. Junction at logs/diagnostics/
+    let d1 = tempfile::tempdir().unwrap();
+    let r1 = root(d1.path());
+    let outside_diag = d1.path().join("outside-diag");
+    fs::create_dir_all(&outside_diag).unwrap();
+    let linked_diag = r1.logs_dir().join("diagnostics");
+    create_junction(&linked_diag, &outside_diag);
+
+    let err1 = export(&r1, &LauncherSettings::default(), &facts(1_700_000_000)).unwrap_err();
+    let coded1: CodedError = err1.into();
+    assert_eq!(coded1.code, "diagnostics_failed");
+    assert_eq!(fs::read_dir(&outside_diag).unwrap().count(), 0);
+    let _ = fs::remove_dir(&linked_diag);
+
+    // 2. Junction at logs/
+    let d2 = tempfile::tempdir().unwrap();
+    let r2 = root(d2.path());
+    let outside_logs = d2.path().join("outside-logs");
+    fs::create_dir_all(&outside_logs).unwrap();
+    fs::remove_dir(r2.logs_dir()).unwrap();
+    create_junction(&r2.logs_dir(), &outside_logs);
+
+    let err2 = export(&r2, &LauncherSettings::default(), &facts(1_700_000_000)).unwrap_err();
+    let coded2: CodedError = err2.into();
+    assert_eq!(coded2.code, "diagnostics_failed");
+    assert_eq!(fs::read_dir(&outside_logs).unwrap().count(), 0);
+    let _ = fs::remove_dir(r2.logs_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn clade_log_tail_skips_junction_at_clade_log_and_old_log() {
+    let d = tempfile::tempdir().unwrap();
+    let r = root(d.path());
+    let outside = d.path().join("outside-clade-log");
+    fs::create_dir_all(&outside).unwrap();
+
+    let cur_path = r.logs_dir().join("clade.log");
+    let old_path = r.logs_dir().join("clade.old.log");
+
+    // 1. clade.log is a junction, clade.old.log is a regular file -> only clade.old.log is returned.
+    create_junction(&cur_path, &outside);
+    fs::write(&old_path, "from-old-log\n").unwrap();
+    assert_eq!(clade_log_tail(&r).as_deref(), Some("from-old-log\n"));
+    let _ = fs::remove_dir(&cur_path);
+
+    // 2. clade.old.log is a junction, clade.log is a regular file -> only clade.log is returned.
+    fs::remove_file(&old_path).unwrap();
+    create_junction(&old_path, &outside);
+    fs::write(&cur_path, "from-cur-log\n").unwrap();
+    assert_eq!(clade_log_tail(&r).as_deref(), Some("from-cur-log\n"));
+
+    // 3. Both clade.log and clade.old.log are junctions -> omitted completely.
+    fs::remove_file(&cur_path).unwrap();
+    create_junction(&cur_path, &outside);
+    assert!(clade_log_tail(&r).is_none());
+    let collected = collect(&r, &LauncherSettings::default(), &facts(1_700_000_000));
+    assert!(!collected.iter().any(|(n, _)| *n == "logs/clade.log"));
+
+    let _ = fs::remove_dir(&cur_path);
+    let _ = fs::remove_dir(&old_path);
 }

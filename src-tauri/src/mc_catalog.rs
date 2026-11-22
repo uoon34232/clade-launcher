@@ -31,6 +31,8 @@ pub const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_m
 const SCHEMA: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+/// Caps pre-allocation from untrusted `versions.len()` until entries pass validation.
+const MAX_INITIAL_CAP: usize = 4096;
 /// How long a cached catalog counts as fresh enough to skip the network.
 pub const FRESH_FOR_SECS: i64 = 3600;
 
@@ -112,8 +114,9 @@ pub fn parse_manifest(body: &[u8], now: i64) -> Result<Parsed, CatalogError> {
         .and_then(Value::as_array)
         .ok_or(CatalogError::BadFormat("missing versions"))?;
 
-    let mut entries: Vec<CatalogEntry> = Vec::with_capacity(versions.len());
-    let mut seen: HashSet<McVersion> = HashSet::with_capacity(versions.len());
+    let initial_cap = versions.len().min(MAX_INITIAL_CAP);
+    let mut entries: Vec<CatalogEntry> = Vec::with_capacity(initial_cap);
+    let mut seen: HashSet<McVersion> = HashSet::with_capacity(initial_cap);
     let mut skipped = 0;
     for v in versions {
         let parsed = (|| {
@@ -221,7 +224,7 @@ pub async fn load<F: Fetcher>(
 
     if !force {
         if let Some(c) = &cached {
-            let age = now - c.fetched_at;
+            let age = now.saturating_sub(c.fetched_at);
             if (0..FRESH_FOR_SECS).contains(&age) {
                 return Ok(CatalogResult {
                     catalog: c.clone(),
@@ -539,5 +542,50 @@ mod tests {
         f.set_len(MAX_CACHE_BYTES + 1).unwrap();
         drop(f);
         assert!(load_cache(&p).is_none());
+    }
+
+    #[tokio::test]
+    async fn extreme_cached_fetched_at_does_not_overflow_and_triggers_refresh() {
+        for (fetched_at, now) in [(i64::MIN, 5000), (i64::MAX, -1)] {
+            let d = tempfile::tempdir().unwrap();
+            let p = cache_path(&d);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let cached = VersionCatalog {
+                schema: SCHEMA,
+                fetched_at,
+                latest_release: Some(id("1.21.4")),
+                latest_snapshot: None,
+                entries: vec![CatalogEntry {
+                    id: id("1.21.4"),
+                    kind: VersionKind::Release,
+                    release_time: "2024-12-03T10:12:57+00:00".to_owned(),
+                    url: None,
+                    sha1: None,
+                }],
+            };
+            fs::write(&p, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+            let f = FakeFetcher::new();
+            f.ok(MANIFEST_URL, MANIFEST);
+            let r = load(&f, &p, now, false).await.unwrap();
+            assert_eq!(r.origin, Origin::Network);
+        }
+    }
+
+    #[test]
+    fn parse_manifest_caps_initial_allocation_for_many_invalid_entries() {
+        let invalid_count = MAX_INITIAL_CAP + 500;
+        let mut body = String::from(r#"{"versions":["#);
+        for _ in 0..invalid_count {
+            body.push_str("null,");
+        }
+        body.push_str(
+            r#"{"id":"1.21.4","type":"release","releaseTime":"2024-12-03T10:12:57+00:00"}]}"#,
+        );
+
+        let parsed = parse_manifest(body.as_bytes(), 1).unwrap();
+        assert_eq!(parsed.skipped, invalid_count);
+        assert_eq!(parsed.catalog.entries.len(), 1);
+        assert!(parsed.catalog.entries.capacity() <= MAX_INITIAL_CAP);
     }
 }

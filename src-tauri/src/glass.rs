@@ -5,8 +5,8 @@
 //!
 //! **Technique (Windows 11):** the window keeps its normal, opaque WebView background. Turning
 //! glass on asks the desktop window manager for its documented *Mica* system backdrop
-//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, forcing the
-//! light variant with `DWMWA_USE_IMMERSIVE_DARK_MODE = 0`) and makes the WebView's own background
+//! (`DwmSetWindowAttribute` with `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW`, matching the
+//! resolved theme via `DWMWA_USE_IMMERSIVE_DARK_MODE`) and makes the WebView's own background
 //! transparent (`set_background_color` with alpha 0), so the page's translucent surfaces sit over
 //! the cached desktop material without per-frame live-blur GPU overhead. Turning it off clears the
 //! backdrop and restores the opaque background, so nothing of the desktop can show through. Both
@@ -26,8 +26,9 @@
 //! the page uses its denser surfaces. Clade cannot make Windows draw live transparency against the
 //! person's system setting without capturing the screen, which it never does.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::thread::ThreadId;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -61,9 +62,36 @@ pub struct Environment {
     pub high_contrast: bool,
 }
 
-/// The native side: turns the window material on or off. A seam so the decision logic is testable.
+/// The native side: turns the window material on or off for the resolved theme. A seam so the
+/// decision logic is testable.
 pub trait Backdrop {
-    fn set(&self, on: bool) -> Result<(), String>;
+    fn set(&self, on: bool, dark: bool) -> Result<(), String>;
+}
+
+/// Whether Windows' color value represents a dark background (official WinRT luminance threshold:
+/// `5 * G + 2 * R + B < 8 * 128`).
+pub const fn is_color_dark(r: u8, g: u8, b: u8) -> bool {
+    5u32 * (g as u32) + 2u32 * (r as u32) + (b as u32) < 8 * 128
+}
+
+/// Resolves whether native chrome and opaque surfaces should use dark styling (`true` for dark,
+/// `false` for light) given `ui.theme` (`system`, `light`, `dark`) and the cached OS preference.
+pub fn wanted_dark(theme_mode: &str, system_dark: Option<bool>) -> bool {
+    match theme_mode {
+        "dark" => true,
+        "light" => false,
+        // "system", and anything unexpected: follow Windows; an unreadable preference stays light.
+        _ => system_dark.unwrap_or(false),
+    }
+}
+
+/// The opaque paper background colour matching the resolved theme.
+pub const fn opaque_background(dark: bool) -> tauri::window::Color {
+    if dark {
+        OPAQUE_DARK_BACKGROUND
+    } else {
+        OPAQUE_LIGHT_BACKGROUND
+    }
 }
 
 /// Whether glass should be on for this choice and this PC. Pure.
@@ -81,14 +109,14 @@ pub fn wanted(mode: &str, env: Environment) -> bool {
 
 /// Decides and applies the material. A failure to initialise it is logged and ends in the opaque
 /// treatment; it never propagates.
-pub fn resolve(mode: &str, env: Environment, backdrop: &dyn Backdrop) -> GlassStatus {
+pub fn resolve(mode: &str, dark: bool, env: Environment, backdrop: &dyn Backdrop) -> GlassStatus {
     if !wanted(mode, env) {
-        if let Err(e) = backdrop.set(false) {
+        if let Err(e) = backdrop.set(false, dark) {
             tracing::warn!(error = %e, "could not clear the window backdrop");
         }
         return GlassStatus::OPAQUE;
     }
-    match backdrop.set(true) {
+    match backdrop.set(true, dark) {
         Ok(()) => GlassStatus {
             active: true,
             live: env.system_effects.unwrap_or(false),
@@ -96,31 +124,133 @@ pub fn resolve(mode: &str, env: Environment, backdrop: &dyn Backdrop) -> GlassSt
         Err(e) => {
             tracing::warn!(error = %e, "the window backdrop is unavailable, using the opaque look");
             // Make sure nothing half-applied stays behind.
-            let _ = backdrop.set(false);
+            let _ = backdrop.set(false, dark);
             GlassStatus::OPAQUE
         }
     }
 }
 
-const EFFECTS_UNKNOWN: u8 = 0;
-const EFFECTS_OFF: u8 = 1;
-const EFFECTS_ON: u8 = 2;
+const PREF_UNKNOWN: u8 = 0;
+const PREF_OFF: u8 = 1;
+const PREF_ON: u8 = 2;
+
+const fn encode_opt_bool(v: Option<bool>) -> u8 {
+    match v {
+        None => PREF_UNKNOWN,
+        Some(false) => PREF_OFF,
+        Some(true) => PREF_ON,
+    }
+}
+
+const fn decode_opt_bool(v: u8) -> Option<bool> {
+    match v {
+        PREF_OFF => Some(false),
+        PREF_ON => Some(true),
+        _ => None,
+    }
+}
+
+/// Reentrant-safe serialization gate for `GlassState` transitions.
+///
+/// Cross-thread callers serialize in turn so `suspended`, `applied`, native DWM calls, `status`,
+/// and `STATUS_EVENT` emission stay atomic and strictly ordered. Same-thread reentrancy increments
+/// depth instead of deadlocking, while `GlassInner::seq` lets outer frames reconcile if a nested
+/// transition ran mid-call.
+struct SerialGate {
+    state: Mutex<Option<(ThreadId, usize)>>,
+    cvar: Condvar,
+}
+
+impl SerialGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(None),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> GateGuard<'_> {
+        let me = std::thread::current().id();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match *guard {
+                None => {
+                    *guard = Some((me, 1));
+                    break;
+                }
+                Some((owner, depth)) if owner == me => {
+                    *guard = Some((me, depth + 1));
+                    break;
+                }
+                Some(_) => {
+                    guard = self.cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+                }
+            }
+        }
+        GateGuard { gate: self }
+    }
+}
+
+struct GateGuard<'a> {
+    gate: &'a SerialGate,
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        let released = match *guard {
+            Some((owner, depth)) if depth > 1 => {
+                *guard = Some((owner, depth - 1));
+                false
+            }
+            _ => {
+                *guard = None;
+                true
+            }
+        };
+        drop(guard);
+        if released {
+            self.gate.cvar.notify_one();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedBackdrop {
+    Unset,
+    Applied { on: bool, dark: bool },
+    Unknown,
+}
+
+struct GlassInner {
+    applied: AppliedBackdrop,
+    suspended: bool,
+    seq: u64,
+}
 
 /// The resolved state, shared with the interface.
 pub struct GlassState {
     status: Mutex<GlassStatus>,
     system_effects: AtomicU8,
-    applied_backdrop: Mutex<Option<bool>>,
-    suspended: AtomicBool,
+    system_dark: AtomicU8,
+    main_hwnd: AtomicIsize,
+    gate: SerialGate,
+    inner: Mutex<GlassInner>,
 }
 
 impl GlassState {
     pub fn new() -> Self {
         Self {
             status: Mutex::new(GlassStatus::OPAQUE),
-            system_effects: AtomicU8::new(EFFECTS_UNKNOWN),
-            applied_backdrop: Mutex::new(None),
-            suspended: AtomicBool::new(false),
+            system_effects: AtomicU8::new(PREF_UNKNOWN),
+            system_dark: AtomicU8::new(PREF_UNKNOWN),
+            main_hwnd: AtomicIsize::new(0),
+            gate: SerialGate::new(),
+            inner: Mutex::new(GlassInner {
+                applied: AppliedBackdrop::Unset,
+                suspended: false,
+                seq: 0,
+            }),
         }
     }
 
@@ -137,19 +267,51 @@ impl GlassState {
     }
 
     pub(crate) fn set_system_effects(&self, enabled: Option<bool>) {
-        let encoded = match enabled {
-            None => EFFECTS_UNKNOWN,
-            Some(false) => EFFECTS_OFF,
-            Some(true) => EFFECTS_ON,
-        };
-        self.system_effects.store(encoded, Ordering::Release);
+        self.system_effects
+            .store(encode_opt_bool(enabled), Ordering::Release);
     }
 
     pub(crate) fn system_effects(&self) -> Option<bool> {
-        match self.system_effects.load(Ordering::Acquire) {
-            EFFECTS_OFF => Some(false),
-            EFFECTS_ON => Some(true),
-            _ => None,
+        decode_opt_bool(self.system_effects.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn set_system_dark(&self, dark: Option<bool>) {
+        self.system_dark
+            .store(encode_opt_bool(dark), Ordering::Release);
+    }
+
+    pub(crate) fn system_dark(&self) -> Option<bool> {
+        decode_opt_bool(self.system_dark.load(Ordering::Acquire))
+    }
+
+    fn cached_hwnd(&self) -> Option<isize> {
+        let raw = self.main_hwnd.load(Ordering::Acquire);
+        if raw == 0 {
+            return None;
+        }
+        // SAFETY: `raw` came from `main`'s `HWND`; `IsWindow` queries handle validity without
+        // sending messages to the window thread.
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(raw as _) } != 0 {
+            Some(raw)
+        } else {
+            self.main_hwnd.store(0, Ordering::Release);
+            None
+        }
+    }
+
+    fn resolve_hwnd(&self, app: &AppHandle) -> Option<isize> {
+        if let Some(hwnd) = self.cached_hwnd() {
+            return Some(hwnd);
+        }
+        // Resolve outside `gate` so worker threads never wait on Tauri's main-thread getter while
+        // the UI thread may be waiting on `gate`.
+        let window = app.get_webview_window("main")?;
+        let hwnd = window.hwnd().ok()?.0 as isize;
+        if hwnd != 0 {
+            self.main_hwnd.store(hwnd, Ordering::Release);
+            Some(hwnd)
+        } else {
+            None
         }
     }
 
@@ -158,23 +320,28 @@ impl GlassState {
     fn apply_refresh(
         &self,
         mode: &str,
+        dark: bool,
         high_contrast: bool,
         window_hidden: bool,
         backdrop: &dyn Backdrop,
     ) -> Option<GlassStatus> {
-        if self.suspended.load(Ordering::Acquire) || window_hidden {
+        let _gate = self.gate.lock();
+        let (my_seq, suspended, applied) = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.seq = inner.seq.wrapping_add(1);
+            (inner.seq, inner.suspended, inner.applied)
+        };
+        if suspended || window_hidden {
             // Never turn or keep the DWM backdrop on while the window is hidden or suspended.
-            if *self
-                .applied_backdrop
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                == Some(true)
-            {
+            if matches!(
+                applied,
+                AppliedBackdrop::Applied { on: true, .. } | AppliedBackdrop::Unknown
+            ) {
                 let _ = (DedupBackdrop {
                     state: self,
                     inner: backdrop,
                 })
-                .set(false);
+                .set(false, dark);
             }
             return None;
         }
@@ -184,35 +351,104 @@ impl GlassState {
         };
         let status = resolve(
             mode,
+            dark,
             env,
             &DedupBackdrop {
                 state: self,
                 inner: backdrop,
             },
         );
+        let (superseded, now_suspended, now_applied) = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            (inner.seq != my_seq, inner.suspended, inner.applied)
+        };
+        if now_suspended {
+            if matches!(now_applied, AppliedBackdrop::Applied { on: true, .. }) {
+                let _ = (DedupBackdrop {
+                    state: self,
+                    inner: backdrop,
+                })
+                .set(false, dark);
+            }
+            return None;
+        }
+        if superseded {
+            return None;
+        }
         self.replace(status).then_some(status)
     }
 
-    fn apply_suspend(&self, backdrop: &dyn Backdrop) {
-        self.suspended.store(true, Ordering::Release);
-        let needs_clear = {
-            let applied = self
-                .applied_backdrop
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *applied != Some(false)
+    fn apply_suspend(&self, dark: bool, backdrop: &dyn Backdrop) {
+        let _gate = self.gate.lock();
+        let (my_seq, needs_clear) = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.seq = inner.seq.wrapping_add(1);
+            inner.suspended = true;
+            let needs_clear = !matches!(
+                inner.applied,
+                AppliedBackdrop::Applied { on: false, dark: d } if d == dark
+            );
+            (inner.seq, needs_clear)
         };
-        if needs_clear {
-            let _ = backdrop.set(false);
-            *self
-                .applied_backdrop
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(false);
+        if !needs_clear {
+            return;
+        }
+        let result = backdrop.set(false, dark);
+        let (same_seq, suspended, applied) = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.seq == my_seq {
+                inner.applied = match &result {
+                    Ok(()) => AppliedBackdrop::Applied { on: false, dark },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not clear the window backdrop on suspend");
+                        AppliedBackdrop::Unknown
+                    }
+                };
+                return;
+            }
+            (false, inner.suspended, inner.applied)
+        };
+        debug_assert!(!same_seq);
+        if !suspended {
+            if let AppliedBackdrop::Applied {
+                on: true,
+                dark: next_dark,
+            } = applied
+            {
+                let reapply = backdrop.set(true, next_dark);
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if !inner.suspended
+                    && matches!(inner.applied, AppliedBackdrop::Applied { on: true, .. })
+                {
+                    inner.applied = if reapply.is_ok() {
+                        AppliedBackdrop::Applied {
+                            on: true,
+                            dark: next_dark,
+                        }
+                    } else {
+                        AppliedBackdrop::Unknown
+                    };
+                }
+                return;
+            }
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.suspended || !matches!(inner.applied, AppliedBackdrop::Applied { on: true, .. }) {
+            inner.applied = match &result {
+                Ok(()) => AppliedBackdrop::Applied { on: false, dark },
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not clear the window backdrop on suspend");
+                    AppliedBackdrop::Unknown
+                }
+            };
         }
     }
 
     fn clear_suspended(&self) {
-        self.suspended.store(false, Ordering::Release);
+        let _gate = self.gate.lock();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.seq = inner.seq.wrapping_add(1);
+        inner.suspended = false;
     }
 }
 
@@ -228,33 +464,92 @@ struct DedupBackdrop<'a> {
 }
 
 impl Backdrop for DedupBackdrop<'_> {
-    fn set(&self, on: bool) -> Result<(), String> {
-        {
-            let applied = self
-                .state
-                .applied_backdrop
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *applied == Some(on) {
+    fn set(&self, on: bool, dark: bool) -> Result<(), String> {
+        let call_seq = {
+            let inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let already = match inner.applied {
+                AppliedBackdrop::Applied {
+                    on: a_on,
+                    dark: a_dark,
+                } => a_on == on && a_dark == dark,
+                AppliedBackdrop::Unset | AppliedBackdrop::Unknown => false,
+            };
+            if already {
                 return Ok(());
             }
-        }
-        let result = self.inner.set(on);
-        let mut applied = self
-            .state
-            .applied_backdrop
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match result {
-            Ok(()) => {
-                *applied = Some(on);
-                Ok(())
+            inner.seq
+        };
+        let result = self.inner.set(on, dark);
+        let (suspended, applied) = {
+            let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.seq == call_seq {
+                inner.applied = match &result {
+                    Ok(()) => AppliedBackdrop::Applied { on, dark },
+                    Err(_) => AppliedBackdrop::Unknown,
+                };
+                return result;
             }
-            Err(e) => {
-                *applied = if on { None } else { Some(false) };
-                Err(e)
+            (inner.suspended, inner.applied)
+        };
+        // A nested reentrant transition ran while `self.inner.set(on, dark)` was in flight; ensure
+        // the physical window matches the newer transition.
+        if on && (suspended || !matches!(applied, AppliedBackdrop::Applied { on: true, .. })) {
+            let rollback_dark = match applied {
+                AppliedBackdrop::Applied { dark: d, .. } => d,
+                _ => dark,
+            };
+            let rollback = self.inner.set(false, rollback_dark);
+            let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.suspended
+                || !matches!(inner.applied, AppliedBackdrop::Applied { on: true, .. })
+            {
+                inner.applied = if rollback.is_ok() {
+                    AppliedBackdrop::Applied {
+                        on: false,
+                        dark: rollback_dark,
+                    }
+                } else {
+                    AppliedBackdrop::Unknown
+                };
             }
+        } else if !on && !suspended {
+            if let AppliedBackdrop::Applied {
+                on: true,
+                dark: next_dark,
+            } = applied
+            {
+                let reapply = self.inner.set(true, next_dark);
+                let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if !inner.suspended
+                    && matches!(
+                        inner.applied,
+                        AppliedBackdrop::Applied { on: true, dark: d } if d == next_dark
+                    )
+                {
+                    inner.applied = if reapply.is_ok() {
+                        AppliedBackdrop::Applied {
+                            on: true,
+                            dark: next_dark,
+                        }
+                    } else {
+                        AppliedBackdrop::Unknown
+                    };
+                }
+            } else {
+                let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+                inner.applied = match &result {
+                    Ok(()) => AppliedBackdrop::Applied { on, dark },
+                    Err(_) => AppliedBackdrop::Unknown,
+                };
+            }
+        } else {
+            let mut inner = self.state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.applied = match &result {
+                Ok(()) => AppliedBackdrop::Applied { on, dark },
+                Err(_) => AppliedBackdrop::Unknown,
+            };
         }
+        result
     }
 }
 
@@ -263,48 +558,73 @@ pub fn get_glass_status(state: State<'_, GlassState>) -> GlassStatus {
     state.get()
 }
 
-/// Re-reads the choice and the cached OS preferences, applies the material to the window when it
-/// differs from what is already applied, and tells the interface when the resolved status changed.
-/// Safe to call at any time and from any thread; never spawns threads.
-pub fn refresh(app: &AppHandle) {
-    let mode = app
-        .state::<crate::ui_settings::SettingsState>()
-        .transparency();
-    let window_hidden = app
-        .get_webview_window("main")
-        .is_some_and(|w| matches!(w.is_visible(), Ok(false)));
-    let state = app.state::<GlassState>();
+/// Returns whether Clade's active theme resolves to dark right now (used for native surfaces).
+pub fn is_dark(app: &AppHandle) -> bool {
+    let settings = app.state::<crate::ui_settings::SettingsState>();
+    let glass = app.state::<GlassState>();
+    wanted_dark(&settings.theme(), glass.system_dark())
+}
+
+fn refresh_locked(app: &AppHandle, state: &GlassState, hwnd: Option<isize>) {
+    let settings = app.state::<crate::ui_settings::SettingsState>();
+    let mode = settings.transparency();
+    let dark = wanted_dark(&settings.theme(), state.system_dark());
+    let window_hidden = hwnd.is_some_and(|h| {
+        // SAFETY: `h` was verified by `resolve_hwnd`; `IsWindowVisible` reads window visibility
+        // flags directly without dispatching messages to the UI thread.
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(h as _) == 0 }
+    });
     if let Some(status) = state.apply_refresh(
         &mode,
+        dark,
         crate::system::high_contrast(),
         window_hidden,
-        &WindowBackdrop { app },
+        &WindowBackdrop { app, hwnd },
     ) {
         let _ = app.emit(STATUS_EVENT, status);
     }
 }
 
+/// Re-reads the choice and the cached OS preferences, applies the material to the window when it
+/// differs from what is already applied, and tells the interface when the resolved status changed.
+/// Safe to call at any time and from any thread; never spawns threads.
+pub fn refresh(app: &AppHandle) {
+    let state = app.state::<GlassState>();
+    let hwnd = state.resolve_hwnd(app);
+    let _gate = state.gate.lock();
+    refresh_locked(app, &state, hwnd);
+}
+
 /// Clears the native DWM backdrop so Windows stops compositing Mica while the launcher window is
 /// hidden, without sending a spurious status event to the suspended frontend.
 pub fn suspend(app: &AppHandle) {
-    app.state::<GlassState>()
-        .apply_suspend(&WindowBackdrop { app });
+    let state = app.state::<GlassState>();
+    let hwnd = state.resolve_hwnd(app);
+    let dark = is_dark(app);
+    let _gate = state.gate.lock();
+    state.apply_suspend(dark, &WindowBackdrop { app, hwnd });
 }
 
 /// Re-enables backdrop updates and refreshes the window material when the launcher window returns.
 pub fn resume(app: &AppHandle) {
-    app.state::<GlassState>().clear_suspended();
-    refresh(app);
+    let state = app.state::<GlassState>();
+    let hwnd = state.resolve_hwnd(app);
+    let _gate = state.gate.lock();
+    state.clear_suspended();
+    refresh_locked(app, &state, hwnd);
 }
 
-/// Reads the initial Windows transparency preference and calls `refresh` whenever Windows reports
-/// that it changed.
-pub fn watch_system_preference(app: AppHandle) {
+/// Starts the permanent `glass-watch` WinRT MTA thread to read the initial Windows transparency
+/// and theme preferences (returning the OS dark-mode flag once ready, or `None` on timeout/error)
+/// and call `refresh` whenever either changes. Never calls `RoUninitialize` because `windows-core`
+/// caches activation factories process-wide.
+pub fn watch_system_preference(app: AppHandle) -> Option<bool> {
     use windows::core::IInspectable;
     use windows::Foundation::TypedEventHandler;
     use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-    use windows::UI::ViewManagement::UISettings;
+    use windows::UI::ViewManagement::{UIColorType, UISettings};
 
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
     let spawned = std::thread::Builder::new()
         .name("glass-watch".into())
         .spawn(move || {
@@ -315,59 +635,121 @@ pub fn watch_system_preference(app: AppHandle) {
             let Ok(settings) = UISettings::new() else {
                 return;
             };
-            app.state::<GlassState>()
-                .set_system_effects(settings.AdvancedEffectsEnabled().ok());
+            let initial_effects = settings.AdvancedEffectsEnabled().ok();
+            let initial_dark = settings
+                .GetColorValue(UIColorType::Background)
+                .ok()
+                .map(|c| is_color_dark(c.R, c.G, c.B));
+            let glass = app.state::<GlassState>();
+            glass.set_system_effects(initial_effects);
+            glass.set_system_dark(initial_dark);
+            let _ = ready_tx.send(initial_dark);
+            drop(ready_tx);
+
             let initial_app = app.clone();
             let _ = app.run_on_main_thread(move || refresh(&initial_app));
 
-            let handler_app = app.clone();
-            let handler = TypedEventHandler::<UISettings, IInspectable>::new(move |sender, _| {
-                if let Some(u) = sender.as_ref() {
-                    handler_app
-                        .state::<GlassState>()
-                        .set_system_effects(u.AdvancedEffectsEnabled().ok());
-                }
-                let ui_app = handler_app.clone();
-                let _ = handler_app.run_on_main_thread(move || refresh(&ui_app));
-                Ok(())
-            });
-            if settings.AdvancedEffectsEnabledChanged(&handler).is_err() {
+            let effects_app = app.clone();
+            let effects_handler =
+                TypedEventHandler::<UISettings, IInspectable>::new(move |sender, _| {
+                    if let Some(u) = sender.as_ref() {
+                        effects_app
+                            .state::<GlassState>()
+                            .set_system_effects(u.AdvancedEffectsEnabled().ok());
+                    }
+                    let ui_app = effects_app.clone();
+                    let _ = effects_app.run_on_main_thread(move || refresh(&ui_app));
+                    Ok(())
+                });
+            let color_app = app.clone();
+            let color_handler =
+                TypedEventHandler::<UISettings, IInspectable>::new(move |sender, _| {
+                    if let Some(u) = sender.as_ref() {
+                        let dark = u
+                            .GetColorValue(UIColorType::Background)
+                            .ok()
+                            .map(|c| is_color_dark(c.R, c.G, c.B));
+                        color_app.state::<GlassState>().set_system_dark(dark);
+                    }
+                    let ui_app = color_app.clone();
+                    let _ = color_app.run_on_main_thread(move || refresh(&ui_app));
+                    Ok(())
+                });
+            let effects_ok = settings
+                .AdvancedEffectsEnabledChanged(&effects_handler)
+                .is_ok();
+            let color_ok = settings.ColorValuesChanged(&color_handler).is_ok();
+            if !effects_ok && !color_ok {
                 return;
             }
-            // Keep `settings` (and with it the subscription) alive for the whole run.
+            // Keep `settings` (and with it the subscriptions and MTA) alive for the whole run.
             loop {
                 std::thread::park();
             }
         });
     if let Err(e) = spawned {
-        tracing::warn!(error = %e, "could not watch the Windows transparency preference");
+        tracing::warn!(error = %e, "could not watch the Windows appearance preference");
+        return None;
     }
+    ready_rx
+        .recv_timeout(std::time::Duration::from_millis(150))
+        .ok()
+        .flatten()
 }
 
 /// Applies the material to the real window.
 struct WindowBackdrop<'a> {
     app: &'a AppHandle,
+    hwnd: Option<isize>,
 }
 
-/// The warm paper colour of the opaque look (the same as `backgroundColor` in tauri.conf.json).
-const OPAQUE_BACKGROUND: tauri::window::Color = tauri::window::Color(0xF3, 0xED, 0xE3, 0xFF);
+/// The warm paper colours of the opaque look (light matches `backgroundColor` in tauri.conf.json).
+pub const OPAQUE_LIGHT_BACKGROUND: tauri::window::Color =
+    tauri::window::Color(0xF3, 0xED, 0xE3, 0xFF);
+pub const OPAQUE_DARK_BACKGROUND: tauri::window::Color =
+    tauri::window::Color(0x1C, 0x19, 0x17, 0xFF);
 const CLEAR_BACKGROUND: tauri::window::Color = tauri::window::Color(0, 0, 0, 0);
 
+fn apply_backdrop_transition(
+    on: bool,
+    dark: bool,
+    apply_native: impl FnOnce(bool, bool) -> Result<(), String>,
+    apply_background: impl FnOnce(tauri::window::Color) -> Result<(), String>,
+) -> Result<(), String> {
+    if on {
+        apply_native(true, dark)?;
+        apply_background(CLEAR_BACKGROUND)
+    } else {
+        // Paint the opaque paper fill before tearing down Mica so no 1-frame transparent flash shows.
+        let bg_res = apply_background(opaque_background(dark));
+        let native_res = apply_native(false, dark);
+        match (native_res, bg_res) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+            (Err(native_err), Err(bg_err)) => Err(format!("{native_err}; {bg_err}")),
+        }
+    }
+}
+
 impl Backdrop for WindowBackdrop<'_> {
-    fn set(&self, on: bool) -> Result<(), String> {
+    fn set(&self, on: bool, dark: bool) -> Result<(), String> {
         let window = self
             .app
             .get_webview_window("main")
             .ok_or("the main window does not exist yet")?;
-        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-        native::set_backdrop(hwnd.0 as isize, on)?;
-        window
-            .set_background_color(Some(if on {
-                CLEAR_BACKGROUND
-            } else {
-                OPAQUE_BACKGROUND
-            }))
-            .map_err(|e| e.to_string())
+        apply_backdrop_transition(
+            on,
+            dark,
+            |enable, is_dark| {
+                let hwnd = self.hwnd.ok_or("the main window handle is unavailable")?;
+                native::set_backdrop(hwnd, enable, is_dark)
+            },
+            |color| {
+                window
+                    .set_background_color(Some(color))
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 }
 
@@ -419,13 +801,14 @@ mod native {
 
     /// Windows 11 22H2 or newer understands the Mica backdrop attribute (`DWMSBT_MAINWINDOW`);
     /// older versions refuse it, which is reported as an error and leaves Clade opaque.
-    pub fn set_backdrop(hwnd: isize, on: bool) -> Result<(), String> {
+    pub fn set_backdrop(hwnd: isize, on: bool, dark: bool) -> Result<(), String> {
+        let dark_val = i32::from(dark);
         if on {
-            // Clade is a light, warm interface: ask for the light variant of the material.
-            set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 0)?;
+            set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_val)?;
             extend_frame(hwnd, true)?;
             set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)
         } else {
+            let _ = set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_val);
             let attr = set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE);
             let frame = extend_frame(hwnd, false);
             frame.and(attr)
@@ -437,9 +820,10 @@ mod native {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::atomic::AtomicBool;
 
     struct Recorder {
-        calls: RefCell<Vec<bool>>,
+        calls: RefCell<Vec<(bool, bool)>>,
         fail_on: bool,
     }
 
@@ -453,8 +837,8 @@ mod tests {
     }
 
     impl Backdrop for Recorder {
-        fn set(&self, on: bool) -> Result<(), String> {
-            self.calls.borrow_mut().push(on);
+        fn set(&self, on: bool, dark: bool) -> Result<(), String> {
+            self.calls.borrow_mut().push((on, dark));
             if on && self.fail_on {
                 Err("not supported on this Windows".into())
             } else {
@@ -504,7 +888,7 @@ mod tests {
     fn resolved_state_reports_whether_windows_really_draws_the_material() {
         let b = Recorder::new(false);
         assert_eq!(
-            resolve("system", env(Some(true), false), &b),
+            resolve("system", false, env(Some(true), false), &b),
             GlassStatus {
                 active: true,
                 live: true
@@ -512,26 +896,26 @@ mod tests {
         );
         // an explicit "on" while Windows has transparency off: active, but Windows shows a solid colour
         assert_eq!(
-            resolve("on", env(Some(false), false), &b),
+            resolve("on", true, env(Some(false), false), &b),
             GlassStatus {
                 active: true,
                 live: false
             }
         );
-        assert_eq!(*b.calls.borrow(), [true, true]);
+        assert_eq!(*b.calls.borrow(), [(true, false), (true, true)]);
     }
 
     #[test]
     fn off_clears_the_native_material_instead_of_leaving_it_active() {
         let b = Recorder::new(false);
         assert_eq!(
-            resolve("off", env(Some(true), false), &b),
+            resolve("off", true, env(Some(true), false), &b),
             GlassStatus::OPAQUE
         );
         assert_eq!(
             *b.calls.borrow(),
-            [false],
-            "the backdrop is explicitly cleared"
+            [(false, true)],
+            "the backdrop is explicitly cleared with the active dark preference"
         );
     }
 
@@ -539,12 +923,12 @@ mod tests {
     fn a_backdrop_that_cannot_start_ends_in_the_opaque_look_and_is_cleaned_up() {
         let b = Recorder::new(true);
         assert_eq!(
-            resolve("on", env(Some(true), false), &b),
+            resolve("on", false, env(Some(true), false), &b),
             GlassStatus::OPAQUE
         );
         assert_eq!(
             *b.calls.borrow(),
-            [true, false],
+            [(true, false), (false, false)],
             "a failed start is rolled back"
         );
     }
@@ -587,26 +971,81 @@ mod tests {
     }
 
     #[test]
-    fn backdrop_calls_are_deduplicated_and_suspended_windows_never_reapply_mica() {
+    fn system_dark_preference_is_cached_atomically_and_color_threshold_matches_winrt() {
+        let s = GlassState::new();
+        assert_eq!(s.system_dark(), None);
+        s.set_system_dark(Some(true));
+        assert_eq!(s.system_dark(), Some(true));
+        s.set_system_dark(Some(false));
+        assert_eq!(s.system_dark(), Some(false));
+        s.set_system_dark(None);
+        assert_eq!(s.system_dark(), None);
+
+        assert!(is_color_dark(0, 0, 0));
+        assert!(is_color_dark(28, 25, 23));
+        assert!(!is_color_dark(255, 255, 255));
+        assert!(!is_color_dark(243, 237, 227));
+
+        assert!(wanted_dark("dark", Some(false)));
+        assert!(!wanted_dark("light", Some(true)));
+        assert!(wanted_dark("system", Some(true)));
+        assert!(!wanted_dark("system", Some(false)));
+        assert!(!wanted_dark("system", None));
+        assert!(wanted_dark("unknown", Some(true)));
+        assert_eq!(opaque_background(false), OPAQUE_LIGHT_BACKGROUND);
+        assert_eq!(opaque_background(true), OPAQUE_DARK_BACKGROUND);
+    }
+
+    #[test]
+    fn backdrop_calls_are_deduplicated_and_reapply_when_theme_flips() {
         let s = GlassState::new();
         s.set_system_effects(Some(true));
         let b = Recorder::new(false);
 
-        // Initial refresh turns Mica on once; repeated refreshes (e.g. Focused(true)) skip DWM.
+        // Initial light refresh turns Mica on once; repeated light refreshes skip DWM.
         assert_eq!(
-            s.apply_refresh("system", false, false, &b),
+            s.apply_refresh("system", false, false, false, &b),
             Some(GlassStatus {
                 active: true,
                 live: true
             })
         );
-        assert_eq!(s.apply_refresh("system", false, false, &b), None);
-        assert_eq!(*b.calls.borrow(), [true]);
+        assert_eq!(s.apply_refresh("system", false, false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false)]);
 
-        // Suspending clears the native DWM backdrop without emitting a spurious OPAQUE event,
-        // and refreshes while suspended or hidden never turn Mica back on.
-        s.apply_suspend(&b);
-        assert_eq!(*b.calls.borrow(), [true, false]);
+        // Switching to dark theme while glass stays active reapplies DWM with dark = true, without
+        // emitting a redundant GlassStatus event because active/live didn't change.
+        assert_eq!(s.apply_refresh("system", true, false, false, &b), None);
+        assert_eq!(s.apply_refresh("system", true, false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false), (true, true)]);
+
+        // Switching to opaque dark also reapplies native background / DWM dark attribute cleanly.
+        assert_eq!(
+            s.apply_refresh("off", true, false, false, &b),
+            Some(GlassStatus::OPAQUE)
+        );
+        assert_eq!(s.apply_refresh("off", false, false, false, &b), None);
+        assert_eq!(
+            *b.calls.borrow(),
+            [(true, false), (true, true), (false, true), (false, false)]
+        );
+    }
+
+    #[test]
+    fn suspended_windows_never_reapply_mica() {
+        let s = GlassState::new();
+        s.set_system_effects(Some(true));
+        let b = Recorder::new(false);
+
+        assert_eq!(
+            s.apply_refresh("system", false, false, false, &b),
+            Some(GlassStatus {
+                active: true,
+                live: true
+            })
+        );
+        s.apply_suspend(false, &b);
+        assert_eq!(*b.calls.borrow(), [(true, false), (false, false)]);
         assert_eq!(
             s.get(),
             GlassStatus {
@@ -614,17 +1053,18 @@ mod tests {
                 live: true
             }
         );
-        assert_eq!(s.apply_refresh("on", false, false, &b), None);
-        assert_eq!(*b.calls.borrow(), [true, false]);
+        assert_eq!(s.apply_refresh("on", true, false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false), (false, false)]);
 
-        // Resuming while the window is still hidden keeps the backdrop off; once visible, Mica is
-        // re-applied cleanly.
         s.clear_suspended();
-        assert_eq!(s.apply_refresh("system", false, true, &b), None);
-        assert_eq!(*b.calls.borrow(), [true, false]);
+        assert_eq!(s.apply_refresh("system", false, false, true, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false), (false, false)]);
 
-        assert_eq!(s.apply_refresh("system", false, false, &b), None);
-        assert_eq!(*b.calls.borrow(), [true, false, true]);
+        assert_eq!(s.apply_refresh("system", false, false, false, &b), None);
+        assert_eq!(
+            *b.calls.borrow(),
+            [(true, false), (false, false), (true, false)]
+        );
     }
 
     #[test]
@@ -633,12 +1073,12 @@ mod tests {
         s.set_system_effects(Some(true));
         let b = Recorder::new(true);
 
-        assert_eq!(s.apply_refresh("on", false, false, &b), None);
-        assert_eq!(*b.calls.borrow(), [true, false]);
+        assert_eq!(s.apply_refresh("on", false, false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false), (false, false)]);
 
-        // Subsequent off refreshes see `applied_backdrop == Some(false)` and skip DWM.
-        assert_eq!(s.apply_refresh("off", false, false, &b), None);
-        assert_eq!(*b.calls.borrow(), [true, false]);
+        // Subsequent off refreshes with the same dark state skip DWM.
+        assert_eq!(s.apply_refresh("off", false, false, false, &b), None);
+        assert_eq!(*b.calls.borrow(), [(true, false), (false, false)]);
     }
 
     #[test]
@@ -646,16 +1086,16 @@ mod tests {
         struct ReentrantBackdrop<'a> {
             state: &'a GlassState,
             reentered: AtomicBool,
-            calls: RefCell<Vec<bool>>,
+            calls: RefCell<Vec<(bool, bool)>>,
         }
 
         impl Backdrop for ReentrantBackdrop<'_> {
-            fn set(&self, on: bool) -> Result<(), String> {
-                self.calls.borrow_mut().push(on);
+            fn set(&self, on: bool, dark: bool) -> Result<(), String> {
+                self.calls.borrow_mut().push((on, dark));
                 if !self.reentered.swap(true, Ordering::AcqRel) {
                     // Re-entering `GlassState` while the native backdrop call is in flight must not deadlock.
-                    let _ = self.state.apply_refresh("system", false, false, self);
-                    self.state.apply_suspend(self);
+                    let _ = self.state.apply_refresh("system", dark, false, false, self);
+                    self.state.apply_suspend(dark, self);
                 }
                 Ok(())
             }
@@ -669,8 +1109,13 @@ mod tests {
             calls: RefCell::new(Vec::new()),
         };
 
-        let _ = s.apply_refresh("system", false, false, &b);
+        let _ = s.apply_refresh("system", false, false, false, &b);
         assert!(b.reentered.load(Ordering::Acquire));
-        assert_eq!(*b.calls.borrow(), vec![true, true, false]);
+        // Outer `set(true, false)` -> nested `set(true, false)` -> nested suspend `set(false, false)`
+        // -> outer `DedupBackdrop::set` reconciles the physical window back to `false` once outer returns.
+        assert_eq!(
+            *b.calls.borrow(),
+            [(true, false), (true, false), (false, false), (false, false)]
+        );
     }
 }

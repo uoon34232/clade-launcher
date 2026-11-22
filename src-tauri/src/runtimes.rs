@@ -79,22 +79,22 @@ pub fn runtime_dir(root: &PortableRoot, id: &str) -> Result<PathBuf, RuntimeErro
 /// The one and only way to obtain a Java executable for launching the game.
 pub fn resolve_java(root: &PortableRoot, id: &str) -> Result<ManagedJava, RuntimeError> {
     let dir = runtime_dir(root, id)?;
-    fsutil::reject_links_between(root.path(), &dir)
+    let manifest_path = dir.join(MANIFEST_NAME);
+    fsutil::reject_links_between(root.path(), &manifest_path)
         .map_err(|_| RuntimeError::Integrity(id.to_owned()))?;
-    let manifest_bytes =
-        match fsutil::read_bounded(&dir.join(MANIFEST_NAME), MAX_RUNTIME_MANIFEST_BYTES) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(RuntimeError::Missing(id.to_owned()))
-            }
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                return Err(RuntimeError::Manifest {
-                    id: id.to_owned(),
-                    reason: e.to_string(),
-                })
-            }
-            Err(e) => return Err(e.into()),
-        };
+    let manifest_bytes = match fsutil::read_bounded(&manifest_path, MAX_RUNTIME_MANIFEST_BYTES) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(RuntimeError::Missing(id.to_owned()))
+        }
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(RuntimeError::Manifest {
+                id: id.to_owned(),
+                reason: e.to_string(),
+            })
+        }
+        Err(e) => return Err(e.into()),
+    };
     let m: RuntimeManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| RuntimeError::Manifest {
             id: id.to_owned(),
@@ -145,9 +145,10 @@ pub fn resolve_cli_java_exe(
         return Ok(java.exe.clone());
     }
 
-    fsutil::reject_links_between(root.path(), &java.home)
+    let manifest_path = java.home.join(MANIFEST_NAME);
+    fsutil::reject_links_between(root.path(), &manifest_path)
         .map_err(|_| RuntimeError::Integrity(java.id.clone()))?;
-    match fsutil::read_bounded(&java.home.join(MANIFEST_NAME), MAX_RUNTIME_MANIFEST_BYTES) {
+    match fsutil::read_bounded(&manifest_path, MAX_RUNTIME_MANIFEST_BYTES) {
         Ok(manifest_bytes) => {
             let m: RuntimeManifest =
                 serde_json::from_slice(&manifest_bytes).map_err(|e| RuntimeError::Manifest {
@@ -375,5 +376,37 @@ mod tests {
             home: synth_home,
         };
         assert_eq!(resolve_cli_java_exe(&root, &synth).unwrap(), synth.exe);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlinked_manifest_is_rejected_by_resolve_java_and_cli_resolver() {
+        let (d, root, m) = setup(false);
+        let java = resolve_java(&root, &m.id).unwrap();
+        let dir = runtime_dir(&root, &m.id).unwrap();
+        let manifest_path = dir.join(MANIFEST_NAME);
+        let outside = d.path().join("outside-runtime.json");
+        fs::copy(&manifest_path, &outside).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+
+        match std::os::windows::fs::symlink_file(&outside, &manifest_path) {
+            Ok(()) => {}
+            Err(e)
+                if e.raw_os_error() == Some(1314)
+                    || e.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                return;
+            }
+            Err(e) => panic!("unexpected symlink_file error: {e}"),
+        }
+
+        assert!(matches!(
+            resolve_java(&root, &m.id),
+            Err(RuntimeError::Integrity(_))
+        ));
+        assert!(matches!(
+            resolve_cli_java_exe(&root, &java),
+            Err(RuntimeError::Integrity(_))
+        ));
     }
 }

@@ -30,6 +30,11 @@ afterEach(() => {
 });
 
 const wordmark = () => screen.getByRole("button", { name: t("window.wordmark") });
+const liveRegion = () => {
+  const region = wordmark().querySelector('[aria-live="polite"]');
+  expect(region).toBeTruthy();
+  return region!;
+};
 
 describe("the title wordmark", () => {
   it("is a quiet, focusable button that starts at rest", () => {
@@ -37,6 +42,7 @@ describe("the title wordmark", () => {
     expect(wordmark().getAttribute("data-phase")).toBe("off");
     expect(wordmark().tabIndex).toBe(0);
     expect(wordmark().textContent).toContain("Clade");
+    expect(liveRegion().textContent).toBe("");
   });
 
   it("shows the brand phrase for about a second, then settles back, and can repeat", () => {
@@ -52,6 +58,35 @@ describe("the title wordmark", () => {
     expect(wordmark().getAttribute("data-phase")).toBe("on");
   });
 
+  it("resets the hold timer when clicked again mid-animation", () => {
+    render(<TitleWordmark />);
+    fireEvent.click(wordmark());
+    expect(wordmark().getAttribute("data-phase")).toBe("on");
+    act(() => void vi.advanceTimersByTime(900));
+    expect(wordmark().getAttribute("data-phase")).toBe("on");
+
+    fireEvent.click(wordmark());
+    act(() => void vi.advanceTimersByTime(400));
+    expect(wordmark().getAttribute("data-phase")).toBe("on");
+
+    act(() => void vi.advanceTimersByTime(700));
+    expect(wordmark().getAttribute("data-phase")).toBe("off");
+  });
+
+  it("clears any pending hold timer on unmount", () => {
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    try {
+      const { unmount } = render(<TitleWordmark />);
+      fireEvent.click(wordmark());
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
   it("uses the plain crossfade with reduced motion", () => {
     setMotionMode("on");
     render(<TitleWordmark />);
@@ -59,15 +94,25 @@ describe("the title wordmark", () => {
     expect(wordmark().getAttribute("data-mode")).toBe("reduced");
   });
 
-  it("plays no sound and the brand phrase comes from the catalog in both languages", () => {
+  it("plays no sound and announces the catalog tagline via aria-live only when active in both languages", () => {
     render(<TitleWordmark />);
+    expect(liveRegion().textContent).toBe("");
     fireEvent.click(wordmark());
     expect(playSound).not.toHaveBeenCalled();
-    expect(wordmark().textContent).toContain(t("onboarding.tagline"));
+    expect(liveRegion().textContent).toBe(t("onboarding.tagline"));
+    act(() => void vi.advanceTimersByTime(1100));
+    expect(liveRegion().textContent).toBe("");
+
     cleanup();
     setLocale("ru");
     render(<TitleWordmark />);
-    expect(wordmark().textContent).toContain("Просто. Портативно. Твоё.");
+    expect(liveRegion().textContent).toBe("");
+    fireEvent.click(wordmark());
+    expect(playSound).not.toHaveBeenCalled();
+    expect(liveRegion().textContent).toBe("Просто. Портативно. Твоё.");
+    expect(liveRegion().textContent).toBe(t("onboarding.tagline"));
+    act(() => void vi.advanceTimersByTime(1100));
+    expect(liveRegion().textContent).toBe("");
   });
 
   it("sizes the clay underline to 100% of the tagline wrapper", () => {

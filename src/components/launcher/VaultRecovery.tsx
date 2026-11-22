@@ -23,6 +23,8 @@ interface Props {
   onReset: (snapshot: AccountsSnapshot) => void;
   /** `modal`: the question is the whole dialog (title and footer). `inline`: a block inside one. */
   layout: "modal" | "inline";
+  /** Disables the recovery trigger while an outer vault operation (such as unlock KDF) is running. */
+  disabled?: boolean;
   /** The normal passphrase form; it receives the quiet "Forgot passphrase?" link to place under its field. */
   children: (link: ReactNode) => ReactNode;
 }
@@ -33,7 +35,14 @@ interface Props {
  * and makes every account sign in again; profiles, worlds, playtime and settings are untouched, and
  * nothing is revoked at Microsoft. The backend does the work (`vault_recovery.rs`).
  */
-export function VaultRecovery({ api, onAsking, onReset, layout, children }: Props) {
+export function VaultRecovery({
+  api,
+  onAsking,
+  onReset,
+  layout,
+  disabled = false,
+  children,
+}: Props) {
   const t = useT();
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -43,6 +52,17 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
   const linkRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef(false);
+  const restoreConfirmFocus = useRef(false);
+  const mountedRef = useRef(true);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      inFlightRef.current = false;
+    };
+  }, []);
 
   // Never leave the dialog around it locked if this goes away while the question is open.
   useEffect(() => () => onAsking(false), [onAsking]);
@@ -55,7 +75,8 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
   }, [asking]);
 
   useEffect(() => {
-    if (asking && archived && !busy) {
+    if (asking && !busy && (archived || restoreConfirmFocus.current)) {
+      restoreConfirmFocus.current = false;
       confirmRef.current?.focus();
     }
   }, [asking, archived, busy]);
@@ -63,7 +84,10 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
   const ask = (next: boolean) => {
     setAsking(next);
     setError(null);
-    if (!next) setArchived(false);
+    if (!next) {
+      setArchived(false);
+      restoreConfirmFocus.current = false;
+    }
     onAsking(next);
   };
 
@@ -73,17 +97,24 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
   };
 
   const startFresh = () => {
-    if (busy) return;
+    if (busy || inFlightRef.current) return;
+    inFlightRef.current = true;
+    restoreConfirmFocus.current = false;
     setBusy(true);
     setError(null);
     playSound("click");
     api.resetVault().then(
       (snap) => {
+        inFlightRef.current = false;
+        if (!mountedRef.current) return;
         setBusy(false);
         ask(false);
         onReset(snap);
       },
       (e: unknown) => {
+        inFlightRef.current = false;
+        if (!mountedRef.current) return;
+        restoreConfirmFocus.current = true;
         setBusy(false);
         if (errorCode(e) === "accounts_not_updated") setArchived(true);
         setError(describeError("vault", e)); // the question stays: retry, or keep trying the passphrase
@@ -96,8 +127,10 @@ export function VaultRecovery({ api, onAsking, onReset, layout, children }: Prop
       <button
         ref={linkRef}
         type="button"
+        disabled={disabled}
         className={cn(BUTTON_SMALL_QUIET, "-ml-1 px-1")}
         onClick={() => {
+          if (disabled) return;
           playSound("click");
           ask(true);
         }}

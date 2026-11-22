@@ -5,6 +5,7 @@
 // warm ivory/sand), scattering a short, slightly random distance and fading quickly.
 
 const COLORS = ["#b5604a", "#9c5039", "#2b2622", "#b5604a", "#e4d5be", "#f6f0e6"] as const;
+const DARK_COLORS = ["#cf7459", "#e2a18b", "#efe8dd", "#cf7459", "#c7b9a6", "#f6f0e6"] as const;
 const MIN_COUNT = 6;
 const MAX_COUNT = 12;
 const MIN_LIFE_MS = 350;
@@ -15,6 +16,7 @@ const LAYER_ID = "fx-layer";
 
 let active = 0;
 let layer: HTMLDivElement | null = null;
+let layerGeneration = 0;
 
 export const activeParticleCount = () => active;
 
@@ -27,9 +29,20 @@ export interface BurstOptions {
   reducedMotion?: boolean;
 }
 
-function getLayer(): HTMLDivElement {
-  if (layer && layer.isConnected) return layer;
+function resetDisconnectedLayer(): void {
+  if (layer && !layer.isConnected) {
+    layer = null;
+    active = 0;
+    layerGeneration++;
+  }
+}
+
+function getLayer(): { host: HTMLDivElement; generation: number } {
+  if (layer && layer.isConnected) {
+    return { host: layer, generation: layerGeneration };
+  }
   active = 0;
+  layerGeneration++;
   const el = document.createElement("div");
   el.id = LAYER_ID;
   el.setAttribute("aria-hidden", "true");
@@ -42,7 +55,7 @@ function getLayer(): HTMLDivElement {
   } satisfies Partial<CSSStyleDeclaration>);
   document.body.appendChild(el);
   layer = el;
-  return el;
+  return { host: el, generation: layerGeneration };
 }
 
 interface ParticleEntry {
@@ -53,17 +66,15 @@ interface ParticleEntry {
 /** Emits a burst at viewport coordinates. Returns how many particles were created. */
 export function emitBurst(x: number, y: number, opts: BurstOptions = {}): number {
   if (typeof document === "undefined" || opts.reducedMotion) return 0;
-  if (layer && !layer.isConnected) {
-    layer = null;
-    active = 0;
-  }
+  resetDisconnectedLayer();
   const rnd = opts.random ?? Math.random;
   const wanted = opts.count ?? MIN_COUNT + Math.floor(rnd() * (MAX_COUNT - MIN_COUNT + 1));
   const count = Math.max(0, Math.min(wanted, MAX_ACTIVE_PARTICLES - active));
   if (count === 0) return 0;
 
-  const host = getLayer();
+  const { host, generation } = getLayer();
   const canAnimate = typeof host.animate === "function";
+  const palette = document.documentElement.dataset.theme === "dark" ? DARK_COLORS : COLORS;
   const baseAngle = rnd() * Math.PI * 2;
   const entries: ParticleEntry[] = [];
   let maxLife = 0;
@@ -74,15 +85,19 @@ export function emitBurst(x: number, y: number, opts: BurstOptions = {}): number
     if (entry.released) return;
     entry.released = true;
     entry.node.remove();
-    active = Math.max(0, active - 1);
+    const isCurrentLayer = generation === layerGeneration && host === layer;
+    if (isCurrentLayer) {
+      active = Math.max(0, active - 1);
+    }
     remaining--;
     if (remaining <= 0 && batchTimer !== undefined) {
       window.clearTimeout(batchTimer);
       batchTimer = undefined;
     }
-    if (active === 0 && layer) {
+    if (isCurrentLayer && active === 0 && layer) {
       layer.remove();
       layer = null;
+      layerGeneration++;
     }
   };
 
@@ -94,7 +109,7 @@ export function emitBurst(x: number, y: number, opts: BurstOptions = {}): number
     const dy = Math.sin(angle) * distance + 5; // a hint of settling
     const life = MIN_LIFE_MS + rnd() * (MAX_LIFE_MS - MIN_LIFE_MS);
     if (life > maxLife) maxLife = life;
-    const color = COLORS[Math.floor(rnd() * COLORS.length)];
+    const color = palette[Math.floor(rnd() * palette.length)];
     const stroke = rnd() < 0.3;
     const size = stroke ? 1.5 : 2 + rnd() * 2;
     const length = stroke ? 5 + rnd() * 3 : size;

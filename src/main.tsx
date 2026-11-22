@@ -3,8 +3,15 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { installInputModality } from "@/lib/inputModality";
 import { resolveLocale, setLocale } from "@/lib/i18n";
-import { loadUiSettings, onUiSettingsChanged, type UiSettings } from "@/lib/settings/uiSettings";
+import {
+  getUiSettings,
+  loadUiSettings,
+  onUiSettingsChanged,
+  subscribeUiSettings,
+  type UiSettings,
+} from "@/lib/settings/uiSettings";
 import { setMotionMode } from "@/lib/motion";
+import { installSystemThemeListener, setThemeMode } from "@/lib/theme";
 import { applyGlass, loadGlassStatus, onGlassStatusChanged } from "@/lib/glass";
 import { sound } from "@/lib/sound/soundService";
 
@@ -13,6 +20,14 @@ const soundOf = (s: UiSettings) => ({ enabled: s.soundEnabled, volume: s.soundVo
 
 async function main() {
   installInputModality();
+  installSystemThemeListener();
+
+  // Keep local browser-mode updates (outside Tauri) synchronized alongside backend events.
+  subscribeUiSettings(() => {
+    const s = getUiSettings();
+    setMotionMode(s.reducedMotion);
+    setThemeMode(s.theme);
+  });
 
   // Subscribe to settings and window-material events before reading the initial snapshots so a
   // backend change racing startup is never dropped.
@@ -29,14 +44,19 @@ async function main() {
       initialUi = s;
       sound.hydrate(soundOf(s));
       setMotionMode(s.reducedMotion);
+      setThemeMode(s.theme);
       setLocale(localeOf(s));
     }),
   ]);
 
-  const [fetchedUi, glassStatus] = await Promise.all([loadUiSettings(), loadGlassStatus()]);
+  const [fetchedUi, glassStatus] = await Promise.all([
+    initialUi ?? loadUiSettings(),
+    loadGlassStatus(),
+  ]);
   if (!sawUiEvent) {
     sound.hydrate(soundOf(fetchedUi));
     setMotionMode(fetchedUi.reducedMotion);
+    setThemeMode(fetchedUi.theme);
     setLocale(localeOf(fetchedUi));
   }
   if (!sawGlassEvent) {

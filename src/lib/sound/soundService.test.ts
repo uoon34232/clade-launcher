@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_SOUND_SETTINGS,
   createSoundService,
+  playSound,
+  sound,
   type SoundKind,
   type SoundSettings,
 } from "./soundService";
@@ -99,6 +101,7 @@ function setup(clockStart = 1000, extra: Partial<Parameters<typeof createSoundSe
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -113,9 +116,10 @@ describe("sound service", () => {
     expect(audio.rec.contexts).toBe(0);
     expect(svc.play("click")).toBe(true);
     advance(500);
-    svc.play("primary");
+    expect(svc.play("primary")).toBe(true);
     expect(audio.rec.contexts).toBe(1);
     expect(audio.rec.resumed).toBeGreaterThan(0); // autoplay policy: resumed inside the gesture
+    expect(svc.stats()).toEqual({ played: 2, throttled: 0 });
   });
 
   it("plays every kind, each with audible voices but only quiet peaks", () => {
@@ -133,26 +137,30 @@ describe("sound service", () => {
     svc.setSettings({ volume: 1 });
     svc.play("click");
     expect(audio.rec.masterGain).toBeLessThanOrEqual(0.5);
+    expect(svc.stats().played).toBe(5);
   });
 
   it("throttles rapid input so sounds never pile up", () => {
-    const { audio, svc, advance } = setup();
+    const { svc, advance } = setup();
     let played = 0;
     for (let i = 0; i < 50; i++) {
       if (svc.play("click")) played++;
       advance(10); // 100 clicks per second
     }
     expect(played).toBeLessThanOrEqual(4); // one per 140 ms in half a second
+    expect(svc.stats().played).toBe(played);
     expect(svc.stats().throttled).toBeGreaterThan(40);
     // Different kinds closer than the global gap are dropped too.
-    const { svc: s2, advance: adv2 } = setup();
+    const { audio: a2, svc: s2, advance: adv2 } = setup();
     expect(s2.play("click")).toBe(true);
     adv2(20);
     expect(s2.play("select")).toBe(false);
+    expect(a2.rec.contexts).toBe(1);
+    expect(s2.stats()).toEqual({ played: 1, throttled: 1 });
 
     // At most 3 sounds ring at once: headline (170 ms), primary (130 ms) and select (140 ms)
     // overlap, so a 4th sound at +168 ms is refused until one of them has ended.
-    const { svc: s3, advance: adv3 } = setup();
+    const { audio: a3, svc: s3, advance: adv3 } = setup();
     expect(s3.play("headline")).toBe(true);
     adv3(56);
     expect(s3.play("primary")).toBe(true);
@@ -162,7 +170,8 @@ describe("sound service", () => {
     expect(s3.play("click")).toBe(false);
     adv3(60);
     expect(s3.play("click")).toBe(true);
-    expect(audio.rec.contexts).toBe(1);
+    expect(a3.rec.contexts).toBe(1);
+    expect(s3.stats()).toEqual({ played: 4, throttled: 1 });
   });
 
   it("is silent when disabled or at zero volume, and resumes when re-enabled", () => {
@@ -263,7 +272,6 @@ describe("sound service", () => {
       advance(1000);
     }
     expect(fetchSpy).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
   it("auto-suspends after silence and extends the idle timer when a new sound plays", () => {
@@ -354,5 +362,266 @@ describe("sound service", () => {
     await Promise.resolve();
     expect(audio.rec.started).toBe(2);
     expect(audio.rec.startTimes[0]).toBeCloseTo(4.255, 5);
+    expect(svc.stats().played).toBe(1);
+  });
+
+  it("continues disconnecting remaining nodes when one node's disconnect throws", () => {
+    const { audio, svc } = setup();
+    const origFilter = audio.ctx.createBiquadFilter;
+    let brokeFirst = false;
+    audio.ctx.createBiquadFilter = () => {
+      const f = origFilter();
+      if (!brokeFirst) {
+        brokeFirst = true;
+        f.disconnect = () => {
+          throw new Error("already disconnected");
+        };
+      }
+      return f;
+    };
+
+    expect(svc.play("click")).toBe(true);
+    expect(audio.rec.sources).toHaveLength(2);
+    expect(() => {
+      for (const src of audio.rec.sources) src.onended?.();
+    }).not.toThrow();
+    // Voice 1 had 2 other nodes disconnect after the throwing filter; voice 2 had all 3.
+    expect(audio.rec.disconnected).toBe(5);
+  });
+
+  it("recovers when async or synchronous ctx.resume() fails", async () => {
+    const audio = fakeAudio();
+    let rejectResume!: (err: Error) => void;
+    audio.ctx.resume = () => {
+      audio.rec.resumed++;
+      return new Promise<void>((_, reject) => {
+        rejectResume = reject;
+      });
+    };
+
+    let t = 1000;
+    const svc = createSoundService({ createContext: audio.createContext, now: () => t });
+    expect(svc.play("click")).toBe(true);
+    expect(audio.rec.resumed).toBe(1);
+    expect(audio.rec.started).toBe(0);
+    expect(svc.stats().played).toBe(1);
+
+    rejectResume(new Error("resume blocked"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audio.rec.started).toBe(0);
+    expect(audio.ctx.state).toBe("suspended");
+
+    // Once the rejected resume clears resumeInFlight, a subsequent play retries resume.
+    audio.ctx.resume = () => {
+      audio.rec.resumed++;
+      audio.ctx.state = "running";
+      return Promise.resolve();
+    };
+    t += 100;
+    expect(svc.play("select")).toBe(true);
+    expect(audio.rec.resumed).toBe(2);
+    expect(audio.rec.started).toBe(2);
+    expect(svc.stats().played).toBe(2);
+
+    // Synchronous throw in ctx.resume() clears resumeInFlight and returns false.
+    const syncErr = fakeAudio();
+    let shouldThrow = true;
+    syncErr.ctx.resume = () => {
+      syncErr.rec.resumed++;
+      if (shouldThrow) throw new Error("resume sync failure");
+      syncErr.ctx.state = "running";
+      return Promise.resolve();
+    };
+    const s2 = createSoundService({ createContext: syncErr.createContext, now: () => t });
+    expect(s2.play("click")).toBe(false);
+    expect(s2.stats().played).toBe(0);
+    shouldThrow = false;
+    t += 100;
+    expect(s2.play("click")).toBe(true);
+    expect(s2.stats().played).toBe(1);
+
+    // Synchronous transition to "running" with a rejected promise swallows the rejection cleanly.
+    const syncRun = fakeAudio();
+    syncRun.ctx.resume = () => {
+      syncRun.rec.resumed++;
+      syncRun.ctx.state = "running";
+      return Promise.reject(new Error("late resume warning"));
+    };
+    const s3 = createSoundService({ createContext: syncRun.createContext, now: () => t });
+    expect(s3.play("click")).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(syncRun.rec.started).toBe(2);
+    expect(s3.stats().played).toBe(1);
+  });
+
+  it("drops concurrent play() calls while ctx.resume() is still in flight", async () => {
+    const audio = fakeAudio();
+    let resolveResume!: () => void;
+    audio.ctx.resume = () => {
+      audio.rec.resumed++;
+      return new Promise<void>((resolve) => {
+        resolveResume = () => {
+          audio.ctx.state = "running";
+          resolve();
+        };
+      });
+    };
+
+    let t = 1000;
+    const svc = createSoundService({ createContext: audio.createContext, now: () => t });
+    expect(svc.play("click")).toBe(true);
+    expect(audio.rec.resumed).toBe(1);
+    expect(audio.rec.started).toBe(0);
+    expect(svc.stats()).toEqual({ played: 1, throttled: 0 });
+
+    // Even past the throttle gap, a concurrent play while resume is pending is refused cleanly.
+    t += 100;
+    expect(svc.play("select")).toBe(false);
+    expect(audio.rec.resumed).toBe(1);
+    expect(audio.rec.started).toBe(0);
+    expect(svc.stats()).toEqual({ played: 1, throttled: 0 });
+
+    resolveResume();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audio.rec.started).toBe(2);
+
+    t += 100;
+    expect(svc.play("select")).toBe(true);
+    expect(audio.rec.started).toBe(4);
+    expect(svc.stats()).toEqual({ played: 2, throttled: 0 });
+  });
+
+  it("cancels playback and suspends if disabled or muted while ctx.resume() is in flight", async () => {
+    for (const patch of [{ enabled: false }, { volume: 0 }] as const) {
+      const audio = fakeAudio();
+      let resolveResume!: () => void;
+      audio.ctx.resume = () => {
+        audio.rec.resumed++;
+        return new Promise<void>((resolve) => {
+          resolveResume = () => {
+            audio.ctx.state = "running";
+            resolve();
+          };
+        });
+      };
+
+      let t = 1000;
+      const svc = createSoundService({ createContext: audio.createContext, now: () => t });
+      expect(svc.play("click")).toBe(true);
+      svc.setSettings(patch);
+
+      resolveResume();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(audio.rec.started).toBe(0);
+      expect(audio.rec.suspended).toBe(1);
+      expect(audio.ctx.state).toBe("suspended");
+
+      svc.setSettings({ enabled: true, volume: 0.5 });
+      t += 200;
+      expect(svc.play("click")).toBe(true);
+      resolveResume();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(audio.rec.started).toBe(2);
+    }
+  });
+
+  it("swallows synchronous play() errors, post-resume scheduling errors, and ctx.suspend() rejections", async () => {
+    vi.useFakeTimers();
+
+    // 1. Synchronous throw while scheduling voices (both on sync resume and when already running).
+    const syncThrow = setup();
+    syncThrow.audio.ctx.createOscillator = () => {
+      throw new Error("oscillator failed");
+    };
+    expect(syncThrow.svc.play("click")).toBe(false);
+    syncThrow.advance(200);
+    expect(syncThrow.svc.play("select")).toBe(false);
+    expect(syncThrow.svc.stats().played).toBe(0);
+
+    // 2. Post-resume throw inside scheduleVoice() is swallowed and clears resumeInFlight.
+    const asyncAudio = fakeAudio();
+    let resolveResume!: () => void;
+    asyncAudio.ctx.resume = () => {
+      asyncAudio.rec.resumed++;
+      return new Promise<void>((resolve) => {
+        resolveResume = () => {
+          asyncAudio.ctx.state = "running";
+          resolve();
+        };
+      });
+    };
+    const origOsc = asyncAudio.ctx.createOscillator;
+    let failOsc = true;
+    asyncAudio.ctx.createOscillator = () => {
+      if (failOsc) throw new Error("post-resume osc failed");
+      return origOsc();
+    };
+    let t = 1000;
+    const asyncSvc = createSoundService({
+      createContext: asyncAudio.createContext,
+      now: () => t,
+    });
+    expect(asyncSvc.play("select")).toBe(true);
+    resolveResume();
+    await Promise.resolve();
+    await Promise.resolve();
+    failOsc = false;
+    t += 200;
+    expect(asyncSvc.play("select")).toBe(true);
+    expect(asyncAudio.rec.started).toBe(2);
+
+    // 3. ctx.suspend() rejections on both immediate mute and idle suspend timer do not leak.
+    const suspendErr = setup();
+    suspendErr.audio.ctx.suspend = () => {
+      suspendErr.audio.rec.suspended++;
+      suspendErr.audio.ctx.state = "suspended";
+      return Promise.reject(new Error("suspend failed"));
+    };
+    expect(suspendErr.svc.play("click")).toBe(true);
+    vi.advanceTimersByTime(1600);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(suspendErr.audio.rec.suspended).toBe(1);
+
+    suspendErr.advance(1600);
+    expect(suspendErr.svc.play("click")).toBe(true);
+    suspendErr.svc.setSettings({ enabled: false });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(suspendErr.audio.rec.suspended).toBe(2);
+  });
+
+  it("uses globalThis.AudioContext via defaultContext() and wires the exported sound / playSound singleton", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("AudioContext", undefined);
+    const unavailable = createSoundService();
+    expect(unavailable.play("click")).toBe(false);
+    expect(unavailable.stats()).toEqual({ played: 0, throttled: 0 });
+
+    const ctorCalls: unknown[] = [];
+    function FakeAudioContext(opts?: AudioContextOptions) {
+      ctorCalls.push(opts);
+      return fakeAudio().ctx;
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+
+    const svc = createSoundService();
+    expect(svc.play("click")).toBe(true);
+    expect(ctorCalls).toEqual([{ latencyHint: "interactive" }]);
+    expect(svc.stats().played).toBe(1);
+
+    const beforePlayed = sound.stats().played;
+    expect(playSound("click")).toBe(true);
+    expect(sound.stats().played).toBe(beforePlayed + 1);
+    expect(ctorCalls).toHaveLength(2);
+    expect(sound.setSettings({ volume: 0.4 })).toEqual({ enabled: true, volume: 0.4 });
+    // Clear any pending idle timer on the shared singleton and restore defaults.
+    sound.hydrate({ enabled: false, volume: 0 });
+    sound.setSettings(DEFAULT_SOUND_SETTINGS);
   });
 });

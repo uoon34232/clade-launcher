@@ -26,9 +26,10 @@
       "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
       "license": "BSD-3-Clause-style (Microsoft Corporation)",
       "component": "Microsoft WebView2 SDK (WebView2 Loader, statically linked through webview2-com-sys)",
+      "appliesTo": [{ "crate": "webview2-com-sys", "version": "0.39.1" }],
       "homepage": "https://aka.ms/webview",
       "origin": "https://www.nuget.org/packages/Microsoft.Web.WebView2 (LICENSE.txt inside the Microsoft.Web.WebView2 1.0.3650.58 package)",
-      "verification": "The LICENSE.txt of Microsoft's own NuGet package that distributes WebView2LoaderStatic.lib. The crate does not state which SDK release it bundles; 1.0.3650.58 is the release its changelog names for 0.38.2. Re-check this entry when webview2-com-sys is updated."
+      "verification": "The LICENSE.txt of Microsoft's own NuGet package that distributes WebView2LoaderStatic.lib (taken from Microsoft.Web.WebView2 1.0.3650.58; the webview2-com-sys 0.39.0 changelog updated the bundled WebView2 SDK, and this entry is bound to webview2-com-sys 0.39.1 via appliesTo so any crate upgrade must re-verify)."
     }
   ]
 }

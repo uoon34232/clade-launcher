@@ -22,6 +22,7 @@ const USER_FACING_PROPS = new Set([
   "aria-description",
   "aria-placeholder",
   "aria-roledescription",
+  "aria-valuetext",
   "placeholder",
   "title",
   "alt",
@@ -72,48 +73,52 @@ export function findHardcodedText(source: string, fileName = "x.tsx"): string[] 
         ? n.head.text + n.templateSpans.map((s) => s.literal.text).join("")
         : null;
 
+  const checkExpr = (x: ts.Node, format: (text: string) => string) => {
+    const text = literalText(x);
+    if (text !== null && hasWords(text) && !ALLOWED_TEXT.has(text)) at(x, format(text));
+    // Only look through the expression's own branches, not into calls like t("key").
+    if (ts.isConditionalExpression(x)) {
+      checkExpr(x.whenTrue, format);
+      checkExpr(x.whenFalse, format);
+    } else if (
+      ts.isBinaryExpression(x) &&
+      [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(x.operatorToken.kind)
+    ) {
+      // `a && <p/>` and `a ?? "text"` show their operands; `a === "ready"` only compares.
+      checkExpr(x.left, format);
+      checkExpr(x.right, format);
+    } else if (ts.isParenthesizedExpression(x)) {
+      checkExpr(x.expression, format);
+    } else if (ts.isTemplateExpression(x)) {
+      for (const span of x.templateSpans) checkExpr(span.expression, format);
+    }
+  };
+
   const visit = (n: ts.Node) => {
     if (ts.isJsxText(n)) {
       const text = n.text.trim();
       if (hasWords(text) && !ALLOWED_TEXT.has(text)) at(n, `JSX text "${text}"`);
     }
     if (ts.isJsxExpression(n) && (ts.isJsxElement(n.parent) || ts.isJsxFragment(n.parent))) {
-      const check = (x: ts.Node) => {
-        const text = literalText(x);
-        if (text !== null && hasWords(text) && !ALLOWED_TEXT.has(text))
-          at(x, `string in JSX "${text}"`);
-        // Only look through the expression's own branches, not into calls like t("key").
-        if (ts.isConditionalExpression(x)) {
-          check(x.whenTrue);
-          check(x.whenFalse);
-        } else if (
-          ts.isBinaryExpression(x) &&
-          [
-            ts.SyntaxKind.AmpersandAmpersandToken,
-            ts.SyntaxKind.BarBarToken,
-            ts.SyntaxKind.QuestionQuestionToken,
-          ].includes(x.operatorToken.kind)
-        ) {
-          // `a && <p/>` and `a ?? "text"` show their operands; `a === "ready"` only compares.
-          check(x.left);
-          check(x.right);
-        } else if (ts.isParenthesizedExpression(x)) check(x.expression);
-      };
-      if (n.expression) check(n.expression);
+      if (n.expression) checkExpr(n.expression, (text) => `string in JSX "${text}"`);
     }
     if (ts.isJsxAttribute(n) && USER_FACING_PROPS.has(n.name.getText(sf)) && n.initializer) {
       const init = ts.isJsxExpression(n.initializer) ? n.initializer.expression : n.initializer;
-      const text = init ? literalText(init) : null;
-      if (text !== null && hasWords(text) && !ALLOWED_TEXT.has(text))
-        at(n, `${n.name.getText(sf)}="${text}"`);
+      if (init) {
+        const propName = n.name.getText(sf);
+        checkExpr(init, (text) => `${propName}="${text}"`);
+      }
     }
     if (
       ts.isPropertyAssignment(n) &&
       USER_FACING_KEYS.has(n.name.getText(sf).replace(/["']/g, ""))
     ) {
-      const text = literalText(n.initializer);
-      if (text !== null && hasWords(text) && !ALLOWED_TEXT.has(text))
-        at(n, `${n.name.getText(sf)}: "${text}"`);
+      const keyName = n.name.getText(sf);
+      checkExpr(n.initializer, (text) => `${keyName}: "${text}"`);
     }
     ts.forEachChild(n, visit);
   };
@@ -142,8 +147,14 @@ describe("no user-facing text outside the localization layer", () => {
       "const A = () => <p>Save your world</p>;",
       'const A = () => <input placeholder="Enter a name" />;',
       'const A = () => <button aria-label="Close dialog" />;',
+      'const A = () => <button aria-label={open ? "Close" : "Open"} />;',
+      'const A = () => <input placeholder={busy ? "Wait" : t("x")} />;',
+      'const A = () => <input aria-valuetext="Fifty percent" />;',
+      'const A = () => <button title={fallback ?? ("Fallback")} />;',
       'const A = () => <p>{ok ? "All good" : t("x")}</p>;',
+      'const A = () => <p>{`${ok ? "Yes" : "No"}`}</p>;',
       'const items = [{ value: "a", label: "Release notes" }];',
+      'const items = [{ value: "a", label: ok ? "Yes" : "No" }];',
       "const A = () => <p>Привет, мир</p>;",
     ];
     for (const src of bad) expect(findHardcodedText(src).length, src).toBeGreaterThan(0);
@@ -153,12 +164,16 @@ describe("no user-facing text outside the localization layer", () => {
     const fine = [
       'const A = () => <div className="flex items-center gap-2" id="profile-name" data-state="open" />;',
       'const A = () => <button aria-label={t("window.close")}>{t("common.close")}</button>;',
+      'const A = () => <button aria-label={open ? t("common.close") : t("common.open")} />;',
+      "const A = () => <input aria-valuetext={`${pct}%`} />;",
       "const A = () => <span>Clade</span>;",
       'const A = () => <p>{" "}</p>;',
       "const A = () => <span aria-hidden>+</span>;",
       'playSound("click");',
       'const items = [{ value: "classic", label: t("accountModal.skinClassic") }];',
+      'const items = [{ value: "a", label: ok ? t("common.yes") : t("common.no") }];',
       "const A = () => <p>{count} / {total}</p>;",
+      "const A = () => <p>{`${count} / ${total}`}</p>;",
     ];
     for (const src of fine) expect(findHardcodedText(src), src).toEqual([]);
   });

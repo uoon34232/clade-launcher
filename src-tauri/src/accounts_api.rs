@@ -7,10 +7,11 @@
 //! Signing in lives in `auth.rs`; skin and cape changes live in `appearance_cmd.rs` on top of
 //! `profile_service.rs`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -26,6 +27,23 @@ use crate::skin::SkinCache;
 pub const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
 /// Overall time one background round of skin downloads may take, however many accounts there are.
 const BACKGROUND_SKIN_BUDGET: Duration = Duration::from_secs(10);
+/// Initial retry delay after a background skin download fails (doubles up to [`MAX_SKIN_BACKOFF`]).
+const BASE_SKIN_BACKOFF: Duration = Duration::from_secs(30);
+/// Maximum per-session retry delay for a failing skin texture.
+const MAX_SKIN_BACKOFF: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone)]
+struct SkinBackoff {
+    want_id: String,
+    failures: u32,
+    retry_at: Instant,
+}
+
+fn skin_backoff_delay(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(4);
+    let secs = BASE_SKIN_BACKOFF.as_secs().saturating_mul(1u64 << shift);
+    Duration::from_secs(secs.min(MAX_SKIN_BACKOFF.as_secs()))
+}
 
 /// Serialises read-modify-write of `accounts.json`.
 pub struct AccountsState {
@@ -37,6 +55,8 @@ pub struct AccountsState {
     syncing: AtomicBool,
     /// A skin or cape change is being sent. Changes are sent one at a time and never repeated.
     appearance_busy: AtomicBool,
+    /// Per-session backoff for failed skin downloads, keyed by canonical lowercase dashed UUID.
+    skin_backoff: Mutex<HashMap<String, SkinBackoff>>,
 }
 
 impl AccountsState {
@@ -47,6 +67,7 @@ impl AccountsState {
             skins: None,
             syncing: AtomicBool::new(false),
             appearance_busy: AtomicBool::new(false),
+            skin_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -62,10 +83,28 @@ impl AccountsState {
         self
     }
 
+    fn lock_backoff(&self) -> MutexGuard<'_, HashMap<String, SkinBackoff>> {
+        self.skin_backoff.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Notes the skin an account's profile just reported (`None`: the default skin). Local only.
     pub fn record_skin(&self, uuid: &str, reported: Option<&str>) {
         if let Some((cache, _)) = &self.skins {
             cache.record(uuid, reported);
+        }
+        if let Some(stem) = crate::ms_auth::dashed_uuid(uuid) {
+            let new_id = reported.and_then(crate::skin::parse_texture).map(|t| t.id);
+            let mut map = self.lock_backoff();
+            match new_id {
+                Some(id) => {
+                    if map.get(&stem).is_some_and(|b| b.want_id != id) {
+                        map.remove(&stem);
+                    }
+                }
+                None => {
+                    map.remove(&stem);
+                }
+            }
         }
     }
 
@@ -76,27 +115,92 @@ impl AccountsState {
             .unwrap_or_default()
     }
 
+    fn skipped_backoffs(&self, now: Instant) -> HashMap<String, String> {
+        let map = self.lock_backoff();
+        map.iter()
+            .filter(|(_, b)| now < b.retry_at)
+            .map(|(stem, b)| (stem.clone(), b.want_id.clone()))
+            .collect()
+    }
+
+    fn apply_sync_report(&self, report: &crate::skin::SyncBatchReport, now: Instant) {
+        if report.succeeded.is_empty() && report.failed.is_empty() {
+            return;
+        }
+        let mut map = self.lock_backoff();
+        for stem in &report.succeeded {
+            map.remove(stem);
+        }
+        for (stem, want_id) in &report.failed {
+            let failures = map
+                .get(stem)
+                .filter(|b| b.want_id == *want_id)
+                .map_or(1, |b| b.failures.saturating_add(1));
+            map.insert(
+                stem.clone(),
+                SkinBackoff {
+                    want_id: want_id.clone(),
+                    failures,
+                    retry_at: now + skin_backoff_delay(failures),
+                },
+            );
+        }
+    }
+
+    async fn sync_with_fetcher<F: crate::net::Fetcher>(
+        &self,
+        cache: &SkinCache,
+        fetcher: &F,
+        budget: Duration,
+        respect_backoff: bool,
+    ) -> bool {
+        let skip = if respect_backoff {
+            self.skipped_backoffs(Instant::now())
+        } else {
+            HashMap::new()
+        };
+        let uuids = self.known_uuids();
+        let report = cache.sync_batch(fetcher, &uuids, budget, &skip).await;
+        self.apply_sync_report(&report, Instant::now());
+        report.changed
+    }
+
     /// Downloads the skins that are noted but not cached yet, all together and within one overall
-    /// `budget` (never a wait per account). Returns whether anything was waiting. Cosmetic: it
-    /// cannot fail.
+    /// `budget` (never a wait per account). Returns whether any skin cache entry was updated on
+    /// disk. Cosmetic: it cannot fail.
     pub async fn sync_pending_skins(&self, budget: Duration) -> bool {
         let Some((cache, Ok(http))) = &self.skins else {
             return false;
         };
-        cache.sync_all(http, &self.known_uuids(), budget).await
+        self.sync_with_fetcher(cache, http, budget, false).await
+    }
+
+    async fn sync_background_skins(&self, budget: Duration) -> bool {
+        let Some((cache, Ok(http))) = &self.skins else {
+            return false;
+        };
+        self.sync_with_fetcher(cache, http, budget, true).await
+    }
+
+    fn skins_pending_at(&self, now: Instant) -> bool {
+        let Some((cache, Ok(_))) = &self.skins else {
+            return false;
+        };
+        let skip = self.skipped_backoffs(now);
+        self.known_uuids()
+            .iter()
+            .any(|u| cache.pending_unless_skipped(u, &skip))
     }
 
     /// Whether some account has a skin waiting to be downloaded (local files only).
     fn skins_pending(&self) -> bool {
-        match &self.skins {
-            Some((cache, Ok(_))) => self.known_uuids().iter().any(|u| cache.pending(u)),
-            _ => false,
-        }
+        self.skins_pending_at(Instant::now())
     }
 
     /// Starts fetching the waiting skins in the background, at most one such round at a time, and
-    /// tells the interface (`accounts-changed`) when it is done so it can list again. The account
-    /// list itself never waits for the network: avatars are decorative.
+    /// tells the interface (`accounts-changed`) only when at least one cached avatar actually
+    /// changed on disk so it can list again. The account list itself never waits for the network:
+    /// avatars are decorative.
     pub fn sync_skins_in_background(&self, app: &AppHandle) {
         if !self.skins_pending() || self.syncing.swap(true, Ordering::AcqRel) {
             return;
@@ -104,9 +208,10 @@ impl AccountsState {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AccountsState>();
-            let ran = state.sync_pending_skins(BACKGROUND_SKIN_BUDGET).await;
-            state.syncing.store(false, Ordering::Release);
-            if ran {
+            let guard = SyncGuard(&state);
+            let changed = state.sync_background_skins(BACKGROUND_SKIN_BUDGET).await;
+            drop(guard);
+            if changed {
                 let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
             }
         });
@@ -162,6 +267,15 @@ impl AccountsState {
         file.save(&self.path)
             .map_err(|e| AuthError::Storage(e.to_string()))?;
         Ok(out)
+    }
+}
+
+/// Held while a background skin sync round is running; dropping it allows the next one.
+struct SyncGuard<'a>(&'a AccountsState);
+
+impl Drop for SyncGuard<'_> {
+    fn drop(&mut self) {
+        self.0.syncing.store(false, Ordering::Release);
     }
 }
 
@@ -334,8 +448,13 @@ pub fn remove_and_forget(
                 .map(|a| a.minecraft_uuid.clone())
         });
         let dto = remove(&state.path, id)?;
-        if let (Some(uuid), Some((cache, _))) = (uuid, &state.skins) {
-            cache.forget(&uuid); // the avatar of a removed account goes with it
+        if let Some(uuid) = uuid {
+            if let Some((cache, _)) = &state.skins {
+                cache.forget(&uuid); // the avatar of a removed account goes with it
+            }
+            if let Some(stem) = crate::ms_auth::dashed_uuid(&uuid) {
+                state.lock_backoff().remove(&stem);
+            }
         }
         dto
     };
@@ -582,5 +701,207 @@ mod tests {
             state.load_authoritative().unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    impl AccountsState {
+        async fn sync_with_fetcher_at<F: crate::net::Fetcher>(
+            &self,
+            cache: &SkinCache,
+            fetcher: &F,
+            budget: Duration,
+            respect_backoff: bool,
+            now: Instant,
+        ) -> bool {
+            let skip = if respect_backoff {
+                self.skipped_backoffs(now)
+            } else {
+                HashMap::new()
+            };
+            let uuids = self.known_uuids();
+            let report = cache.sync_batch(fetcher, &uuids, budget, &skip).await;
+            self.apply_sync_report(&report, now);
+            report.changed
+        }
+    }
+
+    fn header_png(tag: u8) -> Vec<u8> {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, tag]);
+        png
+    }
+
+    #[tokio::test]
+    async fn failed_skin_downloads_do_not_report_changes_and_back_off_exponentially() {
+        use crate::net::testing::FakeFetcher;
+        use crate::net::HttpFetcher;
+
+        let d = tempfile::tempdir().unwrap();
+        let (_d2, p) = seeded();
+        let cache = SkinCache::new(d.path().join("cache").join("skins"));
+        let no_net: Result<HttpFetcher, String> = Err("tests do not use the network".into());
+        let state = AccountsState::new(p).with_skins(cache.clone(), no_net);
+        let uuids: Vec<String> = state
+            .list()
+            .unwrap()
+            .accounts
+            .into_iter()
+            .map(|a| a.uuid)
+            .collect();
+        let uuid_a = &uuids[0];
+        let uuid_b = &uuids[1];
+        let id_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let id_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let url_a = format!("https://textures.minecraft.net/texture/{id_a}");
+        let url_b = format!("https://textures.minecraft.net/texture/{id_b}");
+
+        state.record_skin(uuid_a, Some(&url_a));
+        let t0 = Instant::now();
+        let fetcher = FakeFetcher::new();
+
+        // Failing fetch reports `changed == false` (no accounts-changed loop) and enters 30s backoff.
+        assert!(
+            !state
+                .sync_with_fetcher_at(&cache, &fetcher, Duration::from_secs(5), true, t0)
+                .await
+        );
+        assert_eq!(fetcher.calls().len(), 1);
+        assert!(
+            !state
+                .skipped_backoffs(t0 + Duration::from_secs(10))
+                .is_empty(),
+            "failed skin must enter session backoff"
+        );
+
+        // Within the 30s backoff window, repeated background syncs make zero network requests.
+        assert!(
+            !state
+                .sync_with_fetcher_at(
+                    &cache,
+                    &fetcher,
+                    Duration::from_secs(5),
+                    true,
+                    t0 + Duration::from_secs(10),
+                )
+                .await
+        );
+        assert_eq!(fetcher.calls().len(), 1);
+
+        // After 30s elapses, background sync retries once; failing again doubles backoff to 60s.
+        let t1 = t0 + Duration::from_secs(31);
+        assert!(
+            !state
+                .sync_with_fetcher_at(&cache, &fetcher, Duration::from_secs(5), true, t1)
+                .await
+        );
+        assert_eq!(fetcher.calls().len(), 2);
+        assert!(
+            !state
+                .skipped_backoffs(t1 + Duration::from_secs(45))
+                .is_empty(),
+            "second failure must back off for 60s"
+        );
+        assert!(
+            !state
+                .sync_with_fetcher_at(
+                    &cache,
+                    &fetcher,
+                    Duration::from_secs(5),
+                    true,
+                    t1 + Duration::from_secs(45),
+                )
+                .await
+        );
+        assert_eq!(fetcher.calls().len(), 2);
+
+        // A second account's working skin is not blocked by account A's backoff, and partial
+        // success reports `changed == true`.
+        fetcher.ok(&url_b, header_png(2));
+        state.record_skin(uuid_b, Some(&url_b));
+        assert!(
+            state
+                .sync_with_fetcher_at(
+                    &cache,
+                    &fetcher,
+                    Duration::from_secs(5),
+                    true,
+                    t1 + Duration::from_secs(45),
+                )
+                .await
+        );
+        assert_eq!(fetcher.calls().len(), 3);
+        assert!(cache.data_uri(uuid_b).is_some());
+
+        // Explicit foreground sync (`respect_backoff = false`) bypasses backoff and clears it on
+        // success.
+        fetcher.ok(&url_a, header_png(1));
+        assert!(
+            state
+                .sync_with_fetcher_at(
+                    &cache,
+                    &fetcher,
+                    Duration::from_secs(5),
+                    false,
+                    t1 + Duration::from_secs(45),
+                )
+                .await
+        );
+        assert!(cache.data_uri(uuid_a).is_some());
+        assert!(state
+            .skipped_backoffs(t1 + Duration::from_secs(45))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_new_skin_or_removing_account_clears_backoff() {
+        use crate::net::testing::FakeFetcher;
+        use crate::net::HttpFetcher;
+
+        let d = tempfile::tempdir().unwrap();
+        let (_d2, p) = seeded();
+        let cache = SkinCache::new(d.path().join("cache").join("skins"));
+        let no_net: Result<HttpFetcher, String> = Err("tests do not use the network".into());
+        let state = AccountsState::new(p).with_skins(cache.clone(), no_net);
+        let uuid_a = state.list().unwrap().accounts[0].uuid.clone();
+        let uuid_b = state.list().unwrap().accounts[1].uuid.clone();
+        let id_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let id_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let url_a = format!("https://textures.minecraft.net/texture/{id_a}");
+        let url_b = format!("https://textures.minecraft.net/texture/{id_b}");
+
+        let t0 = Instant::now();
+        let fetcher = FakeFetcher::new();
+        state.record_skin(&uuid_a, Some(&url_a));
+        assert!(
+            !state
+                .sync_with_fetcher_at(&cache, &fetcher, Duration::from_secs(5), true, t0)
+                .await
+        );
+        assert_eq!(state.skipped_backoffs(t0).len(), 1);
+
+        // Recording a different skin clears the old backoff so the new texture downloads at once.
+        fetcher.ok(&url_b, header_png(3));
+        state.record_skin(&uuid_a, Some(&url_b));
+        assert!(state.skipped_backoffs(t0).is_empty());
+        assert!(
+            state
+                .sync_with_fetcher_at(&cache, &fetcher, Duration::from_secs(5), true, t0)
+                .await
+        );
+        assert!(cache.data_uri(&uuid_a).is_some());
+
+        // Removing a failing account clears its backoff entry as well.
+        state.record_skin(&uuid_b, Some(&url_a));
+        let fetcher_fail = FakeFetcher::new();
+        assert!(
+            !state
+                .sync_with_fetcher_at(&cache, &fetcher_fail, Duration::from_secs(5), true, t0)
+                .await
+        );
+        assert_eq!(state.skipped_backoffs(t0).len(), 1);
+        remove_and_forget(&state, "b", |_| ()).unwrap();
+        assert!(state.skipped_backoffs(t0).is_empty());
     }
 }

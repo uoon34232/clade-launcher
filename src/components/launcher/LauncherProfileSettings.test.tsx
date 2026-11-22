@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { staleNote } from "@/features/launcher/profileUi";
 import { setLocale } from "@/lib/i18n";
 import { BackendError } from "@/lib/ipc";
 import type { LaunchApi, RunState } from "@/lib/launch/api";
@@ -43,6 +44,23 @@ const snap = (
   ...over,
 });
 
+function stripCopySuffix(name: string): string {
+  const trimmed = name.trim();
+  const match = /^(.*\S)\s+\((\d+)\)$/.exec(trimmed);
+  if (match && Number(match[2]) >= 2) return match[1].trimEnd();
+  return trimmed;
+}
+
+function slugifyProfile(name: string): string {
+  return (
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "profile"
+  );
+}
+
 function setup(
   initial: ProfilesSnapshot,
   opts: { running?: string; runState?: RunState; signedIn?: boolean } = {},
@@ -83,6 +101,30 @@ function setup(
           stale: false,
           error: null,
         },
+        {
+          loader: "forge",
+          status: "ok",
+          versions: [{ version: "54.1.0", channel: "recommended" }],
+          recommended: "54.1.0",
+          stale: false,
+          error: null,
+        },
+        {
+          loader: "neoforge",
+          status: "ok",
+          versions: [{ version: "21.4.124", channel: "recommended" }],
+          recommended: "21.4.124",
+          stale: false,
+          error: null,
+        },
+        {
+          loader: "quilt",
+          status: "ok",
+          versions: [{ version: "0.28.1", channel: "recommended" }],
+          recommended: "0.28.1",
+          stale: false,
+          error: null,
+        },
       ]),
     ),
     create: vi.fn<ProfilesApi["create"]>(() => Promise.reject(new Error("not used in this test"))),
@@ -116,6 +158,25 @@ function setup(
       return Promise.resolve(current);
     }),
     setVersion: vi.fn<ProfilesApi["setVersion"]>((id, minecraft, loaderVersion) => {
+      const target = current.profiles.find((p) => p.id === id);
+      if (!target) return Promise.reject(new BackendError("missing", "not_found"));
+      if (target.kind === "vanilla" && loaderVersion != null) {
+        return Promise.reject(
+          new BackendError("a Vanilla profile cannot specify a loader version", "storage"),
+        );
+      }
+      const nextLoaderVersion =
+        target.kind === "modded"
+          ? loaderVersion?.mode === "pinned"
+            ? loaderVersion.version
+            : null
+          : null;
+      const unchanged =
+        target.minecraft === minecraft &&
+        (target.kind === "vanilla" || target.loaderVersion === nextLoaderVersion);
+      if (unchanged) {
+        return Promise.resolve(current);
+      }
       current = {
         ...current,
         profiles: current.profiles.map((p) =>
@@ -123,12 +184,7 @@ function setup(
             ? {
                 ...p,
                 minecraft,
-                loaderVersion:
-                  p.kind === "modded"
-                    ? loaderVersion?.mode === "pinned"
-                      ? loaderVersion.version
-                      : "0.16.10"
-                    : null,
+                loaderVersion: nextLoaderVersion,
                 ready: false,
               }
             : p,
@@ -139,8 +195,37 @@ function setup(
     duplicate: vi.fn<ProfilesApi["duplicate"]>((id) => {
       const src = current.profiles.find((p) => p.id === id);
       if (!src) return Promise.reject(new BackendError("missing", "not_found"));
-      const copyName = `${src.name} (2)`;
-      const copyId = `${src.id}-2`;
+      const takenNames = new Set(current.profiles.map((p) => p.name.trim().toLowerCase()));
+      const unreadable = new Set((current.unreadable ?? []).map((u) => u.toLowerCase()));
+      const stem = stripCopySuffix(src.name);
+      let copyName = "Profile (copy)";
+      for (let n = 2; n <= 9999; n += 1) {
+        const suffix = ` (${n})`;
+        const head = stem.slice(0, Math.max(0, 64 - suffix.length)).trimEnd();
+        const candidate = head ? `${head}${suffix}` : `Profile${suffix}`;
+        if (
+          !takenNames.has(candidate.toLowerCase()) &&
+          !unreadable.has(slugifyProfile(candidate))
+        ) {
+          copyName = candidate;
+          break;
+        }
+      }
+      const baseId = slugifyProfile(copyName);
+      const takenIds = new Set([
+        ...current.profiles.map((p) => p.id),
+        ...(current.unreadable ?? []),
+      ]);
+      let copyId = baseId;
+      if (takenIds.has(copyId)) {
+        for (let n = 2; n <= 9999; n += 1) {
+          const candidate = `${baseId}-${n}`;
+          if (!takenIds.has(candidate)) {
+            copyId = candidate;
+            break;
+          }
+        }
+      }
       const copy = { ...src, id: copyId, name: copyName, playtimeSeconds: 0 };
       current = {
         ...current,
@@ -195,7 +280,13 @@ function setup(
   return { api, launch, accounts };
 }
 
-const flush = async () => act(async () => void (await Promise.resolve()));
+const flush = async () => {
+  await act(async () => {
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
+  });
+};
 
 const openMenu = async (name: RegExp = /Profile: /) => {
   fireEvent.click(screen.getByRole("button", { name }));
@@ -436,6 +527,12 @@ describe("Profile settings dialog", () => {
     await waitFor(() => expect(api.setMemory).toHaveBeenCalledWith("survival", 4608));
     expect(slider.getAttribute("aria-valuetext")).toBe("4.5 GB");
 
+    // Blur commit
+    fireEvent.change(slider, { target: { value: "5120" } });
+    fireEvent.blur(slider);
+    await waitFor(() => expect(api.setMemory).toHaveBeenCalledWith("survival", 5120));
+    expect(slider.getAttribute("aria-valuetext")).toBe("5 GB");
+
     // Backend invalid_memory refusal formats {min} and {max} in GB
     api.setMemory.mockRejectedValueOnce(
       new BackendError("unsafe", "invalid_memory", { params: { min: 1024, max: 12288 } }),
@@ -488,31 +585,68 @@ describe("Profile settings dialog", () => {
     );
     expect(d.getByText("Starts with Minecraft’s standard window size.")).toBeTruthy();
 
-    // Switching to Fixed size calls setResolution with 1280x720
+    // Toggle failure surfaces backend error and stays on Game default
+    api.setResolution.mockRejectedValueOnce(new BackendError("busy", "already_running"));
+    fireEvent.click(d.getByRole("radio", { name: "Fixed size" }));
+    expect((await d.findByRole("alert")).textContent).toBe(
+      "This profile is starting or running. Close the game first.",
+    );
+    expect(d.getByRole("radio", { name: "Game default" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+
+    // Switching to Fixed size calls setResolution with 1280x720 and leaves Apply size disabled
     fireEvent.click(d.getByRole("radio", { name: "Fixed size" }));
     await waitFor(() =>
       expect(api.setResolution).toHaveBeenCalledWith("survival", { width: 1280, height: 720 }),
     );
     const widthInput = await d.findByLabelText<HTMLInputElement>("Window width");
     const heightInput = d.getByLabelText<HTMLInputElement>("Window height");
+    const applySize = d.getByRole<HTMLButtonElement>("button", { name: "Apply size" });
     expect(widthInput.value).toBe("1280");
     expect(heightInput.value).toBe("720");
+    expect(applySize.disabled).toBe(true);
 
-    // Out-of-range dimensions are caught inline without calling the backend
-    fireEvent.change(widthInput, { target: { value: "100" } });
-    fireEvent.click(d.getByRole("button", { name: "Apply size" }));
+    // Out-of-range, max-width, height, and non-numeric dimensions are caught inline without calling the backend
+    const resCallsAfterToggle = api.setResolution.mock.calls.length;
+    for (const [w, h] of [
+      ["100", "720"],
+      ["8000", "720"],
+      ["1280", "100"],
+      ["1280", "5000"],
+      ["abc", "720"],
+    ]) {
+      fireEvent.change(widthInput, { target: { value: w } });
+      fireEvent.change(heightInput, { target: { value: h } });
+      expect(applySize.disabled).toBe(false);
+      fireEvent.click(applySize);
+      expect((await d.findByRole("alert")).textContent).toBe(
+        "Choose a window size between 320×240 and 7680×4320.",
+      );
+      expect(api.setResolution).toHaveBeenCalledTimes(resCallsAfterToggle);
+    }
+
+    // Apply size backend failure surfaces inline error
+    api.setResolution.mockRejectedValueOnce(
+      new BackendError("bad resolution", "invalid_resolution", {
+        params: { minWidth: 320, maxWidth: 7680, minHeight: 240, maxHeight: 4320 },
+      }),
+    );
+    fireEvent.change(widthInput, { target: { value: "1600" } });
+    fireEvent.change(heightInput, { target: { value: "900" } });
+    fireEvent.click(applySize);
     expect((await d.findByRole("alert")).textContent).toBe(
       "Choose a window size between 320×240 and 7680×4320.",
     );
-    expect(api.setResolution).toHaveBeenCalledTimes(1);
 
-    // Valid dimensions commit
+    // Valid dimensions commit and disable Apply size again
     fireEvent.change(widthInput, { target: { value: "1920" } });
     fireEvent.change(heightInput, { target: { value: "1080" } });
-    fireEvent.click(d.getByRole("button", { name: "Apply size" }));
+    fireEvent.click(applySize);
     await waitFor(() =>
       expect(api.setResolution).toHaveBeenCalledWith("survival", { width: 1920, height: 1080 }),
     );
+    await waitFor(() => expect(applySize.disabled).toBe(true));
 
     // Back to Game default clears resolution
     fireEvent.click(d.getByRole("radio", { name: "Game default" }));
@@ -567,6 +701,13 @@ describe("Profile settings dialog", () => {
     fireEvent.click(d.getByRole("button", { name: "Open profile folder" }));
     expect((await d.findByRole("alert")).textContent).toBe("Windows couldn’t open that folder.");
 
+    // Duplicate failure surfaces inline in the Files section
+    api.duplicate.mockRejectedValueOnce(new BackendError("disk full", "duplicate_failed"));
+    fireEvent.click(d.getByRole("button", { name: "Duplicate" }));
+    expect((await d.findByRole("alert")).textContent).toBe(
+      "Could not duplicate the profile. Check available disk space and close anything using its folder.",
+    );
+
     // Verify files delegates to PrepareDialog ({ verify: true })
     fireEvent.click(d.getByRole("button", { name: "Verify files" }));
     await waitFor(() => expect(api.prepare).toHaveBeenCalledWith("survival", { verify: true }));
@@ -582,6 +723,71 @@ describe("Profile settings dialog", () => {
     expect(confirmDialog.textContent).toContain("Nothing will be permanently deleted.");
     fireEvent.click(within(confirmDialog).getByRole("button", { name: "Remove from Clade" }));
     await waitFor(() => expect(api.remove).toHaveBeenCalledWith("survival"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("disables Verify files when signed out while keeping profile edits active", async () => {
+    setup(snap([profile()]), { signedIn: false });
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Verify files" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Remove from Clade…" }).disabled).toBe(
+      false,
+    );
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Duplicate" }).disabled).toBe(false);
+  });
+
+  it("blocks backdrop close when dirty and locks Escape and actions while saving", async () => {
+    const { api } = setup(snap([profile()]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+    const input = d.getByLabelText<HTMLInputElement>("Name");
+
+    // Dirty dialog stays open on backdrop press
+    fireEvent.change(input, { target: { value: "Survival Plus" } });
+    const overlay = document.querySelector<HTMLElement>('[data-slot="dialog-overlay"]');
+    expect(overlay).toBeTruthy();
+    if (overlay) {
+      fireEvent.pointerDown(overlay, { button: 0 });
+      fireEvent.mouseDown(overlay);
+      fireEvent.click(overlay);
+    }
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // Pending save locks actions and Escape
+    let resolveRename!: (snap: ProfilesSnapshot) => void;
+    api.rename.mockImplementationOnce(
+      () =>
+        new Promise<ProfilesSnapshot>((resolve) => {
+          resolveRename = resolve;
+        }),
+    );
+    fireEvent.click(d.getByRole("button", { name: "Save" }));
+
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Done" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Duplicate" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Remove from Clade…" }).disabled).toBe(
+      true,
+    );
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    resolveRename(snap([profile({ name: "Survival Plus" })]));
+    await waitFor(() =>
+      expect(d.getByRole<HTMLButtonElement>("button", { name: "Done" }).disabled).toBe(false),
+    );
+
+    // Clean dialog closes on backdrop press
+    const cleanOverlay = document.querySelector<HTMLElement>('[data-slot="dialog-overlay"]');
+    if (cleanOverlay) {
+      fireEvent.pointerDown(cleanOverlay, { button: 0 });
+      fireEvent.mouseDown(cleanOverlay);
+      fireEvent.click(cleanOverlay);
+    }
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
@@ -601,6 +807,9 @@ describe("Profile settings dialog", () => {
 
     expect(d.getByLabelText<HTMLInputElement>("Name").disabled).toBe(true);
     expect(d.getByRole<HTMLButtonElement>("button", { name: "Save" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Change version…" }).disabled).toBe(
+      true,
+    );
     expect(d.getByRole<HTMLButtonElement>("radio", { name: "Launcher default" }).disabled).toBe(
       true,
     );
@@ -619,6 +828,7 @@ describe("Profile settings dialog", () => {
     expect(d.getByRole<HTMLButtonElement>("button", { name: "Remove from Clade…" }).disabled).toBe(
       true,
     );
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Duplicate" }).disabled).toBe(true);
 
     const openFolder = d.getByRole<HTMLButtonElement>("button", { name: "Open profile folder" });
     expect(openFolder.disabled).toBe(false);
@@ -642,17 +852,26 @@ describe("unreadable profile folders recovery strip", () => {
 
     const single = setup(snap([profile()], { unreadable: ["broken-world"] }));
     await flush();
-    const oneBanner = screen.getByRole("status");
+    const oneBanner = await screen.findByRole("status");
     expect(oneBanner.textContent).toContain(
       "1 profile folder couldn’t be read (broken-world). Its files were left untouched.",
     );
+    single.api.openInstancesFolder.mockRejectedValueOnce(
+      new BackendError("explorer failed", "open_failed"),
+    );
     fireEvent.click(within(oneBanner).getByRole("button", { name: "Open profiles folder" }));
-    await waitFor(() => expect(single.api.openInstancesFolder).toHaveBeenCalledTimes(1));
+    expect((await within(oneBanner).findByRole("alert")).textContent).toBe(
+      "Windows couldn’t open that folder.",
+    );
+
+    fireEvent.click(within(oneBanner).getByRole("button", { name: "Open profiles folder" }));
+    await waitFor(() => expect(single.api.openInstancesFolder).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(oneBanner).queryByRole("alert")).toBeNull());
     cleanup();
 
     setup(snap([profile()], { unreadable: ["broken-world", "corrupt-pack"] }));
     await flush();
-    expect(screen.getByRole("status").textContent).toContain(
+    expect((await screen.findByRole("status")).textContent).toContain(
       "2 profile folders couldn’t be read (broken-world, corrupt-pack). Their files were left untouched.",
     );
   });
@@ -719,7 +938,6 @@ describe("Profile settings and unreadable notice in Russian", () => {
   });
 
   it("changes a profile's Minecraft version in place and duplicates a profile onto the new copy", async () => {
-    setLocale("en");
     await saveUiMode("advanced");
     const { api } = setup(snap([profile()]));
     await flush();
@@ -747,9 +965,237 @@ describe("Profile settings and unreadable notice in Russian", () => {
     // Duplicate creates "Survival (2)", selects it, and switches the open dialog onto the copy
     fireEvent.click(d.getByRole("button", { name: "Duplicate" }));
     await waitFor(() => expect(api.duplicate).toHaveBeenCalledWith("survival"));
-    expect(await screen.findByLabelText<HTMLInputElement>("Name")).toHaveProperty(
-      "value",
-      "Survival (2)",
+    await waitFor(() =>
+      expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Survival (2)"),
     );
+    expect(await d.findByRole("heading", { name: "Survival (2)" })).toBeTruthy();
+
+    // Duplicating "Survival (2)" increments to "Survival (3)" rather than "Survival (2) (2)"
+    fireEvent.click(d.getByRole("button", { name: "Duplicate" }));
+    await waitFor(() => expect(api.duplicate).toHaveBeenCalledWith("survival-2"));
+    await waitFor(() =>
+      expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Survival (3)"),
+    );
+  });
+
+  it("pins a modded loader version in Advanced mode, hides the loader picker in Simple mode, and surfaces loader compatibility errors", async () => {
+    const modded = (over: Partial<ProfileSummary> = {}) =>
+      profile({
+        id: "fabric-pack",
+        name: "Fabric Pack",
+        minecraft: "1.21.4",
+        kind: "modded",
+        loader: "fabric",
+        loaderVersion: "0.16.9",
+        ready: true,
+        ...over,
+      });
+
+    // Simple mode hides the loader version combobox and automatically picks recommended when saving
+    const simple = setup(snap([modded()]));
+    await flush();
+    const simpleDialog = await openProfileSettings(/Profile: Fabric Pack/);
+    const sd = within(simpleDialog);
+
+    fireEvent.click(sd.getByRole("button", { name: "Change version…" }));
+    await waitFor(() => expect(simple.api.loaderOptions).toHaveBeenCalledWith("1.21.4"));
+    await waitFor(() =>
+      expect(sd.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "1.21.4",
+      ),
+    );
+    expect(sd.queryByRole("combobox", { name: "Fabric version" })).toBeNull();
+    expect(
+      sd.getByText(
+        "Worlds and options stay in place. Check that any mods in your mods folder match the new version.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(sd.getByRole("button", { name: "Save version" }));
+    await waitFor(() =>
+      expect(simple.api.setVersion).toHaveBeenCalledWith("fabric-pack", "1.21.4", {
+        mode: "pinned",
+        version: "0.16.10",
+      }),
+    );
+    cleanup();
+
+    // Advanced mode lets the user pin a specific loader version and preserves Save disabled when unchanged
+    await saveUiMode("advanced");
+    const adv = setup(snap([modded({ loaderVersion: "0.16.10" })]));
+    await flush();
+    const advDialog = await openProfileSettings(/Profile: Fabric Pack/);
+    const ad = within(advDialog);
+
+    fireEvent.click(ad.getByRole("button", { name: "Change version…" }));
+    await waitFor(() =>
+      expect(ad.getByRole("combobox", { name: "Fabric version" }).textContent).toContain("0.16.10"),
+    );
+    const saveVersion = ad.getByRole<HTMLButtonElement>("button", { name: "Save version" });
+    expect(saveVersion.disabled).toBe(true);
+
+    fireEvent.click(ad.getByRole("combobox", { name: "Fabric version" }));
+    const loaderOption = await screen.findByRole("option", { name: /0\.16\.9/ });
+    fireEvent.pointerDown(loaderOption);
+    fireEvent.click(loaderOption);
+    expect(saveVersion.disabled).toBe(false);
+    fireEvent.click(saveVersion);
+
+    await waitFor(() =>
+      expect(adv.api.setVersion).toHaveBeenCalledWith("fabric-pack", "1.21.4", {
+        mode: "pinned",
+        version: "0.16.9",
+      }),
+    );
+    expect(await ad.findByText("Fabric 1.21.4 · 0.16.9")).toBeTruthy();
+    expect(ad.getByText("Needs setup")).toBeTruthy();
+    cleanup();
+
+    // Loader compatibility errors: status "none", status "unavailable", and loaderOptions rejection
+    for (const scenario of [
+      {
+        setupMock: (api: ReturnType<typeof setup>["api"]) =>
+          api.loaderOptions.mockResolvedValue([
+            {
+              loader: "fabric",
+              status: "none",
+              versions: [],
+              recommended: null,
+              stale: false,
+              error: null,
+            },
+          ]),
+        expected: "Fabric has no version for 1.21.4",
+      },
+      {
+        setupMock: (api: ReturnType<typeof setup>["api"]) =>
+          api.loaderOptions.mockResolvedValue([
+            {
+              loader: "fabric",
+              status: "unavailable",
+              versions: [],
+              recommended: null,
+              stale: false,
+              error: "offline",
+            },
+          ]),
+        expected: "Fabric could not be checked",
+      },
+      {
+        setupMock: (api: ReturnType<typeof setup>["api"]) =>
+          api.loaderOptions.mockRejectedValue(new Error("network down")),
+        expected: "Could not check which loaders fit. Check your connection.",
+      },
+    ]) {
+      await saveUiMode("advanced");
+      const errSetup = setup(snap([modded({ loaderVersion: "0.16.10" })]));
+      scenario.setupMock(errSetup.api);
+      await flush();
+
+      const errDialog = await openProfileSettings(/Profile: Fabric Pack/);
+      const ed = within(errDialog);
+      fireEvent.click(ed.getByRole("button", { name: "Change version…" }));
+      expect((await ed.findByRole("alert")).textContent).toBe(scenario.expected);
+      expect(ed.getByRole<HTMLButtonElement>("button", { name: "Save version" }).disabled).toBe(
+        true,
+      );
+      cleanup();
+    }
+  });
+
+  it("handles versionCatalog errors with Try again, stale notice, empty filtered list, setVersion rejection, and Cancel", async () => {
+    await saveUiMode("advanced");
+    const { api } = setup(snap([profile()]));
+    api.versionCatalog.mockRejectedValueOnce(new BackendError("offline", "catalog_unavailable"));
+    api.versionCatalog.mockResolvedValueOnce({
+      entries: [
+        { id: "1.21.5", kind: "release", releaseTime: "2025-03-25T10:00:00+00:00" },
+        { id: "1.21.4", kind: "release", releaseTime: "2024-12-03T10:12:57+00:00" },
+        { id: "25w10a", kind: "snapshot", releaseTime: "2025-03-05T10:00:00+00:00" },
+      ],
+      latestRelease: "1.21.5",
+      latestSnapshot: "25w10a",
+      fetchedAt: 1_700_000_000,
+      origin: "cache_stale",
+      stale: true,
+      networkError: "offline",
+    });
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+
+    fireEvent.click(d.getByRole("button", { name: "Change version…" }));
+    expect(await d.findByText("Versions unavailable")).toBeTruthy();
+    expect((await d.findByRole("alert")).textContent).toContain(
+      "Could not load the version list. Check your connection and try again.",
+    );
+
+    fireEvent.click(d.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(api.versionCatalog).toHaveBeenCalledTimes(2));
+    expect(await d.findByText(staleNote(1_700_000_000))).toBeTruthy();
+
+    // Empty filtered list disables Save version and shows empty-list copy
+    fireEvent.click(d.getByRole("radio", { name: "Historical" }));
+    expect(await d.findByText("No versions in this list.")).toBeTruthy();
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Save version" }).disabled).toBe(true);
+
+    // Switching to Snapshots and failing setVersion keeps the editor open with inline alert
+    fireEvent.click(d.getByRole("radio", { name: "Snapshots" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "25w10a",
+      ),
+    );
+    api.setVersion.mockRejectedValueOnce(new BackendError("busy", "already_running"));
+    fireEvent.click(d.getByRole("button", { name: "Save version" }));
+    expect((await d.findByRole("alert")).textContent).toBe(
+      "This profile is starting or running. Close the game first.",
+    );
+    expect(d.getByRole("button", { name: "Save version" })).toBeTruthy();
+
+    // Cancel exits the version editor without altering readiness
+    fireEvent.click(d.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(d.queryByRole("button", { name: "Save version" })).toBeNull());
+    expect(d.getByRole("button", { name: "Change version…" })).toBeTruthy();
+    expect(d.getByText("Ready")).toBeTruthy();
+  });
+
+  it("normalizes leading zeroes in window resolution and locks VersionEditor controls while saving", async () => {
+    await saveUiMode("advanced");
+    const { api } = setup(snap([profile({ resolution: { width: 1280, height: 720 } })]));
+    await flush();
+
+    const dialog = await openProfileSettings();
+    const d = within(dialog);
+
+    const heightInput = d.getByLabelText<HTMLInputElement>("Window height");
+    fireEvent.change(heightInput, { target: { value: "0720" } });
+    const applyResBtn = d.getByRole<HTMLButtonElement>("button", { name: "Apply size" });
+    expect(applyResBtn.disabled).toBe(true);
+
+    let resolveVersion!: (next: ProfilesSnapshot) => void;
+    api.setVersion.mockImplementationOnce(
+      () =>
+        new Promise<ProfilesSnapshot>((resolve) => {
+          resolveVersion = resolve;
+        }),
+    );
+    fireEvent.click(d.getByRole("button", { name: "Change version…" }));
+    await waitFor(() =>
+      expect(d.getByRole("combobox", { name: "Minecraft version" }).textContent).toContain(
+        "1.21.4",
+      ),
+    );
+    fireEvent.click(d.getByRole("radio", { name: "Snapshots" }));
+    fireEvent.click(d.getByRole("button", { name: "Save version" }));
+
+    expect(d.getByRole<HTMLButtonElement>("radio", { name: "Releases" }).disabled).toBe(true);
+    expect(d.getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(true);
+
+    await act(async () => {
+      resolveVersion(snap([profile({ minecraft: "25w10a", ready: false })]));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(d.queryByRole("button", { name: "Save version" })).toBeNull());
   });
 });
